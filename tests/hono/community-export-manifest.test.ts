@@ -418,6 +418,12 @@ describe('Slice 13a deterministic community export manifest builder', () => {
       .values({
         communityId: 1,
         basemapStyle: 'terrain',
+        mapboxStyleUrl: 'mapbox://styles/target-nation/map-v1',
+        mapboxAccessToken: 'pk.test-export-mapbox-1',
+        exposeMapboxCredentials: true,
+        mapbox3d: true,
+        protomapsApiKey: 'pm-test-export-1',
+        protomapsBasemapStyle: 'contrast',
         centerLatitude: -3.1,
         centerLongitude: -60.02,
         staticMapFileId,
@@ -598,6 +604,18 @@ describe('Slice 13a deterministic community export manifest builder', () => {
     expect(built.manifest.community.status).toBe('active');
     expect(built.manifest.community.visibility).toBe('private');
     expect(built.manifest.mapConfig?.staticMapFileId).toBe(ids.staticMapFileId);
+    expect(built.manifest.mapConfig?.mapboxStyleUrl).toBe(
+      'mapbox://styles/target-nation/map-v1'
+    );
+    expect(built.manifest.mapConfig?.exposeMapboxCredentials).toBe(true);
+    expect(built.manifest.mapConfig?.mapbox3d).toBe(true);
+    expect(built.manifest.mapConfig?.protomapsBasemapStyle).toBe('contrast');
+    expect(built.manifest.mapConfig?.credentials).toEqual({
+      classification: 'community_owned_map_provider_credential',
+      containsCredentials: true,
+      mapboxAccessToken: 'pk.test-export-mapbox-1',
+      protomapsApiKey: 'pm-test-export-1',
+    });
     expect(built.manifest.users).toHaveLength(1);
     expect(built.manifest.users[0]!.id).toBe(10);
     expect(built.manifest.places.map((p) => p.id)).toEqual([101, 102]);

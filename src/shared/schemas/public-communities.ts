@@ -53,6 +53,10 @@ export type PublicCommunityBranding = z.infer<
 export const PublicCommunityMapConfigSchema = z.object({
   styleUrl: z.string().nullable(),
   basemapStyle: z.string().nullable(),
+  mapboxStyleUrl: z.string().nullable(),
+  mapboxAccessToken: z.string().nullable(),
+  mapbox3d: z.boolean(),
+  protomapsBasemapStyle: z.string().nullable(),
   centerLatitude: z.number().nullable(),
   centerLongitude: z.number().nullable(),
   southWestLatitude: z.number().nullable(),

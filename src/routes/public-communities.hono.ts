@@ -21,6 +21,7 @@ export interface PublicCommunityRoutesOptions {
   repository: PublicCommunitiesRepository;
   storage?: FoundationStorage;
   publicOrigin?: string;
+  offlineMode?: boolean;
 }
 
 const emptyStorage: FoundationStorage = {
@@ -34,7 +35,9 @@ export function registerPublicCommunityRoutes(
   app: Hono<any>,
   options: PublicCommunityRoutesOptions
 ): void {
-  const service = new PublicCommunitiesService(options.repository);
+  const service = new PublicCommunitiesService(options.repository, {
+    offlineMode: options.offlineMode,
+  });
   const contentRepository = new PublicContentRepository(
     options.repository.connection,
     options.repository

@@ -16,6 +16,10 @@
  */
 
 import { BOOTSTRAP_SECRET_MIN_LENGTH } from '../shared/auth-policy.js';
+import {
+  isPublicMapboxToken,
+  isSecretMapboxToken,
+} from '../shared/utils/map-config.js';
 
 /** Modes that enforce the production rules; unset resolves to `production`. */
 export type V2RuntimeEnvironment =
@@ -150,6 +154,11 @@ export interface V2RuntimeConfig {
    * Never logged.
    */
   bootstrapSecret?: string;
+  /**
+   * Optional instance-level public Mapbox token (`MAPBOX_ACCESS_TOKEN`),
+   * used as fallback on authenticated reads when a community has none.
+   */
+  mapboxAccessToken?: string;
 }
 
 /** Setting names differ per platform; messages always use the caller's name. */
@@ -160,6 +169,7 @@ export interface V2RuntimeSettingNames {
   secureCookies: string;
   authServerSecret: string;
   bootstrapSecret: string;
+  mapboxAccessToken?: string;
 }
 
 export interface V2RuntimeCoreInput {
@@ -173,6 +183,8 @@ export interface V2RuntimeCoreInput {
   authServerSecret?: string | undefined;
   /** Installation bootstrap secret from the deployment environment only. */
   bootstrapSecret?: string | undefined;
+  /** Optional instance-level public Mapbox token (`pk.*`). */
+  mapboxAccessToken?: string | undefined;
   names: V2RuntimeSettingNames;
 }
 
@@ -325,6 +337,23 @@ export function validateV2RuntimeCore(
     );
   }
 
+  const mapboxSettingName = names.mapboxAccessToken ?? 'MAPBOX_ACCESS_TOKEN';
+  const rawMapboxAccessToken = input.mapboxAccessToken?.trim();
+  let mapboxAccessToken: string | undefined;
+  if (rawMapboxAccessToken !== undefined && rawMapboxAccessToken !== '') {
+    if (isSecretMapboxToken(rawMapboxAccessToken)) {
+      problems.push(
+        `${mapboxSettingName} must be a public Mapbox token (pk.*), not a secret sk.* token`
+      );
+    } else if (!isPublicMapboxToken(rawMapboxAccessToken)) {
+      problems.push(
+        `${mapboxSettingName} must be a valid public Mapbox token (pk.*)`
+      );
+    } else {
+      mapboxAccessToken = rawMapboxAccessToken;
+    }
+  }
+
   if (problems.length > 0) throw new V2RuntimeConfigError(problems);
   return {
     environment,
@@ -335,6 +364,7 @@ export function validateV2RuntimeCore(
     secureCookies,
     serverSecret: secret || undefined,
     bootstrapSecret: bootstrapSecret || undefined,
+    mapboxAccessToken,
   };
 }
 
@@ -380,6 +410,7 @@ export interface NodeV2Env {
   HONO_ALLOW_PLAIN_HTTP?: string | undefined;
   AUTH_SERVER_SECRET?: string | undefined;
   BOOTSTRAP_SECRET?: string | undefined;
+  MAPBOX_ACCESS_TOKEN?: string | undefined;
 }
 
 export interface NodeV2RuntimeConfig extends V2RuntimeConfig {
@@ -416,6 +447,7 @@ export function validateNodeV2Runtime(env: NodeV2Env): NodeV2RuntimeConfig {
     allowPlainHttp: env.HONO_ALLOW_PLAIN_HTTP === 'true',
     authServerSecret: env.AUTH_SERVER_SECRET,
     bootstrapSecret: env.BOOTSTRAP_SECRET,
+    mapboxAccessToken: env.MAPBOX_ACCESS_TOKEN,
     names: {
       environment: 'NODE_ENV',
       publicOrigin: 'HONO_PUBLIC_ORIGIN',
@@ -423,6 +455,7 @@ export function validateNodeV2Runtime(env: NodeV2Env): NodeV2RuntimeConfig {
       secureCookies: 'secureCookies',
       authServerSecret: 'AUTH_SERVER_SECRET',
       bootstrapSecret: 'BOOTSTRAP_SECRET',
+      mapboxAccessToken: 'MAPBOX_ACCESS_TOKEN',
     },
   });
   return { ...config, port };
@@ -441,6 +474,7 @@ export interface WorkerV2Env {
    * value keeps bootstrap fail-closed.
    */
   BOOTSTRAP_SECRET?: string | undefined;
+  MAPBOX_ACCESS_TOKEN?: string | undefined;
   DB?: unknown;
   MEDIA?: unknown;
 }
@@ -463,6 +497,7 @@ export function validateWorkerV2Runtime(env: WorkerV2Env): V2RuntimeConfig {
       secureCookies: true,
       authServerSecret: env.AUTH_SERVER_SECRET,
       bootstrapSecret: env.BOOTSTRAP_SECRET,
+      mapboxAccessToken: env.MAPBOX_ACCESS_TOKEN,
       names: {
         environment: 'ENVIRONMENT',
         publicOrigin: 'PUBLIC_ORIGIN',
@@ -470,6 +505,7 @@ export function validateWorkerV2Runtime(env: WorkerV2Env): V2RuntimeConfig {
         secureCookies: 'secureCookies',
         authServerSecret: 'AUTH_SERVER_SECRET',
         bootstrapSecret: 'BOOTSTRAP_SECRET',
+        mapboxAccessToken: 'MAPBOX_ACCESS_TOKEN',
       },
     });
   } catch (error) {

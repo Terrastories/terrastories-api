@@ -2973,6 +2973,10 @@ export async function createFixture(
       return (
         mapConfig.styleUrl === 'https://tiles.example.test/style.json' &&
         mapConfig.basemapStyle === 'terrain' &&
+        mapConfig.mapboxStyleUrl === null &&
+        mapConfig.mapboxAccessToken === null &&
+        mapConfig.mapbox3d === false &&
+        mapConfig.protomapsBasemapStyle === null &&
         mapConfig.centerLatitude === -3.1 &&
         mapConfig.centerLongitude === -60.02 &&
         mapConfig.southWestLatitude === -4 &&
@@ -3052,7 +3056,9 @@ export async function createFixture(
           own.mapConfig as unknown as Record<string, unknown>
         ) &&
         !text.includes(String(restrictedFileId)) &&
-        !text.includes('mapboxAccessToken')
+        !text.includes('pk.test-') &&
+        !text.includes('protomapsApiKey') &&
+        !text.includes('exposeMapboxCredentials')
       );
     };
     const publicCommunityDetailCheck = (body: unknown): boolean => {
@@ -3101,7 +3107,9 @@ export async function createFixture(
         !text.includes('QA members-only affiliation') &&
         !text.includes('QA restricted place') &&
         !text.includes('QA unassociated place') &&
-        !text.includes('mapboxAccessToken')
+        !text.includes('pk.test-') &&
+        !text.includes('protomapsApiKey') &&
+        !text.includes('exposeMapboxCredentials')
       );
     };
     const searchSaoCheck = (body: unknown): boolean => {
@@ -5921,7 +5929,7 @@ export async function createFixture(
     // password change (which revokes the account's other sessions) and the
     // disable/re-enable cycle cannot disturb the shared persona credentials or
     // the exact user lists pinned by the user-management journeys.
-    const [selfServiceCommunity] = await db
+    const selfServiceCommunityResult = await db
       .insert(communities)
       .values({
         name: 'QA self-service community',
@@ -5930,6 +5938,35 @@ export async function createFixture(
         isActive: true,
       })
       .returning();
+    const selfServiceCommunity = selfServiceCommunityResult[0]!;
+    // Dedicated private community for per-community Mapbox & Protomaps QA journeys.
+    const [mapboxCommunity] = await db
+      .insert(communities)
+      .values({
+        name: 'QA mapbox community',
+        slug: 'qa-mapbox-community',
+        publicStories: false,
+        isActive: true,
+      })
+      .returning();
+    const mapboxCredentials = {
+      admin: { email: 'qa-mapbox-admin@example.test', role: 'admin' },
+      member: { email: 'qa-mapbox-member@example.test', role: 'member' },
+    } as const;
+    for (const key of ['admin', 'member'] as const) {
+      await db.insert(users).values({
+        email: mapboxCredentials[key].email,
+        ...deriveUserIdentityColumns({
+          email: mapboxCredentials[key].email,
+        }),
+        ...verifier,
+        firstName: 'QA',
+        lastName: `Mapbox${key}`,
+        role: sql`${mapboxCredentials[key].role}`,
+        communityId: mapboxCommunity.id,
+        isActive: true,
+      });
+    }
     const selfServiceCredentials = {
       admin: { email: 'qa-selfsvc-admin@example.test', role: 'admin' },
       member: { email: 'qa-selfsvc-member@example.test', role: 'member' },
@@ -12323,6 +12360,384 @@ export async function createFixture(
             path: '/v2/auth/logout',
             expected: 204,
             useSavedCookie: 'claimJourneySysAdmin',
+          },
+        ],
+      },
+      {
+        persona: 'mapbox_admin',
+        steps: [
+          {
+            name: 'mapbox admin logs in',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.210',
+              'cf-connecting-ip': '203.0.113.210',
+            },
+            body: loginBody(mapboxCredentials.admin.email),
+            check: ownUser(
+              mapboxCredentials.admin.email,
+              'admin',
+              liveSessionCookie,
+              mapboxCommunity.id
+            ),
+            checkHeaders: hasSessionCookie,
+          },
+          {
+            name: 'mapbox admin opens community visibility to public',
+            method: 'PATCH',
+            path: '/v2/community',
+            expected: 200,
+            body: { visibility: 'public' },
+            check: (body) => {
+              const parsed = CommunityReadDetailResponseSchema.safeParse(body);
+              return parsed.success && parsed.data.data.visibility === 'public';
+            },
+          },
+          {
+            name: 'mapbox admin rejects sk.* secret token with 422',
+            method: 'PUT',
+            path: '/v2/community/map-config',
+            expected: 422,
+            body: {
+              mapboxStyleUrl: 'mapbox://styles/qa-community/territory-v1',
+              mapboxAccessToken: 'sk.test-qa-rejected',
+            },
+            check: (body) =>
+              !JSON.stringify(body).includes('sk.test-qa-rejected'),
+          },
+          {
+            name: 'mapbox admin rejects half-pair without token',
+            method: 'PUT',
+            path: '/v2/community/map-config',
+            expected: 400,
+            body: {
+              mapboxStyleUrl: 'mapbox://styles/qa-community/territory-v1',
+            },
+            check: validationFieldCheck('mapboxAccessToken'),
+          },
+          {
+            name: 'mapbox admin sets Mapbox style + pk.* token + Protomaps (unexposed)',
+            method: 'PUT',
+            path: '/v2/community/map-config',
+            expected: 200,
+            body: {
+              mapboxStyleUrl: 'mapbox://styles/qa-community/territory-v1',
+              mapboxAccessToken: 'pk.test-qa-mapbox-token',
+              exposeMapboxCredentials: false,
+              mapbox3d: true,
+              protomapsApiKey: 'pm-test-qa-key',
+              protomapsBasemapStyle: 'contrast',
+            },
+            check: (body) => {
+              const parsed =
+                PutCommunityMapConfigResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.mapboxStyleUrl ===
+                  'mapbox://styles/qa-community/territory-v1' &&
+                parsed.data.data.mapboxAccessToken ===
+                  'pk.test-qa-mapbox-token' &&
+                parsed.data.data.exposeMapboxCredentials === false &&
+                parsed.data.data.mapbox3d === true &&
+                parsed.data.data.protomapsApiKey === 'pm-test-qa-key' &&
+                parsed.data.data.protomapsBasemapStyle === 'contrast'
+              );
+            },
+          },
+          {
+            name: 'mapbox admin logs out before member check',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+          },
+        ],
+      },
+      {
+        persona: 'mapbox_member',
+        steps: [
+          {
+            name: 'mapbox member logs in',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.211',
+              'cf-connecting-ip': '203.0.113.211',
+            },
+            body: loginBody(mapboxCredentials.member.email),
+            check: ownUser(
+              mapboxCredentials.member.email,
+              'member',
+              liveSessionCookie,
+              mapboxCommunity.id
+            ),
+            checkHeaders: hasSessionCookie,
+          },
+          {
+            name: 'mapbox member reads community map-config with token and protomaps fields',
+            method: 'GET',
+            path: '/v2/community/map-config',
+            expected: 200,
+            check: (body) => {
+              const parsed = CommunityMapConfigResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data?.mapboxStyleUrl ===
+                  'mapbox://styles/qa-community/territory-v1' &&
+                parsed.data.data.mapboxAccessToken ===
+                  'pk.test-qa-mapbox-token' &&
+                parsed.data.data.mapbox3d === true &&
+                parsed.data.data.protomapsApiKey === 'pm-test-qa-key' &&
+                parsed.data.data.protomapsBasemapStyle === 'contrast'
+              );
+            },
+          },
+          {
+            name: 'mapbox member reads community detail with map-config',
+            method: 'GET',
+            path: '/v2/community',
+            expected: 200,
+            check: (body) => {
+              const parsed = CommunityReadDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.mapConfig?.mapboxAccessToken ===
+                  'pk.test-qa-mapbox-token' &&
+                parsed.data.data.mapConfig.protomapsApiKey === 'pm-test-qa-key'
+              );
+            },
+          },
+          {
+            name: 'mapbox member logs out',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+          },
+        ],
+      },
+      {
+        persona: 'mapbox_anonymous_before_expose',
+        steps: [
+          {
+            name: 'anonymous sees null mapbox token and style on public detail before expose',
+            method: 'GET',
+            path: '/v2/public/communities/qa-mapbox-community',
+            expected: 200,
+            headers: { cookie: '' },
+            check: (body) => {
+              const parsed =
+                PublicCommunityDetailResponseSchema.safeParse(body);
+              const text = JSON.stringify(body) ?? '';
+              return (
+                parsed.success &&
+                parsed.data.data.mapConfig?.mapboxStyleUrl === null &&
+                parsed.data.data.mapConfig.mapboxAccessToken === null &&
+                parsed.data.data.mapConfig.mapbox3d === true &&
+                parsed.data.data.mapConfig.protomapsBasemapStyle ===
+                  'contrast' &&
+                !text.includes('pk.test-qa-mapbox-token') &&
+                !text.includes('pm-test-qa-key')
+              );
+            },
+          },
+          {
+            name: 'anonymous sees null mapbox token and style on explore before expose',
+            method: 'GET',
+            path: '/explore/communities/qa-mapbox-community',
+            expected: 200,
+            headers: { cookie: '' },
+            check: (body) => {
+              const mc = (
+                body as {
+                  data?: {
+                    mapConfig?: {
+                      mapboxAccessToken?: unknown;
+                      mapboxStyle?: unknown;
+                      mapbox3dEnabled?: unknown;
+                    };
+                  };
+                }
+              )?.data?.mapConfig;
+              const text = JSON.stringify(body) ?? '';
+              return (
+                mc?.mapboxAccessToken === null &&
+                mc.mapboxStyle === null &&
+                mc.mapbox3dEnabled === true &&
+                !text.includes('pk.test-qa-mapbox-token') &&
+                !text.includes('pm-test-qa-key')
+              );
+            },
+          },
+        ],
+      },
+      {
+        persona: 'mapbox_expose_and_private_reset',
+        steps: [
+          {
+            name: 'mapbox admin logs in for expose test',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.212',
+              'cf-connecting-ip': '203.0.113.212',
+            },
+            body: loginBody(mapboxCredentials.admin.email),
+            check: ownUser(
+              mapboxCredentials.admin.email,
+              'admin',
+              liveSessionCookie,
+              mapboxCommunity.id
+            ),
+            checkHeaders: hasSessionCookie,
+          },
+          {
+            name: 'mapbox admin enables exposeMapboxCredentials',
+            method: 'PUT',
+            path: '/v2/community/map-config',
+            expected: 200,
+            saveCookieAs: 'mapboxAdminCookie',
+            body: {
+              mapboxStyleUrl: 'mapbox://styles/qa-community/territory-v1',
+              mapboxAccessToken: 'pk.test-qa-mapbox-token',
+              exposeMapboxCredentials: true,
+              mapbox3d: true,
+              protomapsApiKey: 'pm-test-qa-key',
+              protomapsBasemapStyle: 'contrast',
+            },
+            check: (body) => {
+              const parsed =
+                PutCommunityMapConfigResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.exposeMapboxCredentials === true
+              );
+            },
+          },
+          {
+            name: 'anonymous receives exposed mapbox style and pk.* token on public detail',
+            method: 'GET',
+            path: '/v2/public/communities/qa-mapbox-community',
+            expected: 200,
+            headers: { cookie: '' },
+            check: (body) => {
+              const parsed =
+                PublicCommunityDetailResponseSchema.safeParse(body);
+              const text = JSON.stringify(body) ?? '';
+              return (
+                parsed.success &&
+                parsed.data.data.mapConfig?.mapboxStyleUrl ===
+                  'mapbox://styles/qa-community/territory-v1' &&
+                parsed.data.data.mapConfig.mapboxAccessToken ===
+                  'pk.test-qa-mapbox-token' &&
+                !text.includes('pm-test-qa-key')
+              );
+            },
+          },
+          {
+            name: 'anonymous receives exposed mapbox style and pk.* token on explore detail',
+            method: 'GET',
+            path: '/explore/communities/qa-mapbox-community',
+            expected: 200,
+            headers: { cookie: '' },
+            check: (body) => {
+              const mc = (
+                body as {
+                  data?: {
+                    mapConfig?: {
+                      mapboxAccessToken?: unknown;
+                      mapboxStyle?: unknown;
+                      mapbox3dEnabled?: unknown;
+                    };
+                  };
+                }
+              )?.data?.mapConfig;
+              const text = JSON.stringify(body) ?? '';
+              return (
+                mc?.mapboxAccessToken === 'pk.test-qa-mapbox-token' &&
+                mc.mapboxStyle ===
+                  'mapbox://styles/qa-community/territory-v1' &&
+                mc.mapbox3dEnabled === true &&
+                !text.includes('pm-test-qa-key')
+              );
+            },
+          },
+          {
+            name: 'mapbox admin toggles community private and atomically resets expose',
+            method: 'PATCH',
+            path: '/v2/community',
+            expected: 200,
+            useSavedCookie: 'mapboxAdminCookie',
+            body: { visibility: 'private' },
+            check: (body) => {
+              const parsed = CommunityReadDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.visibility === 'private' &&
+                parsed.data.data.mapConfig?.exposeMapboxCredentials === false &&
+                parsed.data.data.mapConfig.mapboxAccessToken ===
+                  'pk.test-qa-mapbox-token'
+              );
+            },
+          },
+          {
+            name: 'public detail 404s when mapbox community is private',
+            method: 'GET',
+            path: '/v2/public/communities/qa-mapbox-community',
+            expected: 404,
+            headers: { cookie: '' },
+          },
+          {
+            name: 'mapbox admin re-opens community public and expose remains false',
+            method: 'PATCH',
+            path: '/v2/community',
+            expected: 200,
+            useSavedCookie: 'mapboxAdminCookie',
+            body: { visibility: 'public' },
+            check: (body) => {
+              const parsed = CommunityReadDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.visibility === 'public' &&
+                parsed.data.data.mapConfig?.exposeMapboxCredentials === false
+              );
+            },
+          },
+          {
+            name: 'anonymous sees null again after private reset and re-open',
+            method: 'GET',
+            path: '/v2/public/communities/qa-mapbox-community',
+            expected: 200,
+            headers: { cookie: '' },
+            check: (body) => {
+              const parsed =
+                PublicCommunityDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.mapConfig?.mapboxStyleUrl === null &&
+                parsed.data.data.mapConfig.mapboxAccessToken === null
+              );
+            },
+          },
+          {
+            name: 'mapbox admin restores community to private and logs out',
+            method: 'PATCH',
+            path: '/v2/community',
+            expected: 200,
+            useSavedCookie: 'mapboxAdminCookie',
+            body: { visibility: 'private' },
+          },
+          {
+            name: 'mapbox admin logs out',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+            useSavedCookie: 'mapboxAdminCookie',
           },
         ],
       },

@@ -5,13 +5,20 @@ import {
   validateDescriptionForWrite,
 } from '../utils/safe-description.js';
 import {
+  CommunityMapConfigSchema,
   CommunityReadDetailResponseSchema,
   CommunityReadVisibilitySchema,
 } from './community-reads.js';
+import { V2ErrorResponseSchema } from './public-communities.js';
 import {
-  PublicCommunityMapConfigSchema,
-  V2ErrorResponseSchema,
-} from './public-communities.js';
+  MAPBOX_ACCESS_TOKEN_MAX_LENGTH,
+  MAPBOX_STYLE_URL_MAX_LENGTH,
+  PROTOMAPS_API_KEY_MAX_LENGTH,
+  PROTOMAPS_BASEMAP_STYLE_MAX_LENGTH,
+  isPublicMapboxToken,
+  isValidProtomapsApiKey,
+  sanitizeMapboxStyleUrl,
+} from '../utils/map-config.js';
 import {
   PublicPlaceDetailResponseSchema,
   PublicSpeakerDetailResponseSchema,
@@ -197,6 +204,24 @@ export const PutCommunityMapConfigRequestSchema = z
       ])
       .default(null),
     basemapStyle: NullableTrimmedText('Basemap style', 120).default(null),
+    mapboxStyleUrl: NullableTrimmedText(
+      'Mapbox style URL',
+      MAPBOX_STYLE_URL_MAX_LENGTH
+    ).default(null),
+    mapboxAccessToken: NullableTrimmedText(
+      'Mapbox access token',
+      MAPBOX_ACCESS_TOKEN_MAX_LENGTH
+    ).default(null),
+    exposeMapboxCredentials: z.boolean().default(false),
+    mapbox3d: z.boolean().default(false),
+    protomapsApiKey: NullableTrimmedText(
+      'Protomaps API key',
+      PROTOMAPS_API_KEY_MAX_LENGTH
+    ).default(null),
+    protomapsBasemapStyle: NullableTrimmedText(
+      'Protomaps basemap style',
+      PROTOMAPS_BASEMAP_STYLE_MAX_LENGTH
+    ).default(null),
     centerLatitude: NullableLatitudeSchema.default(null),
     centerLongitude: NullableLongitudeSchema.default(null),
     southWestLatitude: NullableLatitudeSchema.default(null),
@@ -237,6 +262,48 @@ export const PutCommunityMapConfigRequestSchema = z
   })
   .strict()
   .superRefine((data, ctx) => {
+    const hasMapboxStyle = data.mapboxStyleUrl !== null;
+    const hasMapboxToken = data.mapboxAccessToken !== null;
+    if (hasMapboxStyle !== hasMapboxToken) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [hasMapboxStyle ? 'mapboxAccessToken' : 'mapboxStyleUrl'],
+        message:
+          'Mapbox style URL and Mapbox access token must both be provided or both be blank',
+      });
+    }
+    if (
+      data.mapboxStyleUrl !== null &&
+      sanitizeMapboxStyleUrl(data.mapboxStyleUrl) === null
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['mapboxStyleUrl'],
+        message:
+          'Mapbox style URL must be a valid mapbox://styles/... URI or credential-free https URL',
+      });
+    }
+    if (
+      data.mapboxAccessToken !== null &&
+      !isPublicMapboxToken(data.mapboxAccessToken)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['mapboxAccessToken'],
+        message: 'Mapbox access token must be a valid public token (pk.*)',
+      });
+    }
+    if (
+      data.protomapsApiKey !== null &&
+      !isValidProtomapsApiKey(data.protomapsApiKey)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['protomapsApiKey'],
+        message: 'Protomaps API key must not contain whitespace',
+      });
+    }
+
     const centerHasLat = data.centerLatitude !== null;
     const centerHasLng = data.centerLongitude !== null;
     if (centerHasLat !== centerHasLng) {
@@ -302,7 +369,7 @@ export type PatchCommunityResponse = z.infer<
 >;
 
 export const PutCommunityMapConfigResponseSchema = z.object({
-  data: PublicCommunityMapConfigSchema,
+  data: CommunityMapConfigSchema,
 });
 export type PutCommunityMapConfigResponse = z.infer<
   typeof PutCommunityMapConfigResponseSchema

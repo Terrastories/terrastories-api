@@ -1,6 +1,9 @@
 import { CommunityWritesRepository } from '../repositories/community-writes.repository.js';
 import type { FoundationUser } from '../repositories/hono-foundation.repository.js';
-import { CommunityReadsService } from './community-reads.service.js';
+import {
+  CommunityReadsService,
+  type CommunityReadsServiceOptions,
+} from './community-reads.service.js';
 import { parseV2Role } from '../shared/authorization/sovereignty-policy.js';
 import {
   authenticatedMediaUrl,
@@ -8,9 +11,10 @@ import {
   FORBIDDEN_BODY,
   INTERNAL_ERROR_BODY,
   NOT_FOUND_BODY,
-  projectMapConfig,
+  projectAuthenticatedMapConfig,
   sanitizePublicStyleUrl,
 } from './public-communities.service.js';
+import { isSecretMapboxToken } from '../shared/utils/map-config.js';
 import {
   CreatePlaceRequestSchema,
   CreateSpeakerRequestSchema,
@@ -44,7 +48,7 @@ export type CommunityWriteResult<T> =
   | { status: 200 | 201; body: T }
   | { status: 204 }
   | {
-      status: 400 | 403 | 404 | 409 | 500;
+      status: 400 | 403 | 404 | 409 | 422 | 500;
       body: V2ErrorResponse | V2ValidationErrorResponse;
     };
 
@@ -89,7 +93,8 @@ export class CommunityWritesService {
   constructor(
     private readonly repository: CommunityWritesRepository,
     private readonly readsService: CommunityReadsService,
-    private readonly cleanup?: MediaCleanupCoordinator
+    private readonly cleanup?: MediaCleanupCoordinator,
+    private readonly options: CommunityReadsServiceOptions = {}
   ) {}
 
   private async scheduleOwnerAttachmentCleanup(
@@ -187,6 +192,35 @@ export class CommunityWritesService {
       return { status: 403, body: FORBIDDEN_BODY };
     }
 
+    if (
+      rawBody &&
+      typeof rawBody === 'object' &&
+      !Array.isArray(rawBody) &&
+      'mapboxAccessToken' in rawBody
+    ) {
+      const candidateToken = (rawBody as { mapboxAccessToken?: unknown })
+        .mapboxAccessToken;
+      if (
+        typeof candidateToken === 'string' &&
+        isSecretMapboxToken(candidateToken)
+      ) {
+        return {
+          status: 422,
+          body: makeValidationErrorBody(
+            [
+              {
+                path: 'mapboxAccessToken',
+                message:
+                  'Secret Mapbox tokens (sk.*) are not permitted; provide a public pk.* token',
+              },
+            ],
+            'Validation failed',
+            'secret_token_rejected'
+          ),
+        };
+      }
+    }
+
     const parsed = PutCommunityMapConfigRequestSchema.safeParse(rawBody);
     const fields: V2ValidationFieldError[] = parsed.success
       ? []
@@ -256,11 +290,25 @@ export class CommunityWritesService {
         }
       }
 
+      const updatedFieldNames =
+        rawBody && typeof rawBody === 'object' && !Array.isArray(rawBody)
+          ? Object.keys(rawBody)
+              .filter((key) => /^[a-zA-Z0-9_-]{1,64}$/.test(key))
+              .sort()
+          : [];
+
       const saved = await this.repository.upsertCommunityMapConfig(
         caller.communityId,
+        caller.actorId,
         {
           styleUrl: cleanStyleUrl,
           basemapStyle: parsed.data.basemapStyle,
+          mapboxStyleUrl: parsed.data.mapboxStyleUrl,
+          mapboxAccessToken: parsed.data.mapboxAccessToken,
+          exposeMapboxCredentials: parsed.data.exposeMapboxCredentials,
+          mapbox3d: parsed.data.mapbox3d,
+          protomapsApiKey: parsed.data.protomapsApiKey,
+          protomapsBasemapStyle: parsed.data.protomapsBasemapStyle,
           centerLatitude: parsed.data.centerLatitude,
           centerLongitude: parsed.data.centerLongitude,
           southWestLatitude: parsed.data.southWestLatitude,
@@ -273,15 +321,23 @@ export class CommunityWritesService {
           threeDimensional: parsed.data.threeDimensional,
           projection: parsed.data.projection,
           staticMapFileId: parsed.data.staticMapFileId,
-        }
+        },
+        updatedFieldNames
       );
 
       if (!saved) {
         return { status: 500, body: INTERNAL_ERROR_BODY };
       }
 
-      const projected = projectMapConfig('community', origin, saved, (fileId) =>
-        authenticatedMediaUrl(origin, fileId)
+      const projected = projectAuthenticatedMapConfig(
+        'community',
+        origin,
+        saved,
+        (fileId) => authenticatedMediaUrl(origin, fileId),
+        {
+          instanceMapboxAccessToken: this.options.mapboxAccessToken,
+          offlineMode: this.options.offlineMode,
+        }
       );
       const checked = PutCommunityMapConfigResponseSchema.safeParse({
         data: projected,

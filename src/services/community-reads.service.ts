@@ -60,8 +60,8 @@ import {
   INTERNAL_ERROR_BODY,
   NOT_FOUND_BODY,
   authenticatedMediaUrl,
+  projectAuthenticatedMapConfig,
   projectBranding,
-  projectMapConfig,
   projectPointFeature,
   sanitizePublicDescription,
 } from './public-communities.service.js';
@@ -225,8 +225,16 @@ export function parseCommunityPlacesQuery(
   };
 }
 
+export interface CommunityReadsServiceOptions {
+  mapboxAccessToken?: string;
+  offlineMode?: boolean;
+}
+
 export class CommunityReadsService {
-  constructor(private readonly repository: CommunityReadsRepository) {}
+  constructor(
+    private readonly repository: CommunityReadsRepository,
+    private readonly options: CommunityReadsServiceOptions = {}
+  ) {}
 
   private async authorizeCommunityCaller(actor: FoundationUser): Promise<
     | {
@@ -397,11 +405,19 @@ export class CommunityReadsService {
           detail.branding,
           mediaUrlFor
         ),
-        mapConfig: projectMapConfig(
+        mapConfig: projectAuthenticatedMapConfig(
           detail.community.slug,
           origin,
           detail.mapConfig,
-          mediaUrlFor
+          mediaUrlFor,
+          {
+            instanceMapboxAccessToken: this.options.mapboxAccessToken,
+            offlineMode: this.options.offlineMode,
+            fallbackTimestamps: {
+              createdAt: detail.community.createdAt,
+              updatedAt: detail.community.updatedAt,
+            },
+          }
         ),
         storiesCount: detail.storiesCount,
         points: detail.points.map(projectPointFeature),
@@ -426,7 +442,20 @@ export class CommunityReadsService {
     const mediaUrlFor = (fileId: string) =>
       authenticatedMediaUrl(origin, fileId);
     return validateResponse(CommunityMapConfigResponseSchema, {
-      data: projectMapConfig(auth.community.slug, origin, row, mediaUrlFor),
+      data: projectAuthenticatedMapConfig(
+        auth.community.slug,
+        origin,
+        row,
+        mediaUrlFor,
+        {
+          instanceMapboxAccessToken: this.options.mapboxAccessToken,
+          offlineMode: this.options.offlineMode,
+          fallbackTimestamps: {
+            createdAt: auth.community.createdAt,
+            updatedAt: auth.community.updatedAt,
+          },
+        }
+      ),
     });
   }
 

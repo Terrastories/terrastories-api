@@ -20,6 +20,8 @@ import {
   validSystemStorageKey,
   envFlagEnabled,
   erasureFenceKey,
+  StorageChecksumMismatchError,
+  StorageLengthRequiredError,
   type FoundationStorage,
 } from './services/hono-foundation.service.js';
 import {
@@ -139,6 +141,58 @@ export const createR2Storage = (bucket: R2Bucket): FoundationStorage => ({
         throw new Error('Community storage is erasing');
     };
     await assertWritable();
+    if (options?.sha256) {
+      // Verified single put (#249): R2 checks the SHA-256 outside Worker CPU, so
+      // no byte of the body is hashed or parsed in TypeScript. The body streams
+      // straight through; a fence set while the put was in flight is detected
+      // afterwards and the object removed (the put is atomic, so it either
+      // exists before the fence's listing or is deleted here).
+      let putBody: Parameters<R2Bucket['put']>[1] = body as Uint8Array;
+      if (!(body instanceof Uint8Array)) {
+        const FixedLength = (
+          globalThis as {
+            FixedLengthStream?: new (
+              expectedLength: number
+            ) => TransformStream<Uint8Array, Uint8Array>;
+          }
+        ).FixedLengthStream;
+        const length = options.contentLength;
+        if (
+          !FixedLength ||
+          length === undefined ||
+          !Number.isSafeInteger(length) ||
+          length < 0
+        ) {
+          throw new StorageLengthRequiredError();
+        }
+        const fixed = new FixedLength(length);
+        void body.pipeTo(fixed.writable).catch(() => {});
+        putBody = fixed.readable as unknown as Parameters<R2Bucket['put']>[1];
+      }
+      let stored: { size: number };
+      try {
+        stored = await bucket.put(key, putBody, {
+          httpMetadata,
+          sha256: options.sha256,
+        });
+      } catch (error) {
+        if (
+          /sha-?256|checksum|digest|10037/i.test(
+            error instanceof Error ? error.message : ''
+          )
+        ) {
+          throw new StorageChecksumMismatchError();
+        }
+        throw error;
+      }
+      try {
+        await assertWritable();
+      } catch (error) {
+        await bucket.delete(key).catch(() => {});
+        throw error;
+      }
+      return { size: stored.size };
+    }
     if (body instanceof Uint8Array && communityId === null) {
       await bucket.put(key, body, { httpMetadata });
       return { size: body.byteLength };

@@ -376,14 +376,14 @@ export async function upload(
   file: { name: string; type: string; bytes: Uint8Array },
   covers: string[]
 ): Promise<string> {
-  const { multipart } = await import('./client.js');
+  const { rawUpload } = await import('./client.js');
   const reply = await ctx.w.step({
     who: actor,
     say,
     method: 'POST',
     path: '/v2/media',
-    form: multipart({}, file),
-    bodyNote: `multipart form with one file (${file.type})`,
+    ...rawUpload({}, file),
+    bodyNote: `raw body, one file (${file.type}) with x-content-sha256`,
     expect: 201,
     covers,
     show: (r) => [

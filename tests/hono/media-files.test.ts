@@ -23,6 +23,7 @@ import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
 import { MediaWritesRepository } from '../../src/repositories/media-writes.repository.js';
 import { MediaCleanupCoordinator } from '../../src/services/media-cleanup.service.js';
+import { assertPutSha256, rawUploadRequest } from '../helpers/raw-upload.js';
 import type { FoundationStorage } from '../../src/services/hono-foundation.service.js';
 import {
   MediaMetadataResponseSchema,
@@ -102,61 +103,15 @@ function createMemoryStorage(): {
         merged.set(c, pos);
         pos += c.byteLength;
       }
+      assertPutSha256(merged, opts?.sha256);
       store.set(storageKey, { bytes: merged, contentType: opts.contentType });
+      return { size: total };
     },
     async delete(storageKey) {
       store.delete(storageKey);
     },
   };
   return { store, storage };
-}
-
-function buildMultipartBody(options: {
-  filename: string;
-  contentType: string;
-  bytes: Uint8Array;
-  fields?: Record<string, string>;
-  fieldsBeforeFile?: boolean;
-}): { body: ReadableStream<Uint8Array>; contentTypeHeader: string } {
-  const boundary = `bound-${Math.random().toString(16).slice(2)}`;
-  const enc = new TextEncoder();
-  const fieldParts: Uint8Array[] = [];
-  for (const [key, value] of Object.entries(options.fields ?? {})) {
-    fieldParts.push(
-      enc.encode(
-        `--${boundary}\r\nContent-Disposition: form-data; name="${key}"\r\n\r\n${value}\r\n`
-      )
-    );
-  }
-  const fileHead = enc.encode(
-    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${options.filename}"\r\nContent-Type: ${options.contentType}\r\n\r\n`
-  );
-  const fileLineEnd = enc.encode('\r\n');
-  const endMarker = enc.encode(`--${boundary}--\r\n`);
-
-  const ordered =
-    options.fieldsBeforeFile !== false
-      ? [...fieldParts, fileHead, options.bytes, fileLineEnd, endMarker]
-      : [fileHead, options.bytes, fileLineEnd, ...fieldParts, endMarker];
-
-  const total = ordered.reduce((sum, p) => sum + p.byteLength, 0);
-  const combined = new Uint8Array(total);
-  let pos = 0;
-  for (const p of ordered) {
-    combined.set(p, pos);
-    pos += p.byteLength;
-  }
-
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(combined);
-      controller.close();
-    },
-  });
-  return {
-    body: stream,
-    contentTypeHeader: `multipart/form-data; boundary=${boundary}`,
-  };
 }
 
 let app: ReturnType<typeof createHonoApp>;
@@ -205,27 +160,28 @@ async function uploadMedia(opts: {
   contentType: string;
   bytes: Uint8Array;
   fields?: Record<string, string>;
-  fieldsBeforeFile?: boolean;
+  sha256?: string | null;
+  omitContentLength?: boolean;
   origin?: string;
 }) {
-  const mp = buildMultipartBody({
+  const raw = rawUploadRequest({
     filename: opts.filename,
     contentType: opts.contentType,
     bytes: opts.bytes,
     fields: opts.fields,
-    fieldsBeforeFile: opts.fieldsBeforeFile,
+    sha256: opts.sha256,
+    omitContentLength: opts.omitContentLength,
   });
   const headers: Record<string, string> = {
-    'content-type': mp.contentTypeHeader,
+    ...raw.headers,
     origin: opts.origin ?? CLIENT_ORIGIN,
   };
   if (opts.cookie) headers.cookie = opts.cookie;
-  return app.request(`${API_ORIGIN}/v2/media`, {
+  return app.request(`${API_ORIGIN}/v2/media${raw.search}`, {
     method: 'POST',
     headers,
-    body: mp.body,
-    duplex: 'half',
-  } as RequestInit);
+    body: raw.body,
+  });
 }
 
 describe('Slice 9 media upload, metadata, ranged serving, and deletion (#140)', () => {
@@ -535,14 +491,13 @@ describe('Slice 9 media upload, metadata, ranged serving, and deletion (#140)', 
       });
       expect(denied.status).toBe(403);
     }
-    // Check fields-after-file path still rolls back storage bytes and returns 403
+    // A denied binding is rejected before any byte is stored and returns 403
     const afterFileDenied = await uploadMedia({
       cookie: cookies.superAdminA,
       filename: 'avatar.png',
       contentType: 'image/png',
       bytes: PNG_BYTES,
       fields: { role: 'story_media' },
-      fieldsBeforeFile: false,
     });
     expect(afterFileDenied.status).toBe(403);
     expect(memStore.size).toBe(storeBefore);
@@ -831,24 +786,23 @@ describe('Slice 9 media upload, metadata, ranged serving, and deletion (#140)', 
     });
 
     // Oversize Content-Length -> 413
-    const mp = buildMultipartBody({
+    const big = rawUploadRequest({
       filename: 'big.png',
       contentType: 'image/png',
       bytes: PNG_BYTES,
     });
     expect(
       (
-        await app.request(`${API_ORIGIN}/v2/media`, {
+        await app.request(`${API_ORIGIN}/v2/media${big.search}`, {
           method: 'POST',
           headers: {
+            ...big.headers,
             cookie: cookies.editorA,
             origin: CLIENT_ORIGIN,
-            'content-type': mp.contentTypeHeader,
             'content-length': String(101 * 1024 * 1024),
           },
-          body: mp.body,
-          duplex: 'half',
-        } as RequestInit)
+          body: big.body,
+        })
       ).status
     ).toBe(413);
 
@@ -1145,11 +1099,12 @@ describe('Slice 9 media upload, metadata, ranged serving, and deletion (#140)', 
       read: storage.read,
       delete: storage.delete,
       async put(storageKey, stream, opts) {
-        await storage.put!(storageKey, stream, opts);
+        const stored = await storage.put!(storageKey, stream, opts);
         if (failAfterPut) {
           failAfterPut = false;
           failNextBatch = true;
         }
+        return stored;
       },
     };
     const d1Db = drizzleD1(client as unknown as D1Database);
@@ -1178,40 +1133,36 @@ describe('Slice 9 media upload, metadata, ranged serving, and deletion (#140)', 
 
     // Simulated DB failure after storage.put rolls back stored bytes immediately
     failAfterPut = true;
-    const mpFail = buildMultipartBody({
+    const mpFail = rawUploadRequest({
       filename: 'rollback.png',
       contentType: 'image/png',
       bytes: PNG_BYTES,
     });
-    const failRes = await localApp.request(`${API_ORIGIN}/v2/media`, {
-      method: 'POST',
-      headers: {
-        cookie,
-        origin: CLIENT_ORIGIN,
-        'content-type': mpFail.contentTypeHeader,
-      },
-      body: mpFail.body,
-      duplex: 'half',
-    } as RequestInit);
+    const failRes = await localApp.request(
+      `${API_ORIGIN}/v2/media${mpFail.search}`,
+      {
+        method: 'POST',
+        headers: { ...mpFail.headers, cookie, origin: CLIENT_ORIGIN },
+        body: mpFail.body,
+      }
+    );
     expect(failRes.status).toBe(500);
     expect(store.size).toBe(0);
 
     // Normal D1 batch upload + read + delete
-    const mpOk = buildMultipartBody({
+    const mpOk = rawUploadRequest({
       filename: 'd1.png',
       contentType: 'image/png',
       bytes: PNG_BYTES,
     });
-    const okRes = await localApp.request(`${API_ORIGIN}/v2/media`, {
-      method: 'POST',
-      headers: {
-        cookie,
-        origin: CLIENT_ORIGIN,
-        'content-type': mpOk.contentTypeHeader,
-      },
-      body: mpOk.body,
-      duplex: 'half',
-    } as RequestInit);
+    const okRes = await localApp.request(
+      `${API_ORIGIN}/v2/media${mpOk.search}`,
+      {
+        method: 'POST',
+        headers: { ...mpOk.headers, cookie, origin: CLIENT_ORIGIN },
+        body: mpOk.body,
+      }
+    );
     expect(okRes.status).toBe(201);
     const fileId = MediaUploadResponseSchema.parse(await okRes.json()).data.id;
     expect(store.size).toBe(1);

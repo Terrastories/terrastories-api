@@ -239,8 +239,9 @@ export const REORDERABLE_ATTACHMENT_ROLES = [
   'place_photo',
 ] as const;
 
+/** Query parameters accepted by the raw-body `POST /v2/media` upload (#249). */
 export const ALLOWED_UPLOAD_FIELDS = new Set([
-  'file',
+  'filename',
   'role',
   'ownerType',
   'ownerId',

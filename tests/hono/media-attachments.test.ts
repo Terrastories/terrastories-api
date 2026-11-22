@@ -23,6 +23,7 @@ import {
   MediaCleanupCoordinator,
   type FileByteCleanup,
 } from '../../src/services/media-cleanup.service.js';
+import { assertPutSha256, rawUploadRequest } from '../helpers/raw-upload.js';
 import type { FoundationStorage } from '../../src/services/hono-foundation.service.js';
 import {
   AttachmentListResponseSchema,
@@ -81,40 +82,15 @@ function createMemoryStorage(): {
         merged.set(c, pos);
         pos += c.byteLength;
       }
+      assertPutSha256(merged, opts?.sha256);
       store.set(storageKey, { bytes: merged, contentType: opts.contentType });
+      return { size: total };
     },
     async delete(storageKey) {
       store.delete(storageKey);
     },
   };
   return { store, storage };
-}
-
-function buildMultipartBody(options: {
-  filename: string;
-  contentType: string;
-  bytes: Uint8Array;
-}): { body: ReadableStream<Uint8Array>; contentTypeHeader: string } {
-  const boundary = `bound-${Math.random().toString(16).slice(2)}`;
-  const enc = new TextEncoder();
-  const head = enc.encode(
-    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${options.filename}"\r\nContent-Type: ${options.contentType}\r\n\r\n`
-  );
-  const tail = enc.encode(`\r\n--${boundary}--\r\n`);
-  const total = head.byteLength + options.bytes.byteLength + tail.byteLength;
-  const combined = new Uint8Array(total);
-  combined.set(head, 0);
-  combined.set(options.bytes, head.byteLength);
-  combined.set(tail, head.byteLength + options.bytes.byteLength);
-  return {
-    body: new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(combined);
-        controller.close();
-      },
-    }),
-    contentTypeHeader: `multipart/form-data; boundary=${boundary}`,
-  };
 }
 
 let app: ReturnType<typeof createHonoApp>;
@@ -150,21 +126,16 @@ async function upload(opts: {
   contentType?: string;
   bytes?: Uint8Array;
 }) {
-  const mp = buildMultipartBody({
+  const raw = rawUploadRequest({
     filename: opts.filename ?? 'photo.png',
     contentType: opts.contentType ?? 'image/png',
     bytes: opts.bytes ?? PNG_BYTES,
   });
-  const res = await app.request(`${API_ORIGIN}/v2/media`, {
+  const res = await app.request(`${API_ORIGIN}/v2/media${raw.search}`, {
     method: 'POST',
-    headers: {
-      cookie: opts.cookie,
-      origin: CLIENT_ORIGIN,
-      'content-type': mp.contentTypeHeader,
-    },
-    body: mp.body,
-    duplex: 'half',
-  } as RequestInit);
+    headers: { ...raw.headers, cookie: opts.cookie, origin: CLIENT_ORIGIN },
+    body: raw.body,
+  });
   return {
     res,
     fileId:
@@ -541,36 +512,21 @@ describe('Slice 9 attachments, byte cleanup, and D1 bounds (#140)', () => {
 
   it('enforces the §6.7 null-community check and the owner/role matrix', async () => {
     // super_admin own null-community user_photo upload (role field required).
-    const ownRes = await app.request(`${API_ORIGIN}/v2/media`, {
+    const ownRaw = rawUploadRequest({
+      filename: 'me.png',
+      contentType: 'image/png',
+      bytes: PNG_BYTES,
+      fields: { role: 'user_photo' },
+    });
+    const ownRes = await app.request(`${API_ORIGIN}/v2/media${ownRaw.search}`, {
       method: 'POST',
       headers: {
+        ...ownRaw.headers,
         cookie: cookies.superAdmin,
         origin: CLIENT_ORIGIN,
-        // role field is required for super_admin; boundary matches below.
-        'content-type': 'multipart/form-data; boundary=bound-super',
       },
-      body: (() => {
-        const boundary = 'bound-super';
-        const enc = new TextEncoder();
-        const head = enc.encode(
-          `--${boundary}\r\nContent-Disposition: form-data; name="role"\r\n\r\nuser_photo\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="me.png"\r\nContent-Type: image/png\r\n\r\n`
-        );
-        const tail = enc.encode(`\r\n--${boundary}--\r\n`);
-        const all = new Uint8Array(
-          head.byteLength + PNG_BYTES.byteLength + tail.byteLength
-        );
-        all.set(head, 0);
-        all.set(PNG_BYTES, head.byteLength);
-        all.set(tail, head.byteLength + PNG_BYTES.byteLength);
-        return new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(all);
-            controller.close();
-          },
-        });
-      })(),
-      duplex: 'half',
-    } as RequestInit);
+      body: ownRaw.body,
+    });
     expect(ownRes.status).toBe(201);
     const ownPhotoId = MediaUploadResponseSchema.parse(await ownRes.json()).data
       .id;

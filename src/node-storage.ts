@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   lstat,
   mkdir,
@@ -16,6 +16,7 @@ import {
   validLegacyStorageKey,
   validSystemStorageKey,
   erasureFenceKey,
+  StorageChecksumMismatchError,
   type FoundationStorage,
 } from './services/hono-foundation.service.js';
 
@@ -184,7 +185,7 @@ export async function createLocalStorage(
       }
     },
 
-    async put(key, body) {
+    async put(key, body, putOptions) {
       const writerKey = `${root}:${key.startsWith('communities/') ? key.split('/')[1] : 'system'}`;
       let cancelled = false;
       let readerToCancel: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -222,6 +223,8 @@ export async function createLocalStorage(
         );
         const handle = await openFile(tmpPath, 'w', 0o600);
         let size = 0;
+        // Native (OpenSSL) hashing; absent unless the caller supplied a digest.
+        const verifier = putOptions?.sha256 ? createHash('sha256') : null;
         try {
           // The temporary inode precedes this fence check. Once fencing lands,
           // a sweep can unlink it and every later rename fails, even if a writer
@@ -238,6 +241,7 @@ export async function createLocalStorage(
               offset += bytesWritten;
             }
             size = body.byteLength;
+            verifier?.update(body);
           } else {
             const reader = body.getReader();
             readerToCancel = reader;
@@ -248,6 +252,7 @@ export async function createLocalStorage(
                 if (done) break;
                 await assertWritable();
                 if (value && value.byteLength > 0) {
+                  verifier?.update(value);
                   let offset = 0;
                   while (offset < value.byteLength) {
                     const { bytesWritten } = await handle.write(
@@ -265,6 +270,9 @@ export async function createLocalStorage(
             }
           }
           await handle.close();
+          if (verifier && verifier.digest('hex') !== putOptions?.sha256) {
+            throw new StorageChecksumMismatchError();
+          }
           await assertWritable();
           await rename(tmpPath, targetPath);
           return { size };

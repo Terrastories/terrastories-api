@@ -73,6 +73,8 @@ export function registerMediaRoutes(
       actor: actorOf(c),
       contentTypeHeader: c.req.header('Content-Type'),
       contentLengthHeader: c.req.header('Content-Length'),
+      checksumHeader: c.req.header('x-content-sha256'),
+      params: new URL(c.req.url).searchParams,
       body: c.req.raw.body,
       origin: originFor(c),
     });

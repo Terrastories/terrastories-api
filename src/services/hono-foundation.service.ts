@@ -61,8 +61,33 @@ export interface StorageReadResult {
   size: number;
 }
 
+/** Thrown by `put` when the stored bytes do not hash to `options.sha256`. */
+export class StorageChecksumMismatchError extends Error {
+  constructor() {
+    super('Stored bytes do not match the expected SHA-256');
+    this.name = 'StorageChecksumMismatchError';
+  }
+}
+
+/** Thrown by `put` when a stream body needs a known `contentLength` and has none. */
+export class StorageLengthRequiredError extends Error {
+  constructor() {
+    super('A known content length is required for this upload');
+    this.name = 'StorageLengthRequiredError';
+  }
+}
+
 export interface StoragePutOptions {
   contentType?: string;
+  /**
+   * Expected lowercase-hex SHA-256 of the whole object. The adapter verifies it
+   * outside application code (R2 verifies server-side; the local adapter uses
+   * native `node:crypto`) and throws `StorageChecksumMismatchError` without
+   * leaving the object behind.
+   */
+  sha256?: string;
+  /** Exact body length in bytes when the caller knows it (request Content-Length). */
+  contentLength?: number;
   /** Force multipart upload even when stream length is below the default part threshold. */
   useMultipart?: boolean;
   /** Invoked as soon as a multipart upload id is created so callers can persist it for restart-safe abort. */

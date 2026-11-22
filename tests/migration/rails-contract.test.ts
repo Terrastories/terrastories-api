@@ -42,6 +42,8 @@ import {
   RAILS_SCHEMA_VERSION_2024,
   RAILS_SCHEMA_VERSION_2025,
   RAILS_SOURCE_PROFILE,
+  REQUIRED_RAILS_COLUMN_TYPES,
+  REQUIRED_RAILS_COLUMN_TYPES_2025,
   REQUIRED_RAILS_TABLES,
   REQUIRED_RAILS_TABLES_2025,
   SUPPORTED_RAILS_SOURCES,
@@ -78,7 +80,9 @@ function buildMockTables(options?: {
   omitTable?: string;
   omitColumn?: { table: string; column: string };
   swapCommunityBetaPublic?: boolean;
+  columnTypeOverride?: { table: string; column: string; type: string };
 }) {
+  const typeMap = REQUIRED_RAILS_COLUMN_TYPES_2025;
   const tableMap: Record<string, readonly string[]> =
     options?.includeExposeMapboxCredentials
       ? REQUIRED_RAILS_TABLES_2025
@@ -107,7 +111,10 @@ function buildMockTables(options?: {
           dataType:
             tableName === 'themes' && columnName === 'expose_mapbox_credentials'
               ? (options?.exposeMapboxCredentialsType ?? 'boolean')
-              : 'character varying',
+              : ((options?.columnTypeOverride?.table === tableName &&
+                options.columnTypeOverride.column === columnName
+                  ? options.columnTypeOverride.type
+                  : typeMap[tableName]?.[columnName]) ?? 'character varying'),
         })),
       };
     });
@@ -403,6 +410,50 @@ describe('legacy Rails migration dual-pin contract', () => {
         c2025
       )
     ).toThrow(/required rails column type mismatch/i);
+  });
+
+  it('pins a type for every required column of both contracts', () => {
+    for (const [tables, types] of [
+      [REQUIRED_RAILS_TABLES, REQUIRED_RAILS_COLUMN_TYPES],
+      [REQUIRED_RAILS_TABLES_2025, REQUIRED_RAILS_COLUMN_TYPES_2025],
+    ] as const) {
+      for (const [tableName, columns] of Object.entries(tables)) {
+        for (const column of columns) {
+          expect(types[tableName]?.[column], `${tableName}.${column}`).toEqual(
+            expect.any(String)
+          );
+        }
+      }
+    }
+    expect(
+      selectRailsSourceContract(RAILS_MIGRATION_VERSION_2024)
+    ).toMatchObject({ requiredColumnTypes: REQUIRED_RAILS_COLUMN_TYPES });
+  });
+
+  it('fails closed on wrong column types beyond the 2025 column', () => {
+    const c2024 = selectRailsSourceContract(RAILS_MIGRATION_VERSION_2024);
+    const c2025 = selectRailsSourceContract(RAILS_MIGRATION_VERSION_2025);
+    const wrong = (table: string, column: string, type: string) => ({
+      includeExposeMapboxCredentials: true,
+      columnTypeOverride: { table, column, type },
+    });
+
+    for (const [contract, table, column] of [
+      [c2024, 'communities', 'public'],
+      [c2025, 'communities', 'public'],
+      [c2024, 'stories', 'id'],
+      [c2025, 'places', 'lat'],
+      [c2025, 'active_storage_blobs', 'byte_size'],
+    ] as const) {
+      expect(() =>
+        validateRailsSourceSchema(
+          buildMockTables(wrong(table, column, 'text')),
+          contract
+        )
+      ).toThrow(
+        new RegExp(`type mismatch for ${table}\\.${column}: expected`, 'i')
+      );
+    }
   });
 });
 

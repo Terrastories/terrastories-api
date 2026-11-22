@@ -163,6 +163,194 @@ export const REQUIRED_RAILS_TABLES_2025 = {
   themes: [...REQUIRED_RAILS_TABLES.themes, 'expose_mapbox_credentials'],
 } as const satisfies Record<string, readonly string[]>;
 
+/**
+ * Expected information_schema data_type for every required column, taken from
+ * the audited Rails schema (tests/fixtures/rails/schema.sql). Capture fails
+ * closed when an observed type differs.
+ */
+export const REQUIRED_RAILS_COLUMN_TYPES: Readonly<
+  Record<string, Readonly<Record<string, string>>>
+> = {
+  active_storage_attachments: {
+    id: 'bigint',
+    name: 'character varying',
+    record_type: 'character varying',
+    record_id: 'bigint',
+    blob_id: 'bigint',
+    created_at: 'timestamp without time zone',
+  },
+  active_storage_blobs: {
+    id: 'bigint',
+    key: 'character varying',
+    filename: 'character varying',
+    content_type: 'character varying',
+    metadata: 'text',
+    byte_size: 'bigint',
+    checksum: 'character varying',
+    created_at: 'timestamp without time zone',
+    service_name: 'character varying',
+  },
+  active_storage_variant_records: {
+    id: 'bigint',
+    blob_id: 'bigint',
+    variation_digest: 'character varying',
+  },
+  communities: {
+    id: 'bigint',
+    name: 'character varying',
+    locale: 'character varying',
+    country: 'character varying',
+    created_at: 'timestamp without time zone',
+    updated_at: 'timestamp without time zone',
+    beta: 'boolean',
+    public: 'boolean',
+    slug: 'character varying',
+    description: 'text',
+  },
+  curriculum_stories: {
+    id: 'bigint',
+    curriculum_id: 'bigint',
+    story_id: 'bigint',
+    created_at: 'timestamp without time zone',
+    updated_at: 'timestamp without time zone',
+    display_order: 'integer',
+  },
+  curriculums: {
+    id: 'bigint',
+    title: 'character varying',
+    description: 'text',
+    user_id: 'bigint',
+    created_at: 'timestamp without time zone',
+    updated_at: 'timestamp without time zone',
+  },
+  flipper_features: {
+    id: 'bigint',
+    key: 'character varying',
+    description: 'text',
+    created_at: 'timestamp without time zone',
+    updated_at: 'timestamp without time zone',
+  },
+  flipper_gates: {
+    id: 'bigint',
+    feature_key: 'character varying',
+    key: 'character varying',
+    value: 'character varying',
+    created_at: 'timestamp without time zone',
+    updated_at: 'timestamp without time zone',
+  },
+  media: {
+    id: 'bigint',
+    story_id: 'bigint',
+    created_at: 'timestamp without time zone',
+    updated_at: 'timestamp without time zone',
+  },
+  media_links: {
+    id: 'bigint',
+    url: 'character varying',
+    story_id: 'bigint',
+    created_at: 'timestamp without time zone',
+    updated_at: 'timestamp without time zone',
+  },
+  places: {
+    id: 'bigint',
+    name: 'character varying',
+    type_of_place: 'character varying',
+    created_at: 'timestamp without time zone',
+    updated_at: 'timestamp without time zone',
+    lat: 'numeric',
+    long: 'numeric',
+    region: 'character varying',
+    description: 'character varying',
+    community_id: 'integer',
+  },
+  places_stories: {
+    id: 'bigint',
+    story_id: 'bigint',
+    place_id: 'bigint',
+  },
+  speaker_stories: {
+    id: 'bigint',
+    speaker_id: 'bigint',
+    story_id: 'bigint',
+  },
+  speakers: {
+    id: 'bigint',
+    name: 'character varying',
+    created_at: 'timestamp without time zone',
+    updated_at: 'timestamp without time zone',
+    birthdate: 'timestamp without time zone',
+    birthplace_id: 'integer',
+    speaker_community: 'character varying',
+    community_id: 'integer',
+  },
+  stories: {
+    id: 'bigint',
+    title: 'character varying',
+    desc: 'text',
+    created_at: 'timestamp without time zone',
+    updated_at: 'timestamp without time zone',
+    permission_level: 'integer',
+    date_interviewed: 'timestamp without time zone',
+    language: 'character varying',
+    interview_location_id: 'integer',
+    interviewer_id: 'integer',
+    community_id: 'integer',
+    topic: 'character varying',
+  },
+  themes: {
+    id: 'bigint',
+    active: 'boolean',
+    created_at: 'timestamp without time zone',
+    updated_at: 'timestamp without time zone',
+    mapbox_style_url: 'character varying',
+    mapbox_access_token: 'character varying',
+    center_lat: 'numeric',
+    center_long: 'numeric',
+    sw_boundary_lat: 'numeric',
+    sw_boundary_long: 'numeric',
+    ne_boundary_lat: 'numeric',
+    ne_boundary_long: 'numeric',
+    zoom: 'numeric',
+    pitch: 'numeric',
+    bearing: 'numeric',
+    mapbox_3d: 'boolean',
+    map_projection: 'integer',
+    community_id: 'bigint',
+    protomaps_api_key: 'text',
+    protomaps_basemap_style: 'text',
+  },
+  users: {
+    id: 'bigint',
+    email: 'character varying',
+    encrypted_password: 'character varying',
+    reset_password_token: 'character varying',
+    reset_password_sent_at: 'timestamp without time zone',
+    remember_created_at: 'timestamp without time zone',
+    sign_in_count: 'integer',
+    current_sign_in_at: 'timestamp without time zone',
+    last_sign_in_at: 'timestamp without time zone',
+    current_sign_in_ip: 'character varying',
+    last_sign_in_ip: 'character varying',
+    created_at: 'timestamp without time zone',
+    updated_at: 'timestamp without time zone',
+    role: 'integer',
+    community_id: 'integer',
+    super_admin: 'boolean',
+    username: 'character varying',
+    name: 'character varying',
+  },
+};
+
+export const REQUIRED_RAILS_COLUMN_TYPES_2025: Readonly<
+  Record<string, Readonly<Record<string, string>>>
+> = {
+  ...REQUIRED_RAILS_COLUMN_TYPES,
+  themes: {
+    ...REQUIRED_RAILS_COLUMN_TYPES.themes,
+    expose_mapbox_credentials: 'boolean',
+  },
+};
+
 export type RequiredRailsTableName = keyof typeof REQUIRED_RAILS_TABLES;
 
 export type RailsContractProfile =
@@ -193,7 +381,7 @@ export const SUPPORTED_RAILS_SOURCES: readonly RailsSourceContract[] = [
     railsSchemaVersion: RAILS_SCHEMA_VERSION_2024,
     migrationVersion: RAILS_MIGRATION_VERSION_2024,
     requiredTables: REQUIRED_RAILS_TABLES,
-    requiredColumnTypes: {},
+    requiredColumnTypes: REQUIRED_RAILS_COLUMN_TYPES,
   },
   {
     profile: 'rails-2025_11_20_170000',
@@ -201,11 +389,7 @@ export const SUPPORTED_RAILS_SOURCES: readonly RailsSourceContract[] = [
     railsSchemaVersion: RAILS_SCHEMA_VERSION_2025,
     migrationVersion: RAILS_MIGRATION_VERSION_2025,
     requiredTables: REQUIRED_RAILS_TABLES_2025,
-    requiredColumnTypes: {
-      themes: {
-        expose_mapbox_credentials: 'boolean',
-      },
-    },
+    requiredColumnTypes: REQUIRED_RAILS_COLUMN_TYPES_2025,
   },
 ];
 

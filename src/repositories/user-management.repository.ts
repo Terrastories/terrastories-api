@@ -37,6 +37,7 @@ import {
   type ValidatedAuditEntryRecord,
 } from '../shared/utils/audit-entry.js';
 import { buildAuditEntryInsert } from './audit-entry.repository.js';
+import { userAuthorityConditions } from './hono-foundation.repository.js';
 
 export interface ManagedUserRow {
   id: number;
@@ -251,7 +252,7 @@ export class UserManagementRepository {
    */
   async hasIdentityCollision(
     input: {
-      communityId: number;
+      communityId: number | null;
       emailNormalized?: string;
       usernameNormalized?: string | null;
       excludeUserId?: number;
@@ -269,21 +270,28 @@ export class UserManagementRepository {
       clauses.push(eq(users.emailNormalized, usernameNormalized));
     }
     if (emailNormalized !== undefined) {
-      // Community-scoped email uniqueness.
-      clauses.push(
-        and(
-          eq(users.communityId, input.communityId),
-          eq(users.emailNormalized, emailNormalized)
-        )
-      );
-      // An email shared between a null-community account and any community
-      // account (§6.2: unresolvable at login; rejected on new identities).
-      clauses.push(
-        and(
-          isNull(users.communityId),
-          eq(users.emailNormalized, emailNormalized)
-        )
-      );
+      if (input.communityId === null) {
+        // A null-community account's email may not be shared with any
+        // account at all (§6.2).
+        clauses.push(eq(users.emailNormalized, emailNormalized));
+      } else {
+        // Community-scoped email uniqueness.
+        clauses.push(
+          and(
+            eq(users.communityId, input.communityId),
+            eq(users.emailNormalized, emailNormalized)
+          )
+        );
+        // An email shared between a null-community account and any
+        // community account (§6.2: unresolvable at login; rejected on new
+        // identities).
+        clauses.push(
+          and(
+            isNull(users.communityId),
+            eq(users.emailNormalized, emailNormalized)
+          )
+        );
+      }
       // An email matching another account's username (any community).
       clauses.push(eq(users.usernameNormalized, emailNormalized));
     }
@@ -309,7 +317,7 @@ export class UserManagementRepository {
    * with a null-community account) which no index enforces.
    */
   private identityCollisionWhereSql(input: {
-    communityId: number;
+    communityId: number | null;
     emailNormalized?: string;
     usernameNormalized?: string | null;
     excludeUserId?: number;
@@ -321,12 +329,16 @@ export class UserManagementRepository {
       clauses.push(sql`x.email_normalized = ${usernameNormalized}`);
     }
     if (emailNormalized !== undefined) {
-      clauses.push(
-        sql`x.community_id = ${input.communityId} and x.email_normalized = ${emailNormalized}`
-      );
-      clauses.push(
-        sql`x.community_id is null and x.email_normalized = ${emailNormalized}`
-      );
+      if (input.communityId === null) {
+        clauses.push(sql`x.email_normalized = ${emailNormalized}`);
+      } else {
+        clauses.push(
+          sql`x.community_id = ${input.communityId} and x.email_normalized = ${emailNormalized}`
+        );
+        clauses.push(
+          sql`x.community_id is null and x.email_normalized = ${emailNormalized}`
+        );
+      }
       clauses.push(sql`x.username_normalized = ${emailNormalized}`);
     }
     if (clauses.length === 0) return undefined;
@@ -807,6 +819,159 @@ export class UserManagementRepository {
         buildAuditEntryInsert(tx, validatedAudit).run();
       }
       return updated.length > 0;
+    });
+  }
+
+  /**
+   * Self-service identifier change (PATCH /v2/auth/me with username/email),
+   * written under the SAME identity rules as the admin edit: the collision
+   * guard holds at write time (PostgreSQL: community FOR SHARE -> sorted
+   * identity advisory locks -> users, never sessions; SQLite/D1: one guarded
+   * UPDATE ... WHERE NOT EXISTS). The write is anchored on the credential
+   * state the step-up verified (`password_hash` + `password_verifier`), so a
+   * concurrent password change or reset makes it `stale` instead of landing
+   * under a credential that was just replaced. The content-free audit row is
+   * in the same atomic unit (D1 batch, SQLite transaction, PostgreSQL
+   * transaction) and lands iff the update does.
+   *
+   * Neither identifier column is in the `users_revoke_sessions` trigger's
+   * column list, so no session is revoked by this write.
+   */
+  async updateOwnIdentity(
+    input: {
+      id: number;
+      communityId: number | null;
+      anchor: { passwordHash: string; passwordVerifier: string | null };
+      displayName?: string | null;
+      username?: string;
+      usernameNormalized?: string | null;
+      email?: string;
+      emailNormalized?: string;
+      /** Every supplied identifier, re-checked at write time. */
+      collision: {
+        emailNormalized?: string;
+        usernameNormalized?: string | null;
+      };
+      updatedAt: Date;
+    },
+    audit: ContentFreeAuditEntryInput
+  ): Promise<'updated' | 'identity_conflict' | 'stale'> {
+    const db = this.database;
+    const { users, communities } = this.tables;
+    const { auditEntries } = tablesFor(db);
+    const validatedAudit = validateContentFreeAuditEntry(audit);
+    const patch: Record<string, unknown> = { updatedAt: input.updatedAt };
+    if (input.displayName !== undefined) patch.displayName = input.displayName;
+    if (input.username !== undefined) {
+      patch.username = input.username;
+      patch.usernameNormalized = input.usernameNormalized ?? null;
+    }
+    if (input.email !== undefined) {
+      patch.email = input.email;
+      patch.emailNormalized = input.emailNormalized;
+    }
+    const { passwordHash, passwordVerifier } = input.anchor;
+    // Anchor = verified credential AND current access, decided exactly as the
+    // session / password-change gate decides it (active user, V2 role, active
+    // community, or the own-admin / steward sovereignty surface of a disabled
+    // one; SPEC-V2 §7). An account disabled, moved or whose community is
+    // disabled mid-request is refused.
+    const anchorWhere = () =>
+      and(
+        eq(users.id, input.id),
+        userAuthorityConditions(db),
+        input.communityId === null
+          ? isNull(users.communityId)
+          : eq(users.communityId, input.communityId),
+        eq(users.passwordHash, passwordHash),
+        passwordVerifier === null
+          ? isNull(users.passwordVerifier)
+          : eq(users.passwordVerifier, passwordVerifier)
+      );
+    const collisionSql = this.identityCollisionWhereSql({
+      ...input.collision,
+      communityId: input.communityId,
+      excludeUserId: input.id,
+    });
+    const guardedUpdate = (database: Executor) =>
+      database
+        .update(users)
+        .set(patch)
+        .where(and(anchorWhere(), collisionSql))
+        .returning({ id: users.id });
+    const anchorStillHolds = async (
+      database: Executor = db
+    ): Promise<boolean> => {
+      const rows = (await database
+        .select({ id: users.id })
+        .from(users)
+        .where(anchorWhere())
+        .limit(1)) as unknown[];
+      return rows.length > 0;
+    };
+
+    if (dialectOf(db) === 'postgresql') {
+      return db.transaction(async (tx: Executor) => {
+        if (input.communityId !== null)
+          await tx
+            .select({ id: communities.id })
+            .from(communities)
+            .where(eq(communities.id, input.communityId))
+            .for('share');
+        await this.takeIdentityAdvisoryLocks(tx, input.collision);
+        // A stale credential must never reach the 409 branch.
+        if (!(await anchorStillHolds(tx))) return 'stale' as const;
+        const collided = await this.hasIdentityCollision(
+          {
+            ...input.collision,
+            communityId: input.communityId,
+            excludeUserId: input.id,
+          },
+          tx
+        );
+        if (collided) return 'identity_conflict' as const;
+        const updated = await guardedUpdate(tx);
+        if (updated.length === 0) return 'stale' as const;
+        await buildAuditEntryInsert(tx, validatedAudit);
+        return 'updated' as const;
+      });
+    }
+
+    if (typeof db.batch === 'function') {
+      // D1: the audit row is gated on the same pre-update predicates as the
+      // UPDATE and runs first, so it lands iff this request's write lands.
+      const auditInsert = db.insert(auditEntries).select(
+        sql`select
+          ${null}, ${validatedAudit.communityId}, ${validatedAudit.actorId},
+          ${validatedAudit.action}, ${validatedAudit.resourceType},
+          ${JSON.stringify(validatedAudit.resourceIds)},
+          ${validatedAudit.outcome}, ${validatedAudit.ipAddress},
+          ${validatedAudit.userAgent}, ${Date.now()}
+        where exists (
+          select 1 from users
+          where ${anchorWhere()}
+        ) and ${collisionSql ?? sql`1 = 1`}`
+      );
+      const results = await db.batch([auditInsert, guardedUpdate(db)]);
+      if ((results[1] as unknown[]).length > 0) return 'updated';
+      return (await anchorStillHolds()) ? 'identity_conflict' : 'stale';
+    }
+
+    return db.transaction((tx: Executor) => {
+      const updated = guardedUpdate(tx).all() as unknown[];
+      if (updated.length > 0) {
+        buildAuditEntryInsert(tx, validatedAudit).run();
+        return 'updated' as const;
+      }
+      const anchored = tx
+        .select({ id: users.id })
+        .from(users)
+        .where(anchorWhere())
+        .limit(1)
+        .all() as unknown[];
+      return anchored.length > 0
+        ? ('identity_conflict' as const)
+        : ('stale' as const);
     });
   }
 

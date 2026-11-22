@@ -65,6 +65,47 @@ type Executor = any;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Statement = any;
 
+/**
+ * Current-access authority gate (SPEC-V2 §6.2, §7) without a `communities`
+ * join, so it can guard a bare `UPDATE users` or an audit-insert predicate:
+ * an active V2-role user who is a null-community `super_admin`, a member of
+ * an active community, or an own-community `admin` / designated steward of a
+ * disabled community. Shared by the session/password-change write and the
+ * self-service identifier change so both decide access identically.
+ */
+export function userAuthorityConditions(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  database: any
+) {
+  const { users, communities, communityStewards } = tablesFor(database);
+  // Subqueries rather than a raw `sql` fragment: the community flag is a
+  // boolean column, and a raw interpolation would bind a bare boolean that
+  // SQLite rejects. A query-builder subquery maps it like any other read.
+  const activeCommunities = database
+    .select({ id: communities.id })
+    .from(communities)
+    .where(eq(communities.isActive, communityStatusToPhysical('active')));
+  const disabledCommunities = database
+    .select({ id: communities.id })
+    .from(communities)
+    .where(eq(communities.isActive, communityStatusToPhysical('disabled')));
+  return and(
+    eq(users.isActive, userStatusToPhysical('active').isActive),
+    inArray(users.role, [...V2_COMMUNITY_ROLES]),
+    or(
+      and(isNull(users.communityId), eq(users.role, 'super_admin')),
+      inArray(users.communityId, activeCommunities),
+      and(
+        inArray(users.communityId, disabledCommunities),
+        or(
+          eq(users.role, 'admin'),
+          sql`exists (select 1 from ${communityStewards} cs where cs.community_id = ${users.communityId} and cs.user_id = ${users.id})`
+        )
+      )
+    )
+  );
+}
+
 export class HonoFoundationRepository {
   private readonly tables;
   private readonly sessions;
@@ -137,33 +178,7 @@ export class HonoFoundationRepository {
    * verifier write has no join to hang `communities.is_active` on).
    */
   private verifierAuthorityConditions() {
-    const { users, communities, communityStewards } = this.tables;
-    // Subqueries rather than a raw `sql` fragment: the community flag is a
-    // boolean column, and a raw interpolation would bind a bare boolean that
-    // SQLite rejects. A query-builder subquery maps it like any other read.
-    const activeCommunities = this.database
-      .select({ id: communities.id })
-      .from(communities)
-      .where(eq(communities.isActive, communityStatusToPhysical('active')));
-    const disabledCommunities = this.database
-      .select({ id: communities.id })
-      .from(communities)
-      .where(eq(communities.isActive, communityStatusToPhysical('disabled')));
-    return and(
-      eq(users.isActive, userStatusToPhysical('active').isActive),
-      inArray(users.role, [...V2_COMMUNITY_ROLES]),
-      or(
-        and(isNull(users.communityId), eq(users.role, 'super_admin')),
-        inArray(users.communityId, activeCommunities),
-        and(
-          inArray(users.communityId, disabledCommunities),
-          or(
-            eq(users.role, 'admin'),
-            sql`exists (select 1 from ${communityStewards} cs where cs.community_id = ${users.communityId} and cs.user_id = ${users.id})`
-          )
-        )
-      )
-    );
+    return userAuthorityConditions(this.database);
   }
 
   private toFoundationUser(row: RawFoundationUser): FoundationUser | null {

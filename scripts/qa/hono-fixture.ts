@@ -1696,6 +1696,9 @@ export async function createFixture(
     let freshBaseUrl: string | undefined;
     let freshBootstrapSecret: string;
     let ensureFreshBootstrap: () => Promise<unknown>;
+    // Set only where the fresh install's database can be closed and reopened
+    // over the same storage (in-process SQLite); undefined elsewhere.
+    let restartFreshInstall: (() => Promise<void>) | undefined;
     let routes: Endpoint[];
     let erasureSweep = backend?.runErasureSweep;
     if (backend) {
@@ -1874,6 +1877,26 @@ export async function createFixture(
         return freshAppPromise;
       };
       ensureFreshBootstrap = getFreshApp;
+      if (qa!.reopenFresh) {
+        const reopenFresh = qa!.reopenFresh;
+        restartFreshInstall = async () => {
+          await getFreshApp();
+          // Closes the old handle, then a NEW app over the same file and the
+          // same byte store; sessions and secrets must survive on their own.
+          const reopenedDb = await reopenFresh();
+          freshAppPromise = Promise.resolve(
+            createHonoApp({
+              repository: new HonoFoundationRepository(reopenedDb),
+              secureCookies: false,
+              trustProxy: true,
+              serverSecret: freshServerSecret,
+              bootstrapSecret: freshBootstrapSecret,
+              storage: freshStorage,
+              requireRecoveryCodes: true,
+            })
+          );
+        };
+      }
       // Coverage comes from the app this fixture actually serves — the
       // default SQLite run and the in-process PostgreSQL run alike (see
       // routeTableOf for the filtering).
@@ -12993,9 +13016,9 @@ export async function createFixture(
         // that sets the new password, so this one logs in with that password
         // and exercises local media upload/read-back and CSV import on the
         // same install. The fresh runtime has an R2 MEDIA binding on Workers
-        // too, so it runs there as well. No restart step: the fresh install lives on an
-        // in-memory SQLite (or a reset PostgreSQL schema) that the harness
-        // cannot close and reopen.
+        // too, so it runs there as well. The restart proof is the separate
+        // 'field-kit-restart' journey (skipped journeys do not count toward
+        // coverage, so it must not hide steps inside this one).
         persona: 'field-kit',
         ...{
           ...(freshBaseUrl
@@ -13137,6 +13160,125 @@ export async function createFixture(
             },
           ] as Step[],
         },
+      },
+      {
+        // Field-kit restart proof: closes the fresh install's temp-file
+        // SQLite, reopens a NEW app over the same file and byte store, and
+        // proves the session, imported place, photo bytes and recovery state
+        // survived. Only the in-process SQLite fixture can express this; it is
+        // a separate journey so a skip never removes the field-kit coverage.
+        persona: 'field-kit-restart',
+        ...(restartFreshInstall
+          ? {}
+          : {
+              skipped: backend
+                ? 'Workers/workerd runs the app out of process over D1/R2 bindings the harness cannot close and reopen'
+                : 'PostgreSQL fresh install resets a shared schema on open; the harness has no reopen-in-place, so restart is proved on SQLite only',
+            }),
+        ...(freshBaseUrl
+          ? { baseUrl: freshBaseUrl }
+          : { handler: freshHandler }),
+        steps: [
+          {
+            name: 'field-kit-restart admin logs in before restart',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.213',
+              'cf-connecting-ip': '203.0.113.213',
+            },
+            body: {
+              identifier: 'qa-fresh-admin@example.test',
+              communitySlug: 'qa-fresh-bootstrap',
+              derivedKey: freshAdminRecoveredKey,
+            },
+            checkHeaders: hasSessionCookie,
+          },
+          {
+            name: 'session works before restart',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            saveCookieAs: 'preRestart',
+          },
+          {
+            name: 'restart: pre-restart session cookie still authenticates',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            useSavedCookie: 'preRestart',
+            prepare: async () => {
+              await restartFreshInstall!();
+            },
+            check: (body) =>
+              ownMeUser(
+                'qa-fresh-admin@example.test',
+                'admin',
+                liveSessionCookie,
+                freshBootstrapCommunityId,
+                true
+              )(body),
+          },
+          {
+            name: 'restart: imported place survives',
+            method: 'GET',
+            path: '/v2/places',
+            expected: 200,
+            useSavedCookie: 'preRestart',
+            check: (body) => {
+              const parsed = PublicPlacesListResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              const place = parsed.data.data.find(
+                (p) => p.name === 'QA Field Kit Place'
+              );
+              return (
+                !!place &&
+                place.region === 'Lowlands' &&
+                place.photos.length === 1 &&
+                place.photos[0]!.fileId === fieldKitFileId
+              );
+            },
+          },
+          {
+            name: 'restart: photo bytes read back identical',
+            method: 'GET',
+            path: '/v2/media/pending',
+            expected: 200,
+            useSavedCookie: 'preRestart',
+            prepare: () => {
+              if (!fieldKitFileId) throw new Error('Missing field-kit file');
+              return `/v2/media/${fieldKitFileId}`;
+            },
+            checkBytes: (bytes: Uint8Array) =>
+              bytes.byteLength === mediaPngBytes.byteLength &&
+              bytes.every((b, i) => b === mediaPngBytes[i]),
+          },
+          {
+            name: 'restart: fresh login with the same credentials succeeds',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.214',
+              'cf-connecting-ip': '203.0.113.214',
+            },
+            body: {
+              identifier: 'qa-fresh-admin@example.test',
+              communitySlug: 'qa-fresh-bootstrap',
+              derivedKey: freshAdminRecoveredKey,
+            },
+            checkHeaders: hasSessionCookie,
+          },
+          {
+            name: 'logout field-kit-restart admin',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+          },
+        ] as Step[],
       },
       {
         // SPEC-V2 §7 recovery-code gate (#254/#265): continues the fresh

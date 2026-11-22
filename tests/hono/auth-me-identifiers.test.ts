@@ -71,6 +71,12 @@ describe('PATCH /v2/auth/me login identifiers (self-edit)', () => {
       'member',
       alpha.id
     );
+    const admin = await addUser(
+      'admin@self.example.test',
+      'self_admin',
+      'admin',
+      alpha.id
+    );
     const peer = await addUser(
       'peer@self.example.test',
       'self_peer',
@@ -114,7 +120,21 @@ describe('PATCH /v2/auth/me login identifiers (self-edit)', () => {
       });
     const row = async (id: number) =>
       (await db.select().from(usersSqlite).where(eq(usersSqlite.id, id)))[0]!;
-    return { app, db, sqlite, key, me, peer, other, root, login, patch, row };
+    return {
+      app,
+      db,
+      sqlite,
+      key,
+      me,
+      admin,
+      peer,
+      other,
+      root,
+      alpha,
+      login,
+      patch,
+      row,
+    };
   }
 
   it('changes username and email with step-up, keeps sessions, audits content-free', async () => {
@@ -313,7 +333,8 @@ describe('PATCH /v2/auth/me login identifiers (self-edit)', () => {
   // one writing `username`), i.e. after the step-up read, inside the write
   // transaction.
   async function interposedApp(
-    mutate: (sqlite: Sqlite.Database, userId: number) => void
+    mutate: (sqlite: Sqlite.Database, userId: number) => void,
+    as: 'me' | 'admin' = 'me'
   ) {
     const ctx = await setup();
     let fired = false;
@@ -333,7 +354,10 @@ describe('PATCH /v2/auth/me login identifiers (self-edit)', () => {
                   return (patch: Record<string, unknown>) => {
                     if (!fired && 'username' in patch) {
                       fired = true;
-                      mutate(ctx.sqlite, ctx.me.id);
+                      mutate(
+                        ctx.sqlite,
+                        (as === 'admin' ? ctx.admin : ctx.me).id
+                      );
                     }
                     return value.call(b, patch);
                   };
@@ -360,7 +384,9 @@ describe('PATCH /v2/auth/me login identifiers (self-edit)', () => {
       serverSecret: makeServerSecret(),
       secureCookies: false,
     });
-    const { cookie } = await ctx.login('me@self.example.test');
+    const { cookie } = await ctx.login(
+      as === 'admin' ? 'admin@self.example.test' : 'me@self.example.test'
+    );
     const request = () =>
       app.request('http://test/v2/auth/me', {
         method: 'PATCH',
@@ -411,5 +437,37 @@ describe('PATCH /v2/auth/me login identifiers (self-edit)', () => {
     expect(after.username).toBe('self_me');
     expect(after.email).toBe('me@self.example.test');
     expect(successAudits(sqlite).n).toBe(0);
+  });
+
+  it('refuses a member whose community is disabled between the step-up read and the write', async () => {
+    const { me, alpha, row, sqlite, request, wasFired } = await interposedApp(
+      (db) => {
+        db.prepare('UPDATE communities SET is_active = 0 WHERE id = ?').run(
+          alpha.id
+        );
+      }
+    );
+    const response = await request();
+    expect(wasFired()).toBe(true);
+    expect(response.status).toBe(403);
+    const after = await row(me.id);
+    expect(after.username).toBe('self_me');
+    expect(after.email).toBe('me@self.example.test');
+    expect(successAudits(sqlite).n).toBe(0);
+  });
+
+  it('keeps the sovereignty surface for an own-admin of a disabled community (SPEC-V2 §7)', async () => {
+    const { admin, alpha, row, sqlite, request, wasFired } =
+      await interposedApp((db) => {
+        db.prepare('UPDATE communities SET is_active = 0 WHERE id = ?').run(
+          alpha.id
+        );
+      }, 'admin');
+    const response = await request();
+    expect(wasFired()).toBe(true);
+    expect(response.status).toBe(200);
+    const after = await row(admin.id);
+    expect(after.username).toBe('self_midflight');
+    expect(successAudits(sqlite).n).toBe(1);
   });
 });

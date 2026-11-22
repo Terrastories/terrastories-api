@@ -37,6 +37,7 @@ import {
   type ValidatedAuditEntryRecord,
 } from '../shared/utils/audit-entry.js';
 import { buildAuditEntryInsert } from './audit-entry.repository.js';
+import { userAuthorityConditions } from './hono-foundation.repository.js';
 
 export interface ManagedUserRow {
   id: number;
@@ -870,12 +871,15 @@ export class UserManagementRepository {
       patch.emailNormalized = input.emailNormalized;
     }
     const { passwordHash, passwordVerifier } = input.anchor;
-    // Anchor = verified credential AND still an active member of the same
-    // community, so an account disabled (or moved) mid-request is refused.
+    // Anchor = verified credential AND current access, decided exactly as the
+    // session / password-change gate decides it (active user, V2 role, active
+    // community, or the own-admin / steward sovereignty surface of a disabled
+    // one; SPEC-V2 §7). An account disabled, moved or whose community is
+    // disabled mid-request is refused.
     const anchorWhere = () =>
       and(
         eq(users.id, input.id),
-        eq(users.isActive, true),
+        userAuthorityConditions(db),
         input.communityId === null
           ? isNull(users.communityId)
           : eq(users.communityId, input.communityId),
@@ -945,19 +949,7 @@ export class UserManagementRepository {
           ${validatedAudit.userAgent}, ${Date.now()}
         where exists (
           select 1 from users
-          where id = ${input.id}
-            and is_active = 1
-            and ${
-              input.communityId === null
-                ? sql`community_id is null`
-                : sql`community_id = ${input.communityId}`
-            }
-            and password_hash = ${passwordHash}
-            and ${
-              passwordVerifier === null
-                ? sql`password_verifier is null`
-                : sql`password_verifier = ${passwordVerifier}`
-            }
+          where ${anchorWhere()}
         ) and ${collisionSql ?? sql`1 = 1`}`
       );
       const results = await db.batch([auditInsert, guardedUpdate(db)]);

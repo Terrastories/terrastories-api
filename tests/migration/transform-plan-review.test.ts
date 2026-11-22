@@ -286,6 +286,24 @@ describe('story slug', () => {
   });
 });
 
+describe('unknown tables', () => {
+  it('keys custom rows by ordinal so repeated key columns do not collide', () => {
+    const plan = planTransform(
+      bundleOf({
+        custom_settings: [
+          { key: 'theme', value: 'a' },
+          { key: 'theme', value: 'b' },
+        ],
+      })
+    );
+    const ids = plan.archivedRows
+      .filter((r) => r.table === 'custom_settings')
+      .map((r) => r.id);
+    expect(ids).toEqual(['1', '2']);
+    expect(plan.statusCounts.custom_settings?.archived).toBe(2);
+  });
+});
+
 describe('sequence floors', () => {
   it('records max source ids including rows left out of the canonical set', () => {
     const plan = planTransform(

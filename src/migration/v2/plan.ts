@@ -303,8 +303,12 @@ export function planTransform(
     }
     return cached;
   };
-  const rowKey = (row: SourceRow, index: number): string =>
-    row.id ?? row.version ?? row.key ?? String(index + 1);
+  // Known tables keep their natural key; an unknown (custom) table has no
+  // guaranteed unique column, so it is keyed by the row ordinal instead.
+  const rowKey = (table: string, row: SourceRow, index: number): string =>
+    knownTables.has(table)
+      ? (row.id ?? row.version ?? row.key ?? String(index + 1))
+      : String(index + 1);
 
   const canonical = Object.fromEntries(
     CANONICAL_TABLES.map((table) => [table, [] as CanonicalRow[]])
@@ -1475,7 +1479,7 @@ export function planTransform(
       'ar_internal_metadata',
     ]) {
       for (const [index, row] of rows(table).entries()) {
-        const id = rowKey(row, index);
+        const id = rowKey(table, row, index);
         setStatus(table, id, 'archived');
         archivedRows.push({ table, id, reason: 'archive_only_table', row });
       }
@@ -1641,7 +1645,7 @@ export function planTransform(
   for (const table of unknownTables) {
     warn('unknown_table_archived', table, null);
     for (const [index, row] of rows(table).entries()) {
-      const id = rowKey(row, index);
+      const id = rowKey(table, row, index);
       setStatus(table, id, 'archived');
       archivedRows.push({ table, id, reason: 'unknown_table', row });
     }
@@ -1670,7 +1674,7 @@ export function planTransform(
     ) as Record<RowStatus, number>;
     const byId = rowStatus.get(table);
     for (const [index, row] of rows(table).entries()) {
-      const status = byId?.get(rowKey(row, index));
+      const status = byId?.get(rowKey(table, row, index));
       if (status === undefined) {
         throw new Error(
           'Internal error: source row without disposition (' + table + ')'

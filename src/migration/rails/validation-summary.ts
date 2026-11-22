@@ -6,6 +6,12 @@ export function buildCaptureValidationSummary(
   const tableLines = Object.entries(manifest.tables)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([tableName, table]) => `  - ${tableName}: ${table.rowCount} rows`);
+  const selectionSummary =
+    manifest.blobSelection.mode === 'all'
+      ? 'all'
+      : `community_allowlist (${manifest.blobSelection.communities
+          .map((community) => community.id)
+          .join(', ')})`;
 
   return [
     'Terrastories Rails Stage-1 Capture Validation Summary',
@@ -17,12 +23,16 @@ export function buildCaptureValidationSummary(
     `Pinned Rails schema version: ${manifest.source.pinnedRailsSchemaVersion}`,
     `Observed Rails schema version: ${manifest.source.observedSchemaVersion}`,
     `Source schema SHA-256: ${manifest.source.schemaSha256}`,
+    `Blob source: ${manifest.storage.kind}`,
+    `Blob selection: ${selectionSummary}`,
     `Archive: ${manifest.archive.filename}`,
     `Archive bytes: ${manifest.archive.byteSize}`,
     `Archive SHA-256: ${manifest.archive.sha256}`,
     `Tables: ${manifest.totals.tables}`,
     `Rows: ${manifest.totals.rows}`,
     `Blobs: ${manifest.totals.blobs}`,
+    `Blobs selected: ${manifest.totals.blobsSelected}`,
+    `Blobs not_selected: ${manifest.totals.blobsNotSelected}`,
     '',
     'Captured table counts:',
     ...tableLines,

@@ -12,14 +12,23 @@ import {
   type RailsSourceContract,
 } from './contract.js';
 import {
-  type CapturedBlob,
+  type ManifestBlob,
+  mapWithConcurrency,
   verifyAndCopyActiveStorageBlob,
 } from './active-storage.js';
+import {
+  resolveS3CredentialsFromEnv,
+  type S3BlobSourceConfig,
+  type S3Credentials,
+  validateS3Config,
+  verifyAndDownloadS3Blob,
+} from './s3-client.js';
 import { buildCaptureValidationSummary } from './validation-summary.js';
 
 const PAGE_SIZE = 500;
 const JSON_BUILD_OBJECT_COLUMN_CHUNK = 40;
 const ARCHIVE_FILENAME = 'legacy.sqlite';
+const DEFAULT_BLOB_CONCURRENCY = 4;
 
 export interface SourceColumn {
   columnName: string;
@@ -61,6 +70,16 @@ export interface SourceTable {
   rowSecurityForced: boolean;
 }
 
+export interface BlobSelectionMetadata {
+  mode: 'all' | 'community_allowlist';
+  selectors: string[];
+  communities: Array<{ id: string; slug: string | null }>;
+}
+
+export type RailsCaptureStorage =
+  | { kind: 'disk' }
+  | { kind: 's3'; bucket: string; region: string; prefix: string | null };
+
 export interface RailsCaptureManifest {
   formatVersion: 1;
   source: {
@@ -71,6 +90,8 @@ export interface RailsCaptureManifest {
     observedSchemaVersion: RailsSourceContract['migrationVersion'];
     schemaSha256: string;
   };
+  storage: RailsCaptureStorage;
+  blobSelection: BlobSelectionMetadata;
   archive: {
     filename: typeof ARCHIVE_FILENAME;
     byteSize: string;
@@ -89,19 +110,46 @@ export interface RailsCaptureManifest {
       rowSecurityForced: boolean;
     }
   >;
-  blobs: CapturedBlob[];
+  blobs: ManifestBlob[];
   totals: {
     tables: number;
     rows: number;
     blobs: number;
+    blobsSelected: number;
+    blobsNotSelected: number;
   };
 }
+
+export type RailsBlobSource =
+  | { kind: 'disk'; blobRoot?: string }
+  | ({ kind: 's3' } & S3BlobSourceConfig);
 
 export interface CaptureRailsOptions {
   sourceUrl: string;
   outputDir: string;
   blobRoot?: string;
+  blobSource?: RailsBlobSource;
+  communities?: string[];
+  blobConcurrency?: number;
 }
+
+type ResolvedBlobSource =
+  | {
+      kind: 'disk';
+      blobRoot?: string;
+      storageManifest: { kind: 'disk' };
+    }
+  | {
+      kind: 's3';
+      s3: S3BlobSourceConfig;
+      credentials: S3Credentials;
+      storageManifest: {
+        kind: 's3';
+        bucket: string;
+        region: string;
+        prefix: string | null;
+      };
+    };
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
@@ -123,6 +171,35 @@ function quoteIdentifier(value: string): string {
 
 function quoteLiteral(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
+}
+
+function resolveBlobSourceOption(
+  options: CaptureRailsOptions
+): ResolvedBlobSource {
+  if (options.blobSource?.kind === 's3') {
+    const normalized = validateS3Config(options.blobSource);
+    const credentials = resolveS3CredentialsFromEnv(options.blobSource.env);
+    return {
+      kind: 's3',
+      s3: options.blobSource,
+      credentials,
+      storageManifest: {
+        kind: 's3',
+        bucket: normalized.bucket,
+        region: normalized.region,
+        prefix: normalized.prefix,
+      },
+    };
+  }
+
+  return {
+    kind: 'disk',
+    blobRoot:
+      options.blobSource?.kind === 'disk'
+        ? (options.blobSource.blobRoot ?? options.blobRoot)
+        : options.blobRoot,
+    storageManifest: { kind: 'disk' },
+  };
 }
 
 async function assertPathDoesNotExist(path: string): Promise<void> {
@@ -354,6 +431,175 @@ async function readObservedSchemaVersion(
   return result.rows[0]?.version ?? null;
 }
 
+async function resolveCommunityAllowlist(
+  client: PoolClient,
+  selectors: readonly string[] | undefined
+): Promise<BlobSelectionMetadata> {
+  if (!selectors || selectors.length === 0) {
+    return { mode: 'all', selectors: [], communities: [] };
+  }
+
+  const trimmedSelectors = selectors.map((selector) => selector.trim());
+  for (const selector of trimmedSelectors) {
+    if (selector === '') {
+      throw new Error('Community selector cannot be empty');
+    }
+  }
+
+  const resolvedById = new Map<string, { id: string; slug: string | null }>();
+  for (const selector of trimmedSelectors) {
+    let matches: Array<{ id: string; slug: string | null }> = [];
+    if (/^\d+$/.test(selector)) {
+      const byId = await client.query<{ id: string; slug: string | null }>(
+        `SELECT id::text AS id, slug FROM communities WHERE id::text = $1`,
+        [selector]
+      );
+      matches = byId.rows;
+    }
+    if (matches.length === 0) {
+      const bySlug = await client.query<{ id: string; slug: string | null }>(
+        `SELECT id::text AS id, slug FROM communities WHERE slug = $1 ORDER BY id`,
+        [selector]
+      );
+      matches = bySlug.rows;
+    }
+
+    if (matches.length === 0) {
+      throw new Error(`Community selector not found: ${selector}`);
+    }
+    if (matches.length > 1) {
+      throw new Error(
+        `Community selector is ambiguous (${matches.length} matches): ${selector}; specify numeric community id instead`
+      );
+    }
+    const matched = matches[0]!;
+    resolvedById.set(matched.id, matched);
+  }
+
+  const communities = [...resolvedById.values()].sort((left, right) => {
+    const a = BigInt(left.id);
+    const b = BigInt(right.id);
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return 0;
+  });
+
+  return {
+    mode: 'community_allowlist',
+    selectors: trimmedSelectors,
+    communities,
+  };
+}
+
+async function resolveReachableBlobIds(
+  client: PoolClient,
+  communityIds: readonly string[],
+  tableNames: Set<string>
+): Promise<Set<string>> {
+  const selectedBlobIds = new Set<string>();
+  if (
+    communityIds.length === 0 ||
+    !tableNames.has('active_storage_attachments')
+  ) {
+    return selectedBlobIds;
+  }
+
+  const directResult = await client.query<{ blob_id: string }>(
+    `
+      SELECT DISTINCT a.blob_id::text AS blob_id
+      FROM active_storage_attachments a
+      WHERE (a.record_type = 'Community' AND a.record_id::text = ANY($1::text[]))
+         OR (
+           a.record_type = 'Place'
+           AND EXISTS (
+             SELECT 1 FROM places p
+             WHERE p.id = a.record_id AND p.community_id::text = ANY($1::text[])
+           )
+         )
+         OR (
+           a.record_type = 'Speaker'
+           AND EXISTS (
+             SELECT 1 FROM speakers s
+             WHERE s.id = a.record_id AND s.community_id::text = ANY($1::text[])
+           )
+         )
+         OR (
+           a.record_type = 'Theme'
+           AND EXISTS (
+             SELECT 1 FROM themes t
+             WHERE t.id = a.record_id AND t.community_id::text = ANY($1::text[])
+           )
+         )
+         OR (
+           a.record_type = 'User'
+           AND EXISTS (
+             SELECT 1 FROM users u
+             WHERE u.id = a.record_id AND u.community_id::text = ANY($1::text[])
+           )
+         )
+         OR (
+           a.record_type = 'Media'
+           AND EXISTS (
+             SELECT 1
+             FROM media m
+             JOIN stories st ON st.id = m.story_id
+             WHERE m.id = a.record_id AND st.community_id::text = ANY($1::text[])
+           )
+         )
+    `,
+    [communityIds]
+  );
+  for (const row of directResult.rows) {
+    selectedBlobIds.add(row.blob_id);
+  }
+
+  const derivedEdges: Array<[string, string]> = [];
+  const previewResult = await client.query<{
+    parent_blob_id: string;
+    child_blob_id: string;
+  }>(`
+    SELECT a.record_id::text AS parent_blob_id, a.blob_id::text AS child_blob_id
+    FROM active_storage_attachments a
+    WHERE a.record_type = 'ActiveStorage::Blob'
+      AND a.name = 'preview_image'
+  `);
+  for (const row of previewResult.rows) {
+    derivedEdges.push([row.parent_blob_id, row.child_blob_id]);
+  }
+
+  if (tableNames.has('active_storage_variant_records')) {
+    const variantResult = await client.query<{
+      parent_blob_id: string;
+      child_blob_id: string;
+    }>(`
+      SELECT vr.blob_id::text AS parent_blob_id, a.blob_id::text AS child_blob_id
+      FROM active_storage_variant_records vr
+      JOIN active_storage_attachments a
+        ON a.record_type = 'ActiveStorage::VariantRecord'
+       AND a.record_id = vr.id
+    `);
+    for (const row of variantResult.rows) {
+      derivedEdges.push([row.parent_blob_id, row.child_blob_id]);
+    }
+  }
+
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (const [parentBlobId, childBlobId] of derivedEdges) {
+      if (
+        selectedBlobIds.has(parentBlobId) &&
+        !selectedBlobIds.has(childBlobId)
+      ) {
+        selectedBlobIds.add(childBlobId);
+        expanded = true;
+      }
+    }
+  }
+
+  return selectedBlobIds;
+}
+
 function initializeArchive(path: string): Database.Database {
   const archive = new Database(path);
   archive.pragma('journal_mode = DELETE');
@@ -517,10 +763,12 @@ async function captureTable(
 
 async function captureBlobs(
   client: PoolClient,
-  blobRoot: string | undefined,
+  blobSource: ResolvedBlobSource,
   destinationRoot: string,
-  tableNames: Set<string>
-): Promise<CapturedBlob[]> {
+  tableNames: Set<string>,
+  selectedBlobIds: Set<string> | null,
+  concurrency: number
+): Promise<ManifestBlob[]> {
   if (!tableNames.has('active_storage_blobs')) return [];
 
   const result = await client.query<{
@@ -544,17 +792,43 @@ async function captureBlobs(
     ORDER BY id
   `);
 
-  if (result.rows.length > 0 && !blobRoot) {
+  const selectedRows = result.rows.filter(
+    (blob) => selectedBlobIds === null || selectedBlobIds.has(blob.id)
+  );
+  if (
+    selectedRows.length > 0 &&
+    blobSource.kind === 'disk' &&
+    !blobSource.blobRoot
+  ) {
     throw new Error(
       'ActiveStorage blobs exist but no blobRoot was supplied. Export/provide all blob bytes before migration.'
     );
   }
 
-  const blobs: CapturedBlob[] = [];
-  for (const blob of result.rows) {
-    blobs.push(
-      await verifyAndCopyActiveStorageBlob({
-        blobRoot: blobRoot!,
+  if (selectedRows.length > 0) {
+    await mkdir(destinationRoot, { recursive: true, mode: 0o700 });
+  }
+
+  return mapWithConcurrency(result.rows, concurrency, async (blob, signal) => {
+    const isSelected = selectedBlobIds === null || selectedBlobIds.has(blob.id);
+    if (!isSelected) {
+      return {
+        disposition: 'not_selected',
+        id: blob.id,
+        key: blob.key,
+        filename: blob.filename,
+        contentType: blob.content_type,
+        byteSize: blob.byte_size,
+        railsChecksum: blob.checksum,
+        sha256: null,
+        serviceName: blob.service_name,
+      };
+    }
+
+    if (blobSource.kind === 's3') {
+      return verifyAndDownloadS3Blob({
+        s3: blobSource.s3,
+        credentials: blobSource.credentials,
         destinationRoot,
         id: blob.id,
         key: blob.key,
@@ -563,10 +837,22 @@ async function captureBlobs(
         byteSize: blob.byte_size,
         checksum: blob.checksum,
         serviceName: blob.service_name,
-      })
-    );
-  }
-  return blobs;
+        signal,
+      });
+    }
+
+    return verifyAndCopyActiveStorageBlob({
+      blobRoot: blobSource.blobRoot!,
+      destinationRoot,
+      id: blob.id,
+      key: blob.key,
+      filename: blob.filename,
+      contentType: blob.content_type,
+      byteSize: blob.byte_size,
+      checksum: blob.checksum,
+      serviceName: blob.service_name,
+    });
+  });
 }
 
 async function configureDeterministicSourceSession(
@@ -752,6 +1038,18 @@ export async function verifyCapturedArchive(
 export async function captureRailsToBundle(
   options: CaptureRailsOptions
 ): Promise<RailsCaptureManifest> {
+  const blobConcurrency = options.blobConcurrency ?? DEFAULT_BLOB_CONCURRENCY;
+  if (
+    !Number.isInteger(blobConcurrency) ||
+    blobConcurrency < 1 ||
+    blobConcurrency > 32
+  ) {
+    throw new Error(
+      `Invalid blobConcurrency: ${blobConcurrency}. Must be an integer between 1 and 32.`
+    );
+  }
+
+  const blobSource = resolveBlobSourceOption(options);
   const resolvedOutputDir = resolve(options.outputDir);
   await assertPathDoesNotExist(resolvedOutputDir);
   await mkdir(dirname(resolvedOutputDir), { recursive: true });
@@ -783,6 +1081,19 @@ export async function captureRailsToBundle(
     const contract = selectRailsSourceContract(observedSchemaVersion);
     validateRailsSourceSchema(tables, contract);
     const schemaSha256 = sha256(JSON.stringify(tables));
+
+    const blobSelection = await resolveCommunityAllowlist(
+      client,
+      options.communities
+    );
+    const selectedBlobIds =
+      blobSelection.mode === 'all'
+        ? null
+        : await resolveReachableBlobIds(
+            client,
+            blobSelection.communities.map((community) => community.id),
+            tableNames
+          );
 
     archive = initializeArchive(archivePath);
     const insertMetadata = archive.prepare(
@@ -819,10 +1130,16 @@ export async function captureRailsToBundle(
 
     const blobs = await captureBlobs(
       client,
-      options.blobRoot,
+      blobSource,
       join(temporaryDir, 'blobs'),
-      tableNames
+      tableNames,
+      selectedBlobIds,
+      blobConcurrency
     );
+    const blobsSelected = blobs.filter(
+      (blob) => blob.disposition === 'captured'
+    ).length;
+    const blobsNotSelected = blobs.length - blobsSelected;
 
     archive.close();
     archive = null;
@@ -840,6 +1157,8 @@ export async function captureRailsToBundle(
         observedSchemaVersion: contract.migrationVersion,
         schemaSha256,
       },
+      storage: blobSource.storageManifest,
+      blobSelection,
       archive: {
         filename: ARCHIVE_FILENAME,
         byteSize: String(archiveStat.size),
@@ -851,6 +1170,8 @@ export async function captureRailsToBundle(
         tables: tables.length,
         rows: totalRows,
         blobs: blobs.length,
+        blobsSelected,
+        blobsNotSelected,
       },
     };
 

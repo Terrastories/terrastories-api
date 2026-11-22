@@ -11124,6 +11124,13 @@ export async function createFixture(
             check: ssStatus('active'),
           },
           {
+            name: 're-enabled target pre-disable session stays purged',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 401,
+            useSavedCookie: 'qaDisableTargetCookie',
+          },
+          {
             name: 're-enabled target logs in again',
             method: 'POST',
             path: '/v2/auth/login',

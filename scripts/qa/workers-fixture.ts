@@ -149,16 +149,21 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
   // seeded community administrator an active recovery code so the journeys
   // reach their routes. Gate behaviour itself is covered by
   // tests/hono/recovery-code-gate.test.ts.
-  await backend.db.run(
-    sql`INSERT INTO login_codes (community_id, user_id, purpose, code_hash, created_by, created_at)
-        SELECT community_id, id, 'recovery', 'seeded-recovery-' || id, id, 0
-        FROM users u
-        WHERE role = 'admin' AND community_id IS NOT NULL
-          AND NOT EXISTS (
-            SELECT 1 FROM login_codes c
-            WHERE c.user_id = u.id AND c.purpose = 'recovery'
-              AND c.used_at IS NULL AND c.superseded_at IS NULL
-          )`
-  );
+  try {
+    await backend.db.run(
+      sql`INSERT INTO login_codes (community_id, user_id, purpose, code_hash, created_by, created_at)
+          SELECT community_id, id, 'recovery', 'seeded-recovery-' || id, id, 0
+          FROM users u
+          WHERE role = 'admin' AND community_id IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM login_codes c
+              WHERE c.user_id = u.id AND c.purpose = 'recovery'
+                AND c.used_at IS NULL AND c.superseded_at IS NULL
+            )`
+    );
+  } catch (error) {
+    await fixture.close().catch(() => undefined);
+    throw error;
+  }
   return fixture;
 }

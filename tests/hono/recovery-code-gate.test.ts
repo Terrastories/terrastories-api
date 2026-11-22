@@ -111,17 +111,17 @@ describe('recovery-code gate (#254)', () => {
     const { get, grantCode } = await setup('admin', true);
     expect((await get('/v2/stories')).status).toBe(403);
     await grantCode();
-    expect((await get('/v2/stories')).status).not.toBe(403);
+    expect((await get('/v2/stories')).status).toBe(200);
   });
 
   it('does not gate non-administrators', async () => {
     const { get } = await setup('member', true);
-    expect((await get('/v2/stories')).status).not.toBe(403);
+    expect((await get('/v2/stories')).status).toBe(200);
   });
 
   it('is opt-in per app instance', async () => {
     const { get } = await setup('admin', false);
-    expect((await get('/v2/stories')).status).not.toBe(403);
+    expect((await get('/v2/stories')).status).toBe(200);
   });
 
   it('is enabled by both production entrypoints', () => {

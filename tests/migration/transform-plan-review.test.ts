@@ -474,6 +474,87 @@ describe('archive keys for tables without an id column', () => {
   });
 });
 
+describe('community selector resolution', () => {
+  const tables: Tables = {
+    communities: [
+      community('5', 'alpha'),
+      community('7', '5'),
+      community('8', 'dup'),
+      community('9', 'dup'),
+    ],
+  };
+  it('an existing numeric id wins over another community slug', () => {
+    const plan = planTransform(bundleOf(tables), { communities: ['5'] });
+    expect(plan.canonical.communities.map((c) => c.id)).toEqual([5]);
+  });
+  it('falls back to the slug when no community has that id', () => {
+    const plan = planTransform(bundleOf(tables), { communities: ['alpha'] });
+    expect(plan.canonical.communities.map((c) => c.id)).toEqual([5]);
+  });
+  it('rejects an ambiguous slug', () => {
+    expect(() =>
+      planTransform(bundleOf(tables), { communities: ['dup'] })
+    ).toThrow(/ambiguous/);
+  });
+});
+
+describe('media of a non-imported owner', () => {
+  it('is excluded_dependency, never pending_media_slice', () => {
+    const bad = { ...story('51', '1'), permission_level: '9' };
+    const b = bundleOf({
+      communities: [community('1', 'one')],
+      stories: [story('50', '1'), bad],
+      media: [
+        { id: '1', story_id: '50' },
+        { id: '2', story_id: '51' },
+      ],
+      active_storage_attachments: [
+        {
+          id: '1',
+          record_type: 'Media',
+          record_id: '1',
+          blob_id: '100',
+          name: 'f',
+        },
+        {
+          id: '2',
+          record_type: 'Media',
+          record_id: '2',
+          blob_id: '101',
+          name: 'f',
+        },
+      ],
+    });
+    (b.manifest as unknown as { blobs: unknown[] }).blobs = ['100', '101'].map(
+      (id) => ({
+        id,
+        key: 'k' + id,
+        byteSize: '1',
+        sha256: 'x',
+        disposition: 'captured',
+      })
+    );
+    const plan = planTransform(b);
+    expect(
+      Object.fromEntries(
+        plan.pendingMedia.attachments.map((a) => [a.id, a.status])
+      )
+    ).toEqual({ '1': 'pending_media_slice' });
+    expect(plan.manual).toEqual(
+      expect.arrayContaining([
+        {
+          table: 'active_storage_attachments',
+          id: '2',
+          code: 'media_owner_not_imported',
+        },
+        { table: 'media', id: '2', code: 'media_owner_not_imported' },
+      ])
+    );
+    expect(plan.statusCounts.media?.excluded_dependency).toBe(1);
+    expect(plan.statusCounts.media?.pending_media_slice).toBe(1);
+  });
+});
+
 describe('unknown tables', () => {
   it('keys custom rows by ordinal so repeated key columns do not collide', () => {
     const plan = planTransform(

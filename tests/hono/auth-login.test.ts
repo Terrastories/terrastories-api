@@ -469,6 +469,39 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
     expect(login.status).toBe(200);
   });
 
+  it('logs in a wrapped account whose verifier was wrapped from a raw $2a$ hash (walkthrough seed shape)', async () => {
+    const { postLogin, wrappedKey, db } = await setup();
+    const aPrefixed = '$2a$' + wrappedKey.slice(4);
+    await db
+      .update(usersSqlite)
+      .set({ passwordVerifier: await sha256Hex(aPrefixed) })
+      .where(eq(usersSqlite.email, 'wrapped@login.example.test'));
+    const login = await postLogin({
+      identifier: 'wrapped@login.example.test',
+      derivedKey: aPrefixed,
+      upgrade: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: makeVerifierSalt(),
+        params: { ...ARGON2ID_PARAMS },
+        derivedKey: makeDerivedKey(),
+      },
+    });
+    expect(login.status).toBe(200);
+    // a different bcrypt string is still rejected
+    const wrong = await postLogin({
+      identifier: 'wrapped@login.example.test',
+      derivedKey:
+        aPrefixed.slice(0, -1) + (aPrefixed.endsWith('A') ? 'B' : 'A'),
+      upgrade: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: makeVerifierSalt(),
+        params: { ...ARGON2ID_PARAMS },
+        derivedKey: makeDerivedKey(),
+      },
+    });
+    expect(wrong.status).toBe(401);
+  });
+
   it('answers a bcrypt-shaped key sent to an Argon2id account with the uniform 401', async () => {
     const { postLogin, wrappedKey } = await setup();
     // The wire shape is not the algorithm selector: a valid bcrypt-shaped key

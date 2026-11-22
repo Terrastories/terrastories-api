@@ -379,18 +379,31 @@ export function planTransform(
   const selectors = [...new Set(options.communities ?? [])].sort();
   const selectedIds = new Set<number>();
   for (const selector of selectors) {
-    const matches = communityRows.filter(
-      (row) => row.id === selector || (row.slug ?? null) === selector
-    );
+    // Same resolution as Stage 1: an existing numeric id wins; otherwise the
+    // slug must match exactly one community.
+    let matches: SourceRow[] = [];
+    if (/^\d+$/.test(selector)) {
+      matches = communityRows.filter((row) => row.id === selector);
+    }
+    if (matches.length === 0) {
+      matches = communityRows.filter((row) => (row.slug ?? null) === selector);
+    }
     if (matches.length === 0) {
       throw new Error(
         'Community selector matched no source community: ' + selector
       );
     }
-    for (const match of matches) {
-      const id = toId(match.id);
-      if (id !== null) selectedIds.add(id);
+    if (matches.length > 1) {
+      throw new Error(
+        'Community selector is ambiguous (' +
+          matches.length +
+          ' matches): ' +
+          selector +
+          '; specify the numeric community id instead'
+      );
     }
+    const id = toId(matches[0]!.id);
+    if (id !== null) selectedIds.add(id);
   }
   const allMode = selectors.length === 0;
   // A partial (community_allowlist) capture is incomplete source data: a full
@@ -1539,6 +1552,49 @@ export function planTransform(
         return null;
     }
   };
+  // Whether the record that owns the media was itself imported; media of a
+  // MANUAL/excluded/archived owner must not be promised to the media slice.
+  const imported = (table: string, id: string): boolean =>
+    rowStatus.get(table)?.get(id) === 'imported';
+  const ownerImported = (
+    recordType: string,
+    recordId: string,
+    depth = 0
+  ): boolean => {
+    if (depth > 8) return false;
+    switch (recordType) {
+      case 'Community':
+        return imported('communities', recordId);
+      case 'Place':
+        return imported('places', recordId);
+      case 'Speaker':
+        return imported('speakers', recordId);
+      case 'User':
+        return imported('users', recordId);
+      case 'Theme':
+        return imported('themes', recordId);
+      case 'Media':
+        return imported('stories', mediaStory.get(recordId) ?? '');
+      case 'ActiveStorage::VariantRecord': {
+        const variant = variantRecords.find((row) => row.id === recordId);
+        return variant ? blobImported(variant.blob_id ?? '', depth + 1) : false;
+      }
+      case 'ActiveStorage::Blob':
+        return blobImported(recordId, depth + 1);
+      default:
+        return false;
+    }
+  };
+  const blobImported = (blobId: string, depth: number): boolean =>
+    attachments.some(
+      (attachment) =>
+        attachment.blob_id === blobId &&
+        ownerImported(
+          attachment.record_type ?? '',
+          attachment.record_id ?? '',
+          depth
+        )
+    );
   // A blob's owner is found through every attachment that uses it. Derived
   // blobs (preview_image on an ActiveStorage::Blob record, variant images on a
   // VariantRecord) are followed transitively to the original owning record.
@@ -1574,7 +1630,8 @@ export function planTransform(
     row: SourceRow,
     owner: Owner,
     unattributedCode: string,
-    blobId?: string | null
+    blobId?: string | null,
+    ownerIsImported = true
   ): 'pending_media_slice' | 'not_selected' | null => {
     if (owner === null) {
       orphan(table, row, null, unattributedCode);
@@ -1586,6 +1643,10 @@ export function planTransform(
       blobId !== undefined && !capturedBlobIds.has(blobId ?? '');
     if (owner === 'system') {
       if (includeSystemUsers) {
+        if (!ownerIsImported) {
+          reject(table, row, 'excluded_dependency', 'media_owner_not_imported');
+          return null;
+        }
         if (bytesMissing) {
           reject(table, row, 'manual', 'media_bytes_not_captured');
           return null;
@@ -1605,6 +1666,10 @@ export function planTransform(
       reject(table, row, 'excluded_dependency', 'community_excluded');
       return null;
     }
+    if (!ownerIsImported) {
+      reject(table, row, 'excluded_dependency', 'media_owner_not_imported');
+      return null;
+    }
     if (bytesMissing) {
       reject(table, row, 'manual', 'media_bytes_not_captured');
       return null;
@@ -1620,7 +1685,8 @@ export function planTransform(
       row,
       owner,
       'attachment_unattributable',
-      row.blob_id
+      row.blob_id,
+      ownerImported(row.record_type ?? '', row.record_id ?? '')
     );
     if (status === null) continue;
     pendingAttachments.push({
@@ -1638,7 +1704,9 @@ export function planTransform(
       'media',
       row,
       entityOwner(storyMap, row.story_id ?? ''),
-      'media_story_missing'
+      'media_story_missing',
+      undefined,
+      imported('stories', row.story_id ?? '')
     );
   }
   for (const row of variantRecords) {
@@ -1646,7 +1714,9 @@ export function planTransform(
       'active_storage_variant_records',
       row,
       ownerOf('ActiveStorage::VariantRecord', row.id ?? ''),
-      'variant_unattributable'
+      'variant_unattributable',
+      undefined,
+      ownerImported('ActiveStorage::VariantRecord', row.id ?? '')
     );
   }
   // Blob dispositions follow the transform selection, not the capture

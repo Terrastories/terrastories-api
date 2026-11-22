@@ -115,6 +115,14 @@ export async function viewerChapter(ctx: Ctx): Promise<void> {
       expect: 204,
       covers: ['B03'],
     });
+    await w.step({
+      who: vera,
+      say: 'the old photo file is cleared out of storage',
+      method: 'DELETE',
+      path: `/v2/media/${photoFile}`,
+      expect: [204, 404],
+      covers: ['B03'],
+    });
 
     // ---- password -------------------------------------------------------
     const nextPassword = randomPassword();

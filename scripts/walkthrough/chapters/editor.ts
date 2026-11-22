@@ -65,6 +65,7 @@ export async function editorChapter(ctx: Ctx): Promise<void> {
     s.ids.place = placeId;
 
     const audio = await upload(ctx, elena, 'picks the place-name audio file (the browser uploads it to private staging)', wav(`${w.runId}-name.wav`), ['C10']);
+    s.files.placeAudio = audio;
     s.attachments.placeAudio = await attach(ctx, elena, 'attaches the audio to the place as its spoken name', { fileId: audio, ownerType: 'place', ownerId: placeId, role: 'place_name_audio', ordinal: 0 }, ['C10']);
     const photo = await upload(ctx, elena, 'picks a photo for the place', png(`${w.runId}-place.png`), ['C10']);
     s.files.placePhoto = photo;
@@ -119,6 +120,7 @@ export async function editorChapter(ctx: Ctx): Promise<void> {
     s.speakers.push(speakerId);
     s.ids.speaker = speakerId;
     const speakerPhoto = await upload(ctx, elena, 'picks a portrait for the speaker', png(`${w.runId}-maria.png`), ['C20']);
+    s.files.speakerPhoto = speakerPhoto;
     s.attachments.speakerPhoto = await attach(ctx, elena, 'attaches the portrait to the speaker', { fileId: speakerPhoto, ownerType: 'speaker', ownerId: speakerId, role: 'speaker_photo', ordinal: 0 }, ['C20']);
     await w.step({
       who: elena,
@@ -209,6 +211,14 @@ export async function editorChapter(ctx: Ctx): Promise<void> {
       expect: 204,
       covers: ['C04'],
       show: 'the element disappears from the form',
+    });
+    await w.step({
+      who: elena,
+      say: 'the form also clears the now-unused file out of storage',
+      method: 'DELETE',
+      path: `/v2/media/${m1}`,
+      expect: [204, 404],
+      covers: ['C04', 'V18'],
     });
     const stray = await upload(ctx, elena, 'picks a wrong file by mistake; it only sits in private staging', png(`${w.runId}-stray.png`), ['V18']);
     await w.step({
@@ -428,6 +438,14 @@ export async function editorChapter(ctx: Ctx): Promise<void> {
     });
     await w.step({
       who: elena,
+      say: 'clears the now-unused file out of storage',
+      method: 'DELETE',
+      path: `/v2/media/${s.files.placeAudio}`,
+      expect: [204, 404],
+      covers: ['V18'],
+    });
+    await w.step({
+      who: elena,
       say: 'removes the place photo',
       method: 'DELETE',
       path: `/v2/attachments/${s.attachments.placePhoto}`,
@@ -436,11 +454,27 @@ export async function editorChapter(ctx: Ctx): Promise<void> {
     });
     await w.step({
       who: elena,
+      say: 'clears the now-unused file out of storage',
+      method: 'DELETE',
+      path: `/v2/media/${s.files.placePhoto}`,
+      expect: [204, 404],
+      covers: ['V18'],
+    });
+    await w.step({
+      who: elena,
       say: 'removes the speaker portrait (the default avatar returns)',
       method: 'DELETE',
       path: `/v2/attachments/${s.attachments.speakerPhoto}`,
       expect: 204,
       covers: ['C21'],
+    });
+    await w.step({
+      who: elena,
+      say: 'clears the now-unused file out of storage',
+      method: 'DELETE',
+      path: `/v2/media/${s.files.speakerPhoto}`,
+      expect: [204, 404],
+      covers: ['V18'],
     });
 
     // ---- negatives ----------------------------------------------------
@@ -616,17 +650,8 @@ async function importChapter(ctx: Ctx, placeId: number, speakerId: number): Prom
     show: (r) => [field('status', val(r, 'data', 'status')), field('can commit', val(r, 'data', 'canCommit')), 'the invalid rows table lists row, field and reason, with "Download invalid rows as CSV"'],
   });
   const badId = val(bad, 'data', 'id');
-  if (typeof badId === 'number') {
-    s.imports.push(badId);
-    await w.step({
-      who: elena,
-      say: 'discards that preview',
-      method: 'DELETE',
-      path: `/v2/imports/${badId}`,
-      expect: [200, 204],
-      covers: ['C32'],
-    });
-  }
+  if (typeof badId === 'number') s.imports.push(badId);
+  w.narrate('Elena leaves that preview open for now; she discards the open previews when she tidies up at the end of the day.');
   await w.step({
     who: elena,
     say: 'opens the list of imports',
@@ -645,14 +670,7 @@ async function importChapter(ctx: Ctx, placeId: number, speakerId: number): Prom
     expect: 201,
     covers: ['C30'],
   });
-  await w.step({
-    who: elena,
-    say: 'discards the preview and its staged bytes',
-    method: 'DELETE',
-    path: `/v2/imports/${num(d, 'data', 'id')}`,
-    expect: [200, 204],
-    covers: ['C32'],
-  });
+  s.imports.push(num(d, 'data', 'id'));
   void placeId;
   void speakerId;
   void str;

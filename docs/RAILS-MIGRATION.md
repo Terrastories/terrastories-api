@@ -194,7 +194,7 @@ Every source row gets exactly one status per table: `imported`, `not_selected`, 
 - Story `permission_level` 0/1/2 maps to public/members_only/editors; NULL or unknown is MANUAL (never defaults to public). A public story in a private community stays physically `public`; the community's private flag gates it.
 - Defaults recorded as `TRANSFORM_DEFAULT` events plus warnings: community locale NULL to `en`; story title/language and place/speaker name NULL to an empty string.
 - Descriptions are sanitized with the migration sanitizer; changed values keep the raw original in the archive.
-- Media (`media`, `active_storage_*`) is recorded as `pending_media_slice`; no `files` rows are created yet. Theme credentials are archived, not copied into map configs.
+- Media (`media`, `active_storage_*`) is recorded as `pending_media_slice`; no `files` rows are created yet. Theme Mapbox/Protomaps settings are imported into `community_map_configs` using the same validators as the API (`src/shared/utils/map-config.ts`): only a public `pk.` token and a valid style URL are imported, and only as a pair (if either half is missing or invalid, neither is imported and a warning is recorded); `sk.`/malformed tokens and invalid style URLs stay in the restricted archive (warning codes `mapbox_token_not_public`, `mapbox_style_url_invalid`, `mapbox_pair_incomplete`; values are never logged). `expose_mapbox_credentials` is reset to false for a private community (`expose_mapbox_credentials_reset_private`), matching Rails.
 - Unknown tables are archived whole with a warning; unknown enabled flipper flags are MANUAL.
 
 ### Wrapped bcrypt verifiers

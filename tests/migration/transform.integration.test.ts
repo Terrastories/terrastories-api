@@ -397,16 +397,21 @@ describeWithPostgres('Rails -> V2 SQLite transform (Stage 2)', () => {
       db.close();
     });
 
-    it('maps themes to map configs and keeps credentials out of canonical rows', async () => {
+    it('maps themes to map configs; invalid Mapbox values stay in the archive only', async () => {
       const db = open(run);
       const config = db
         .prepare('SELECT * FROM community_map_configs')
         .get() as Record<string, unknown>;
       expect(config).toMatchObject({
         community_id: 10,
-        style_url: 'mapbox://styles/example',
-        basemap_style: '{"theme":"light"}',
+        // fixture style/token are not valid public Mapbox values: not imported
+        mapbox_style_url: null,
+        mapbox_access_token: null,
+        expose_mapbox_credentials: 0,
+        protomaps_api_key: 'legacy-protomaps-key',
+        protomaps_basemap_style: '{"theme":"light"}',
         projection: 'globe',
+        mapbox_3d: 1,
         three_dimensional: 1,
         static_map_file_id: null,
       });
@@ -415,7 +420,6 @@ describeWithPostgres('Rails -> V2 SQLite transform (Stage 2)', () => {
       db.close();
       const bytes = await readFile(join(run.dir, 'v2.sqlite'));
       expect(bytes.includes(Buffer.from('legacy-map-token'))).toBe(false);
-      expect(bytes.includes(Buffer.from('legacy-protomaps-key'))).toBe(false);
       const archive = open(run, 'legacy-archive.sqlite');
       const archived = archive
         .prepare(
@@ -429,9 +433,18 @@ describeWithPostgres('Rails -> V2 SQLite transform (Stage 2)', () => {
           column_name: 'mapbox_access_token',
           disposition: 'ARCHIVE_RESTRICTED',
         },
-        { column_name: 'protomaps_api_key', disposition: 'ARCHIVE_RESTRICTED' },
+        { column_name: 'mapbox_style_url', disposition: 'ARCHIVE' },
       ]);
       archive.close();
+      const codes = run.manifest.warnings
+        .filter((w) => w.table === 'themes')
+        .map((w) => w.code);
+      expect(codes).toEqual(
+        expect.arrayContaining([
+          'mapbox_style_url_invalid',
+          'mapbox_token_not_public',
+        ])
+      );
     });
 
     it('archives curriculums, flipper, metadata and unknown tables; records media as pending', () => {

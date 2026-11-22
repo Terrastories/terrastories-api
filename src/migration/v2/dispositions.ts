@@ -113,8 +113,10 @@ export const COLUMN_DISPOSITIONS: Record<string, TableDispositions> = {
     active: 'ARCHIVE',
     created_at: 'TRANSFORM>community_map_configs.created_at',
     updated_at: 'TRANSFORM>community_map_configs.updated_at',
-    mapbox_style_url: 'PRESERVE>community_map_configs.style_url',
-    mapbox_access_token: 'ARCHIVE_RESTRICTED',
+    mapbox_style_url:
+      'TRANSFORM+ARCHIVE>community_map_configs.mapbox_style_url',
+    mapbox_access_token:
+      'TRANSFORM+ARCHIVE_RESTRICTED>community_map_configs.mapbox_access_token',
     center_lat: 'TRANSFORM>community_map_configs.center_latitude',
     center_long: 'TRANSFORM>community_map_configs.center_longitude',
     sw_boundary_lat: 'TRANSFORM>community_map_configs.south_west_latitude',
@@ -124,12 +126,16 @@ export const COLUMN_DISPOSITIONS: Record<string, TableDispositions> = {
     zoom: 'TRANSFORM>community_map_configs.zoom',
     pitch: 'TRANSFORM>community_map_configs.pitch',
     bearing: 'TRANSFORM>community_map_configs.bearing',
-    mapbox_3d: 'PRESERVE>community_map_configs.three_dimensional',
+    mapbox_3d:
+      'PRESERVE>community_map_configs.mapbox_3d,community_map_configs.three_dimensional',
     map_projection: 'TRANSFORM>community_map_configs.projection',
     community_id: 'PRESERVE>community_map_configs.community_id',
-    protomaps_api_key: 'ARCHIVE_RESTRICTED',
-    protomaps_basemap_style: 'PRESERVE>community_map_configs.basemap_style',
-    expose_mapbox_credentials: 'ARCHIVE',
+    protomaps_api_key:
+      'TRANSFORM+ARCHIVE_RESTRICTED>community_map_configs.protomaps_api_key',
+    protomaps_basemap_style:
+      'TRANSFORM+ARCHIVE>community_map_configs.protomaps_basemap_style',
+    expose_mapbox_credentials:
+      'TRANSFORM+ARCHIVE>community_map_configs.expose_mapbox_credentials',
   },
   curriculums: {
     id: 'ARCHIVE',

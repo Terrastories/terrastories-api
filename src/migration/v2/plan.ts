@@ -28,6 +28,12 @@ import {
   descriptionPlainText,
   sanitizeDescriptionForMigration,
 } from '../../shared/utils/safe-description.js';
+import {
+  PROTOMAPS_BASEMAP_STYLE_MAX_LENGTH,
+  isValidProtomapsApiKey,
+  sanitizeMapboxStyleUrl,
+  sanitizePublicMapboxToken,
+} from '../../shared/utils/map-config.js';
 import { normalizeSearchText } from '../../shared/utils/search-normalize.js';
 import type { SourceRow, VerifiedBundle } from './bundle-reader.js';
 import {
@@ -1223,22 +1229,89 @@ export function planTransform(
         continue;
       }
       setStatus('themes', row.id ?? '', 'imported');
-      // TODO(mapbox-branch): once canonical map-config credentials land, write
-      // mapbox_access_token / protomaps_api_key there. Until then they are
-      // archived (restricted) and never copied into the canonical rows.
+      // Provider configuration (#277 canonical map-config): validated with the
+      // same helpers the API uses. Anything not imported stays in the
+      // restricted archive; credential values are never logged or warned.
+      const themeId = row.id ?? '';
+      const rawStyle = row.mapbox_style_url;
+      const rawToken = row.mapbox_access_token;
+      const rawProtomapsKey = row.protomaps_api_key;
+      const style = sanitizeMapboxStyleUrl(rawStyle);
+      const token = sanitizePublicMapboxToken(rawToken);
+      if (rawStyle !== null && rawStyle.trim() !== '' && style === null) {
+        warn('mapbox_style_url_invalid', 'themes', themeId);
+      }
+      if (rawToken !== null && rawToken.trim() !== '' && token === null) {
+        warn('mapbox_token_not_public', 'themes', themeId);
+      }
+      let importedStyle = style;
+      let importedToken = token;
+      if ((style === null) !== (token === null)) {
+        // style/token pair rule: one valid half without the other is useless
+        // and risky, so import neither.
+        importedStyle = null;
+        importedToken = null;
+        warn('mapbox_pair_incomplete', 'themes', themeId);
+      }
+      if (importedStyle === null) {
+        archiveField('themes', row, 'mapbox_style_url', 'ARCHIVE');
+      }
+      if (importedToken === null) {
+        archiveField(
+          'themes',
+          row,
+          'mapbox_access_token',
+          'ARCHIVE_RESTRICTED'
+        );
+      }
+      let protomapsKey: string | null = null;
+      if (rawProtomapsKey !== null && rawProtomapsKey.trim() !== '') {
+        if (isValidProtomapsApiKey(rawProtomapsKey)) {
+          protomapsKey = rawProtomapsKey.trim();
+        } else {
+          warn('protomaps_key_invalid', 'themes', themeId);
+        }
+      }
+      if (protomapsKey === null) {
+        archiveField('themes', row, 'protomaps_api_key', 'ARCHIVE_RESTRICTED');
+      }
+      let basemapStyle: string | null = null;
+      if (row.protomaps_basemap_style !== null) {
+        if (
+          row.protomaps_basemap_style.length <=
+          PROTOMAPS_BASEMAP_STYLE_MAX_LENGTH
+        ) {
+          basemapStyle = row.protomaps_basemap_style;
+        } else {
+          warn('protomaps_basemap_style_invalid', 'themes', themeId);
+          archiveField('themes', row, 'protomaps_basemap_style', 'ARCHIVE');
+        }
+      }
+      // Rails resets expose_mapbox_credentials when a community goes private;
+      // keep the same invariant instead of importing a contradictory pair.
+      const communityIsPublic =
+        canonical.communities.find((c) => c.id === result.id)
+          ?.public_stories === 1;
+      let expose = parseBool(row.expose_mapbox_credentials) === true;
+      if (expose && !communityIsPublic) {
+        expose = false;
+        warn('expose_mapbox_credentials_reset_private', 'themes', themeId);
+      }
       for (const [column, disposition] of [
         ['id', 'ARCHIVE'],
         ['active', 'ARCHIVE'],
-        ['mapbox_access_token', 'ARCHIVE_RESTRICTED'],
-        ['protomaps_api_key', 'ARCHIVE_RESTRICTED'],
         ['expose_mapbox_credentials', 'ARCHIVE'],
       ] as const) {
         archiveField('themes', row, column, disposition);
       }
       canonical.community_map_configs.push({
         community_id: result.id,
-        style_url: row.mapbox_style_url,
-        basemap_style: row.protomaps_basemap_style,
+        mapbox_style_url: importedStyle,
+        mapbox_access_token: importedToken,
+        expose_mapbox_credentials: expose ? 1 : 0,
+        mapbox_3d: parseBool(row.mapbox_3d) ? 1 : 0,
+        protomaps_api_key: protomapsKey,
+        protomaps_basemap_style: basemapStyle,
         center_latitude: decimals.center_lat as number | null,
         center_longitude: decimals.center_long as number | null,
         south_west_latitude: swLat as number | null,

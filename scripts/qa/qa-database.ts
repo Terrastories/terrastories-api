@@ -16,12 +16,7 @@
  * PostgreSQL schema where SQLite-only behaviour (collation, timestamps,
  * booleans, JSON) cannot hide a sovereignty leak.
  */
-import {
-  mkdtempSync,
-  rmdirSync,
-  unlinkSync,
-  existsSync,
-} from 'node:fs';
+import { mkdtempSync, rmdirSync, unlinkSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';

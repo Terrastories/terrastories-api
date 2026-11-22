@@ -1866,6 +1866,9 @@ export async function createFixture(
             serverSecret: freshServerSecret,
             bootstrapSecret: freshBootstrapSecret,
             storage: freshStorage,
+            // SPEC-V2 §7 recovery-code gate (#254/#265), as the production
+            // entrypoints configure it; the recovery-gate journey proves it.
+            requireRecoveryCodes: true,
           });
         })();
         return freshAppPromise;
@@ -6946,6 +6949,16 @@ export async function createFixture(
     let freshBootstrapCommunityId = 0;
     let freshBootstrapRecoveryCode1 = '';
     let fieldKitFileId = '';
+    let qaGateAdminLoginCode = '';
+    const qaGateAdminRedeemBody = {
+      code: '',
+      communitySlug: 'qa-fresh-bootstrap',
+    };
+    const qaGateAdminHeaders = {
+      cookie: '',
+      'x-forwarded-for': '203.0.113.213',
+      'cf-connecting-ip': '203.0.113.213',
+    };
     const freshAdminKey = toHex(crypto.getRandomValues(new Uint8Array(32)));
     const freshAdminRecoveredKey = toHex(
       crypto.getRandomValues(new Uint8Array(32))
@@ -12370,6 +12383,177 @@ export async function createFixture(
             },
           ] as Step[],
         },
+      },
+      {
+        // SPEC-V2 §7 recovery-code gate (#254/#265): continues the fresh
+        // install, whose served app (SQLite/PostgreSQL in-process and the
+        // Workers runtime) enforces the gate. A second administrator holding
+        // no active recovery code is limited to /v2/auth/* until they
+        // generate a sheet with their admin_issued session.
+        persona: 'recovery-gate',
+        ...(freshBaseUrl
+          ? { baseUrl: freshBaseUrl }
+          : { handler: freshHandler }),
+        steps: [
+          {
+            name: 'gate admin (holding codes) logs in with the recovery-set password',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: qaGateAdminHeaders,
+            body: {
+              identifier: 'qa-fresh-admin@example.test',
+              communitySlug: 'qa-fresh-bootstrap',
+              derivedKey: freshAdminRecoveredKey,
+            },
+            check: (body) =>
+              ownUser(
+                'qa-fresh-admin@example.test',
+                'admin',
+                liveSessionCookie,
+                freshBootstrapCommunityId
+              )(body),
+            checkHeaders: hasSessionCookie,
+          },
+          {
+            name: 'admin holding recovery codes reads stories through the gate',
+            method: 'GET',
+            path: '/v2/stories',
+            expected: 200,
+          },
+          {
+            name: 'create second administrator without credentials or codes',
+            method: 'POST',
+            path: '/v2/users',
+            expected: 201,
+            captureId: 'qaGateAdmin',
+            body: {
+              username: 'qa_gate_admin',
+              email: 'qa-gate-admin@example.test',
+              displayName: 'QA Gate Admin',
+              role: 'admin',
+            },
+            check: (body) => {
+              const data = (body as { data?: Record<string, unknown> })?.data;
+              return (
+                !!data &&
+                data.role === 'admin' &&
+                !('passwordVerifier' in data) &&
+                !('passwordHash' in data)
+              );
+            },
+          },
+          {
+            name: 'issue admin_issued login code for second administrator',
+            method: 'POST',
+            path: '/v2/users/{qaGateAdmin}/login-codes',
+            expected: 201,
+            check: (body) => {
+              const data = (
+                body as { data?: { code?: unknown; purpose?: unknown } }
+              )?.data;
+              if (
+                typeof data?.code === 'string' &&
+                /^[A-Za-z0-9_-]{20,64}$/.test(data.code) &&
+                data.purpose === 'admin_issued'
+              ) {
+                qaGateAdminLoginCode = data.code;
+                return true;
+              }
+              return false;
+            },
+          },
+          {
+            name: 'logout gate admin holding codes',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+          },
+          {
+            name: 'second administrator redeems admin_issued login code',
+            method: 'POST',
+            path: '/v2/auth/recovery/redeem',
+            expected: 200,
+            headers: qaGateAdminHeaders,
+            prepare: () => {
+              qaGateAdminRedeemBody.code = qaGateAdminLoginCode;
+            },
+            body: qaGateAdminRedeemBody,
+            check: (body) =>
+              ownUser(
+                'qa-gate-admin@example.test',
+                'admin',
+                liveSessionCookie,
+                freshBootstrapCommunityId
+              )(body),
+            checkHeaders: hasSessionCookie,
+          },
+          {
+            name: 'gate denies administrator without recovery codes outside /v2/auth',
+            method: 'GET',
+            path: '/v2/stories',
+            expected: 403,
+            check: (body) =>
+              (body as { code?: unknown })?.code === 'recovery_codes_required',
+          },
+          {
+            name: 'auth surface stays open and reports recovery codes unconfirmed',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            check: (body) =>
+              ownMeUser(
+                'qa-gate-admin@example.test',
+                'admin',
+                liveSessionCookie,
+                freshBootstrapCommunityId,
+                false
+              )(body),
+          },
+          {
+            name: 'generate recovery codes verifier-free via admin_issued session',
+            method: 'POST',
+            path: '/v2/auth/recovery-codes',
+            expected: 201,
+            body: undefined,
+            check: (body) => {
+              const data = (
+                body as { data?: { codes?: unknown; purpose?: unknown } }
+              )?.data;
+              return (
+                data?.purpose === 'recovery' &&
+                Array.isArray(data.codes) &&
+                data.codes.length === 10
+              );
+            },
+          },
+          {
+            name: 'gate lifts once the administrator holds recovery codes',
+            method: 'GET',
+            path: '/v2/stories',
+            expected: 200,
+          },
+          {
+            name: 'auth surface reports recovery codes confirmed',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            check: (body) =>
+              ownMeUser(
+                'qa-gate-admin@example.test',
+                'admin',
+                liveSessionCookie,
+                freshBootstrapCommunityId,
+                true
+              )(body),
+          },
+          {
+            name: 'logout second administrator',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+          },
+        ] as Step[],
       },
     ];
     return {

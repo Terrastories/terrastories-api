@@ -354,6 +354,12 @@ export interface HonoQaBackend {
   putMedia: (key: string, bytes: Uint8Array) => Promise<void>;
   hasMedia?: (key: string) => Promise<boolean>;
   runErasureSweep?: () => Promise<void>;
+  /**
+   * The served app enforces the recovery-code gate (#254), so the backend
+   * seeds an active recovery code for every community administrator and
+   * `GET /v2/auth/me` reports `recoveryCodesConfirmed: true` for them.
+   */
+  seededAdminsHaveRecoveryCodes?: boolean;
   handler: (observeResponseCookies: (response: Response) => void) => Handler;
   /**
    * Isolated fresh-installation runtime with an unseeded migrated database and
@@ -7383,7 +7389,8 @@ export async function createFixture(
               role,
               liveSessionCookie,
               communityId,
-              false
+              role === 'admin' &&
+                backend?.seededAdminsHaveRecoveryCodes === true
             ),
           },
           // #191 option A across the full claimed matrix: member — the
@@ -8487,7 +8494,7 @@ export async function createFixture(
               'admin',
               liveSessionCookie,
               inactiveCommunity.id,
-              false
+              backend?.seededAdminsHaveRecoveryCodes === true
             ),
           },
           {

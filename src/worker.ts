@@ -392,6 +392,7 @@ export function createWorker() {
       repository: new HonoFoundationRepository(drizzle(client)),
       serverSecret: runtimeConfig.serverSecret,
       bootstrapSecret: runtimeConfig.bootstrapSecret,
+      requireRecoveryCodes: true,
       publicOrigin: runtimeConfig.publicOrigin,
       corsOrigins: runtimeConfig.corsOrigins,
       // workerd sets `cf-connecting-ip` and a client cannot forge it (finding E).

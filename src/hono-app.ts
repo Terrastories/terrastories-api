@@ -70,6 +70,13 @@ export interface FoundationOptions {
   storage: FoundationStorage;
   erasureStore?: ErasureRecordStore;
   /**
+   * Enforce SPEC-V2 §7: a community administrator holding no active recovery
+   * code may only use `/v2/auth/*` (to generate codes) until they do.
+   * Production entrypoints set it; it is opt-in so fixtures that seed
+   * administrators without codes keep working.
+   */
+  requireRecoveryCodes?: boolean;
+  /**
    * Prelogin HMAC key (`AUTH_SERVER_SECRET`). Without it `POST
    * /v2/auth/prelogin` fails closed with 503 instead of answering with a
    * predictable fake (SPEC-V2 §7 step 1).
@@ -401,6 +408,20 @@ export function createHonoApp(options: FoundationOptions) {
       (await sovereigntyRepository.erasurePending(session.user.communityId))
     )
       return c.json({ error: 'Forbidden' }, 403);
+    // SPEC-V2 §7: a community administrator must generate recovery codes
+    // before any other administrative action. Only the auth surface stays
+    // reachable so the codes can be generated (or the session ended).
+    if (
+      options.requireRecoveryCodes === true &&
+      session.user.role === 'admin' &&
+      session.user.communityId !== null &&
+      !c.req.path.startsWith('/v2/auth/') &&
+      !(await options.repository.hasActiveRecoveryCodes(session.user.id))
+    )
+      return c.json(
+        { error: 'Recovery codes required', code: 'recovery_codes_required' },
+        403
+      );
     await next();
     if (
       c.res.status < 400 &&

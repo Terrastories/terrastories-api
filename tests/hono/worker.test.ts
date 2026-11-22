@@ -271,6 +271,12 @@ it('serves the foundation through workerd D1/R2 without Node compatibility', asy
         sha256(pubAdminKey)
       )
       .run();
+    // SPEC-V2 §7 gate: the worker entrypoint requires recovery codes.
+    await db
+      .prepare(
+        "INSERT INTO login_codes(community_id,user_id,purpose,code_hash,created_by,created_at) VALUES(3,2,'recovery','pub-admin-recovery',2,0)"
+      )
+      .run();
     const pubAdminLogin = await mf.dispatchFetch(
       'https://worker.test/v2/auth/login',
       {
@@ -940,6 +946,9 @@ it('streams community export via R2 multipart upload, serves authenticated downl
           "INSERT INTO users(id,email,password_hash,first_name,last_name,role,community_id,created_at,updated_at,password_algorithm,password_salt,password_params,password_verifier) VALUES(1,'wadmin@example.org','source-hash','Worker','Admin','admin',1,1000,1000,?,?,?,?)"
         )
         .bind('client-argon2id+sha256', salt, params, sha256(adminKey)),
+      db.prepare(
+        "INSERT INTO login_codes(community_id,user_id,purpose,code_hash,created_by,created_at) VALUES(1,1,'recovery','wadmin-recovery',1,1000)"
+      ),
       db
         .prepare(
           "INSERT INTO files(id,filename,original_name,path,storage_key,url,mime_type,size,byte_size,checksum,community_id,uploaded_by,created_at,updated_at) VALUES(?,'sample.bin','sample.bin',?,?,'https://ignored.invalid','application/octet-stream',6,6,?,1,1,1000,1000)"

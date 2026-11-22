@@ -68,6 +68,14 @@ function createListableMemoryStorage(): {
       };
     },
     async put(storageKey, stream, opts) {
+      if (stream instanceof Uint8Array) {
+        store.set(storageKey, {
+          bytes: stream,
+          contentType: opts.contentType,
+          uploaded: new Date('2026-06-01T12:00:00.000Z'),
+        });
+        return;
+      }
       const reader = stream.getReader();
       const chunks: Uint8Array[] = [];
       let total = 0;
@@ -1316,6 +1324,149 @@ describe('Slice 12-B GET /v2/imports, GET /v2/imports/:id, DELETE /v2/imports/:i
       ).not.toThrow();
     } finally {
       d1Sqlite.close();
+    }
+  });
+
+  it('keeps POST /v2/community/export succeeding after a preview is discarded or expires, but still fails closed for missing bytes of live files', async () => {
+    // Dedicated community: earlier tests leave previewed/committed manifests
+    // whose bytes were deliberately removed, which would mask this assertion.
+    const seedTime = new Date('2026-06-01T12:00:00.000Z');
+    const seed = await argon2Seed(TEST_DERIVED_KEY);
+    const exportCommunityId = await insertRow(tables.communities, {
+      name: 'Manage Import Export',
+      slug: 'manage-imp-export',
+      publicStories: true,
+      isActive: true,
+      createdAt: seedTime,
+      updatedAt: seedTime,
+    });
+    const addExportUser = async (email: string, role: string) =>
+      insertRow(tables.users, {
+        email,
+        username: email.split('@')[0],
+        ...deriveUserIdentityColumns({
+          email,
+          username: email.split('@')[0],
+        }),
+        firstName: role,
+        lastName: 'Manager',
+        ...seed,
+        role,
+        communityId: exportCommunityId,
+        isActive: true,
+        createdAt: seedTime,
+        updatedAt: seedTime,
+      });
+    await addExportUser('mgr-exp-editor@example.test', 'editor');
+    await addExportUser('mgr-exp-admin@example.test', 'admin');
+    const editorCookie = await loginOnApp(
+      app,
+      db,
+      'mgr-exp-editor@example.test',
+      exportCommunityId
+    );
+    const adminCookie = await loginOnApp(
+      app,
+      db,
+      'mgr-exp-admin@example.test',
+      exportCommunityId
+    );
+    const upMp = buildImportMultipart({
+      mediaParts: [
+        {
+          fieldName: 'file',
+          filename: 'export-live.png',
+          contentType: 'image/png',
+          bytes: PNG_BYTES,
+        },
+      ],
+    });
+    const upRes = await app.request(`${API_ORIGIN}/v2/media`, {
+      method: 'POST',
+      headers: {
+        cookie: editorCookie,
+        origin: CLIENT_ORIGIN,
+        'content-type': upMp.contentTypeHeader,
+      },
+      body: upMp.body,
+      duplex: 'half',
+    } as RequestInit);
+    expect(upRes.status).toBe(201);
+    const liveFileId = MediaUploadResponseSchema.parse(await upRes.json()).data
+      .id;
+    const exportOnce = () =>
+      app.request(`${API_ORIGIN}/v2/community/export`, {
+        method: 'POST',
+        headers: { cookie: adminCookie, origin: CLIENT_ORIGIN },
+      });
+    // Advance the clock so per-community export quotas of earlier calls reset.
+    const bump = () => {
+      currentNow = new Date(currentNow.getTime() + 2 * 60 * 60 * 1000);
+    };
+
+    const discarded = await createPreviewOnApp(app, editorCookie, {
+      kind: 'places',
+      csvFilename: 'export-after-discard.csv',
+      csvText: 'name\nExport Discard Place\n',
+    });
+    const expiring = await createPreviewOnApp(app, editorCookie, {
+      kind: 'places',
+      csvFilename: 'export-after-expiry.csv',
+      csvText: 'name\nExport Expiry Place\n',
+    });
+    const sourceIds = new Map<number, string>();
+    for (const m of [discarded, expiring]) {
+      const [row] = await db
+        .select()
+        .from(tables.importManifests)
+        .where(eq(tables.importManifests.id, m.id));
+      sourceIds.set(m.id, row!.sourceFileId);
+    }
+
+    const del = await app.request(`${API_ORIGIN}/v2/imports/${discarded.id}`, {
+      method: 'DELETE',
+      headers: { cookie: editorCookie, origin: CLIENT_ORIGIN },
+    });
+    expect(del.status).toBe(200);
+
+    bump();
+    const afterDiscard = await exportOnce();
+    expect(afterDiscard.status).toBe(201);
+
+    // Expiry sweep variant: same inactive tombstone, same export outcome.
+    const swept = await cleanup.sweepExpiredImportPreviews({
+      olderThan: new Date(currentNow.getTime() + 60_000),
+    });
+    expect(swept.expiredCount).toBeGreaterThanOrEqual(1);
+    const [expiredRow] = await db
+      .select()
+      .from(tables.importManifests)
+      .where(eq(tables.importManifests.id, expiring.id));
+    expect(expiredRow?.status).toBe('discarded');
+    const [expiredSource] = await db
+      .select()
+      .from(tables.files)
+      .where(eq(tables.files.id, sourceIds.get(expiring.id)!));
+    expect(expiredSource?.isActive).toBe(false);
+    expect(memStore.has(expiredSource!.storageKey!)).toBe(false);
+
+    bump();
+    const afterExpiry = await exportOnce();
+    expect(afterExpiry.status).toBe(201);
+
+    // Fail-closed stays for a genuinely missing live (referenced) file.
+    const [live] = await db
+      .select()
+      .from(tables.files)
+      .where(eq(tables.files.id, liveFileId));
+    const liveEntry = memStore.get(live!.storageKey!)!;
+    memStore.delete(live!.storageKey!);
+    try {
+      bump();
+      const broken = await exportOnce();
+      expect(broken.status).toBe(503);
+    } finally {
+      memStore.set(live!.storageKey!, liveEntry);
     }
   });
 });

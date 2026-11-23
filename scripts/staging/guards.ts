@@ -13,7 +13,8 @@
  *   tsx guards.ts url <staging-url> [--local]  URL is a staging origin (--local: loopback http only)
  *   tsx guards.ts origin <origin>              bare frontend origin (scheme://host[:port])
  *   tsx guards.ts cors-file <path> <origin>    R2 CORS rules[] file allows that origin's part PUT
- *   tsx guards.ts cors-policy                  stdin: `wrangler r2 bucket cors list` allows the part PUT
+ *   tsx guards.ts cors-policy <origin>         stdin: `wrangler r2 bucket cors list` allows the part PUT from exactly <origin>
+ *   tsx guards.ts media-bucket <wrangler.jsonc> <bucket>  <bucket> is the env.staging MEDIA binding
  *   tsx guards.ts lifecycle <days>             stdin: `wrangler r2 bucket lifecycle list` aborts after <days>
  *   tsx guards.ts preflight <origin>           stdin: OPTIONS answer allows the part PUT from <origin>
  */
@@ -452,7 +453,8 @@ export function assertLifecycleAbortRule(listText: string, days: number): void {
     );
   };
   const found = parseLabelledBlocks(listText).some((rule) => {
-    const enabled = (rule.enabled ?? 'yes').trim().toLowerCase();
+    // A rule without an explicit "enabled: Yes" never counts (fail closed).
+    const enabled = (rule.enabled ?? 'no').trim().toLowerCase();
     return (
       enabled === 'yes' &&
       wholeBucket(rule.prefix) &&

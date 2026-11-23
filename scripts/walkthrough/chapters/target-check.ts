@@ -19,7 +19,7 @@ const MEDIA_PROBES = 3;
  * objects and the content type survive the migration for what the admin sees,
  * including non-public stories the anonymous check above cannot reach.
  */
-async function authenticatedMedia(
+export async function authenticatedMedia(
   ctx: Ctx,
   admin: ReturnType<Ctx['w']['actor']>
 ): Promise<void> {
@@ -31,11 +31,15 @@ async function authenticatedMedia(
     offset < 500 && found.size < MEDIA_PROBES;
     offset += 100
   ) {
-    const page = await admin.call(
-      'GET',
-      `/v2/stories?limit=100&offset=${offset}`
-    );
-    if (page.status !== 200) break;
+    // a step, so a non-200 is a recorded failure (status and code), never the
+    // end of the search
+    const page = await w.step({
+      who: admin,
+      say: `looks for media in the stories the admin can read (from ${offset})`,
+      method: 'GET',
+      path: `/v2/stories?limit=100&offset=${offset}`,
+      expect: 200,
+    });
     const rows =
       (dig(page, 'data', 'stories') as Array<{ attachments?: Att[] }>) ?? [];
     for (const story of rows)

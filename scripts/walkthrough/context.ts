@@ -114,6 +114,15 @@ export function newState(): State {
   };
 }
 
+/** A paged read that is not a 200 is an error, never the end of the list. */
+export function requireOk(page: Reply, what: string): void {
+  if (page.status === 200) return;
+  const code = dig(page, 'code');
+  throw new Error(
+    `${what}: expected 200 but got ${page.status}${typeof code === 'string' ? ` (${code})` : ''}`
+  );
+}
+
 /**
  * Walk a paged list (limit/offset, meta.hasNextPage) and return every row.
  * Never stops at the first page. `rowsOf` picks the array out of the reply.
@@ -131,7 +140,7 @@ export async function listAll<T>(
       'GET',
       `${path}${sep}limit=${limit}&offset=${offset}`
     );
-    if (page.status !== 200) break;
+    requireOk(page, `list ${path}`);
     const rows = rowsOf(page);
     out.push(...rows);
     const more = dig(page, 'meta', 'hasNextPage');
@@ -156,7 +165,7 @@ export async function offsetOfMatch<T>(
       'GET',
       `${path}${sep}limit=${limit}&offset=${offset}`
     );
-    if (page.status !== 200) return 0;
+    requireOk(page, `search ${path}`);
     const rows = rowsOf(page);
     if (rows.some(pred)) return offset;
     const more = dig(page, 'meta', 'hasNextPage');

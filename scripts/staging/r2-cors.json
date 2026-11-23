@@ -1,0 +1,13 @@
+{
+  "rules": [
+    {
+      "allowed": {
+        "origins": ["__STAGING_FRONTEND_ORIGIN__"],
+        "methods": ["PUT"],
+        "headers": ["x-amz-content-sha256", "content-type"]
+      },
+      "exposeHeaders": ["ETag"],
+      "maxAgeSeconds": 3600
+    }
+  ]
+}

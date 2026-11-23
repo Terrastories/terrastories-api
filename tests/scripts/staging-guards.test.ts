@@ -156,9 +156,13 @@ esac
       encoding: 'utf8',
       env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ...env },
     });
+  const origin = 'https://app.terrastories.test';
 
   it('dry run prints create commands and executes none', () => {
-    const r = run({ CLOUDFLARE_ACCOUNT_ID: ACCOUNT });
+    const r = run({
+      CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
+      STAGING_FRONTEND_ORIGIN: origin,
+    });
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout).toContain(
       '+ npx wrangler d1 create terrastories-staging-db'
@@ -173,6 +177,7 @@ esac
   it('creates the erasure-records bucket and ignores name overrides', () => {
     const r = run({
       CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
+      STAGING_FRONTEND_ORIGIN: origin,
       STAGING_R2_BUCKET: 'terrastories-media',
     });
     expect(r.status, r.stderr).toBe(0);

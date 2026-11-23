@@ -13,18 +13,18 @@ V2 ships an API only. The V2 frontend is not built ([V2-FRONTEND-HANDOFF.md](./V
 
 ## 1. Where everything lives
 
-| Artifact                                                                   | Location                                                                                                                              |
-| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | --------- | ------ |
-| Spec and contracts                                                         | `docs/SPEC-V2.md` (§10 migration, §13 phases), `docs/RAILS-MIGRATION.md`                                                              |
-| Capture / transform / load tools                                           | `scripts/migrate-rails.ts`, `scripts/migrate-rails-transform.ts`, `scripts/migrate-rails-load.ts` (`npm run migrate:rails:capture     | transform | load`) |
-| Staging kit                                                                | `scripts/staging/`: `provision.sh`, `load-community.sh`, `smoke.sh`, `guards.ts`, `verify-r2-part-checksum.ts`                        |
-| Staging env template                                                       | `wrangler.jsonc` `env.staging` (placeholders)                                                                                         |
-| Walkthrough                                                                | `npm run walkthrough` (`scripts/walkthrough/`, `docs/WALKTHROUGHS.md`)                                                                |
-| Stage-1 bundle, Stage-2 output, legacy archive                             | Trusted migration host only, owner-only permissions, encrypted when moved (SPEC-V2 §10.3, §10.4). Never in git, CI or public storage. |
-| D1 SQL dump, `verify.sql`, `wipe-and-retry.sql`, `r2-upload-manifest.json` | Beside the Stage-2 output on the same host (`--sql-out`)                                                                              |
-| Go/no-go evidence (walkthrough `summary.md`, CPU table, counts)            | Operator-private evidence folder; summaries hold counts only                                                                          |
-| Heroku backup (`.dump`)                                                    | Same restricted store as the archive; part of archive custody                                                                         |
-| Restore and orphan-sweep hold procedure                                    | `docs/CLOUDFLARE-STAGING.md`, `docs/OPERATIONS-GOVERNANCE.md` §6.4                                                                    |
+| Artifact                                                                   | Location                                                                                                                                            |
+| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | --------- | ------ |
+| Spec and contracts                                                         | `docs/SPEC-V2.md` (§10 migration, §13 phases), `docs/RAILS-MIGRATION.md`                                                                            |
+| Capture / transform / load tools                                           | `scripts/migrate-rails.ts`, `scripts/migrate-rails-transform.ts`, `scripts/migrate-rails-load.ts` (`npm run migrate:rails:capture                   | transform | load`) |
+| Staging kit                                                                | `scripts/staging/`: `provision.sh`, `load-community.sh`, `smoke.sh`, `cors-preflight.sh`, `guards.ts`, `r2-cors.json`, `verify-r2-part-checksum.ts` |
+| Staging env template                                                       | `wrangler.jsonc` `env.staging` (placeholders)                                                                                                       |
+| Walkthrough                                                                | `npm run walkthrough` (`scripts/walkthrough/`, `docs/WALKTHROUGHS.md`)                                                                              |
+| Stage-1 bundle, Stage-2 output, legacy archive                             | Trusted migration host only, owner-only permissions, encrypted when moved (SPEC-V2 §10.3, §10.4). Never in git, CI or public storage.               |
+| D1 SQL dump, `verify.sql`, `wipe-and-retry.sql`, `r2-upload-manifest.json` | Beside the Stage-2 output on the same host (`--sql-out`)                                                                                            |
+| Go/no-go evidence (walkthrough `summary.md`, CPU table, counts)            | Operator-private evidence folder; summaries hold counts only                                                                                        |
+| Heroku backup (`.dump`)                                                    | Same restricted store as the archive; part of archive custody                                                                                       |
+| Restore and orphan-sweep hold procedure                                    | `docs/CLOUDFLARE-STAGING.md`, `docs/OPERATIONS-GOVERNANCE.md` §6.4                                                                                  |
 
 ## 2. Prerequisites (owner: operator unless noted)
 
@@ -37,7 +37,7 @@ V2 ships an API only. The V2 frontend is not built ([V2-FRONTEND-HANDOFF.md](./V
    - Binding `ERASURE_RECORDS`: dedicated R2 bucket (staging `terrastories-staging-erasure-records`, created by `provision.sh`). Never restored, rotated or copied with D1/MEDIA; excluded from backups; no lifecycle expiration. Var `R2_BUCKET_NAME` names the media bucket; `ENVIRONMENT` stays unset; `ORPHAN_SWEEP_PAUSED` is set only during a restore.
    - `MAPBOX_ACCESS_TOKEN`: optional instance default (a public `pk.*` token; `sk.*` is rejected with `422`). Unset falls back to OpenFreeMap.
    - Verify presence without printing: `npx wrangler secret list --env staging`.
-4. **Bucket configuration** (staging and production): CORS for the frontend origin (allow `PUT`; headers `x-amz-content-sha256`, `content-type`; expose `ETag`; MaxAge at least 3600) and a lifecycle rule aborting incomplete multipart uploads after 1 day.
+4. **Bucket configuration** (staging and production): CORS for the frontend origin (allow `PUT`; headers `x-amz-content-sha256`, `content-type`; expose `ETag`; MaxAge at least 3600) and a lifecycle rule aborting incomplete multipart uploads after 1 day. Staging gets both from `scripts/staging/provision.sh --apply`, which renders `scripts/staging/r2-cors.json` with `STAGING_FRONTEND_ORIGIN`, applies it, adds the lifecycle rule only when it is missing, and then reads both back (`wrangler r2 bucket cors list`, `wrangler r2 bucket lifecycle list`) and refuses unless `PUT` with `x-amz-content-sha256` is allowed. Production is configured by hand with the same values.
 5. **Community approvals and steward designations.** Each community (or its named steward) approves the maintenance window and designates the archive custodian (SPEC-V2 §10.4 item 5). Record custodian and retention (30 days after acceptance unless the community sets another) per community. Sending approval requests to communities: **REQUIRES HUMAN APPROVAL**.
 6. **Mapbox notice.** Communities with Mapbox styles/tokens are told that tokens migrate as public `pk.*` values only and that they remain responsible for their Mapbox usage; field kits fall back to local PMTiles. Sending the notice: **REQUIRES HUMAN APPROVAL**.
 7. **Heroku access.** Operator can run `heroku` against app `terrastories` (backups, maintenance, scale) and holds read-only AWS credentials for the ActiveStorage bucket in the environment. Using the production Heroku or AWS credentials: **REQUIRES HUMAN APPROVAL** each time.
@@ -51,10 +51,11 @@ Staging uses only `terrastories-staging-*` resources, a workers.dev URL, no DNS 
 1. **Provision (dry run first).**
    ```bash
    export CLOUDFLARE_ACCOUNT_ID=<expected account id>
+   export STAGING_FRONTEND_ORIGIN=https://<frontend origin>   # may PUT parts to R2
    scripts/staging/provision.sh            # prints the plan
-   scripts/staging/provision.sh --apply    # creates D1 + two R2 buckets (media, erasure records) only
+   scripts/staging/provision.sh --apply    # creates D1 + two R2 buckets (media, erasure records), then applies and verifies the media bucket's CORS and lifecycle rule
    ```
-   Creating Cloudflare resources: **REQUIRES HUMAN APPROVAL** (free tier, create-only; the script never deletes). Paste the printed `database_id` and your workers.dev subdomain into `wrangler.jsonc` `env.staging` (do not commit real ids if the repo is public; keep the edit local or commit only if the owner agrees). Set secrets (section 2.3), configure bucket CORS and lifecycle, then rerun `provision.sh --apply` to deploy the Worker. Time Travel needs `wrangler d1 info` to show `version: production`.
+   Creating Cloudflare resources: **REQUIRES HUMAN APPROVAL** (free tier, create-only; the script never deletes). If the shell exports a `CLOUDFLARE_API_TOKEN` for a different account, run the kit as `env -u CLOUDFLARE_API_TOKEN scripts/staging/<script>.sh ...`: the account guard refuses a mismatch, but unset the variable first. Paste the printed `database_id` and your workers.dev subdomain into `wrangler.jsonc` `env.staging` (do not commit real ids if the repo is public; keep the edit local or commit only if the owner agrees). Set secrets (section 2.3), then rerun `provision.sh --apply` to deploy the Worker. The bucket's CORS and lifecycle rule are part of that same `--apply`: `STAGING_FRONTEND_ORIGIN` is required, the rendered file is checked before wrangler sees it, the rule is added only when the read-back does not already show it, and a dry run prints those commands without running any of them. Time Travel needs `wrangler d1 info` to show `version: production`.
 2. **Capture, barbara first.** Use a real source capture only on the trusted host. The pilot community `barbara` goes first:
    ```bash
    npm run migrate:rails:capture -- --source '<postgres url from env>' --blob-source s3 \
@@ -71,11 +72,12 @@ Staging uses only `terrastories-staging-*` resources, a workers.dev URL, no DNS 
 4. **Smoke.**
    ```bash
    export STAGING_URL=https://terrastories-staging-api.<subdomain>.workers.dev
+   export STAGING_FRONTEND_ORIGIN=...     # the origin set in step 1 (section 2.4)
    export WT_SUPER_IDENTIFIER=... WT_SUPER_PASSWORD=...     # staging super admin, env only
    scripts/staging/smoke.sh --community barbara --apply
    ```
-   Checks `/health` is 200, `/dev/seed` is 404 for GET and HEAD, runs `npm run walkthrough` with `--d1 --super-credentials-env --allow-destructive` (disposable community only), runs the R2 part-checksum probe, and prints the CPU measurement procedure (`scripts/staging/smoke.sh --cpu-procedure`).
-   For a rehearsal on `wrangler dev --local` use `scripts/staging/smoke.sh --local` with `STAGING_URL=http://127.0.0.1:<port>` (loopback only; the R2 probe is skipped).
+   Checks `/health` is 200, `/dev/seed` is 404 for GET and HEAD, runs `npm run walkthrough` with `--d1 --super-credentials-env --allow-destructive` (disposable community only), sends the browser's `OPTIONS` preflight for a part `PUT` with `x-amz-content-sha256` to `https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com/<bucket>` and fails unless that origin, method and header are allowed (`scripts/staging/cors-preflight.sh`), runs the R2 part-checksum probe, and prints the CPU measurement procedure (`scripts/staging/smoke.sh --cpu-procedure`).
+   For a rehearsal on `wrangler dev --local` use `scripts/staging/smoke.sh --local` with `STAGING_URL=http://127.0.0.1:<port>` (loopback only; the R2 CORS preflight and probe are skipped).
 5. **All communities in staging.** Only if the R2 budget allows (decision A below) or a paid plan is approved. Free R2 holds 10 GB, so 30 GB cannot be staged on Free. If not possible, rehearse the rest as D1-only (`--skip-r2` on `load-community.sh`), accept that media-dependent checks are covered by `barbara` only, and record that in the go/no-go sheet. Rehearse the real full capture timing at least once: its duration is the maintenance-window length.
 6. **Rollback rehearsal on staging**: restore from a Time Travel bookmark (section 9) at least once, with the orphan-sweep hold set first.
 
@@ -106,6 +108,7 @@ All must be true on the final rehearsal, with evidence attached. A single NO is 
 - [ ] `verify.sql` passed on staging D1 (rows, applied-file count, sequence floors).
 - [ ] Row and object counts reconcile with the Stage-2 manifests (source, bundle, target, archive; `validation-summary.txt` has no unexplained difference).
 - [ ] R2 part-checksum probe confirms payload hash enforcement (exit 0). Exit 2 means corrupted bytes were accepted. Exit 1 is inconclusive. Both block cutover.
+- [ ] R2 CORS preflight allowed from the frontend origin: `PUT` with `x-amz-content-sha256` (run by `scripts/staging/smoke.sh --apply`, or `scripts/staging/cors-preflight.sh --apply` by hand).
 - [ ] CPU measurements recorded and under budget: 90 MB raw upload and 300 MB multipart upload, no error 1102 (`scripts/staging/smoke.sh --cpu-procedure`).
 - [ ] Manual-review list resolved and signed off:
   - 92 users with null community: 89 are `role_requires_community` and 3 are `super_admin` contradictions; each has a recorded disposition.
@@ -119,7 +122,7 @@ All must be true on the final rehearsal, with evidence attached. A single NO is 
 
 ## 6. Production resources (create-only; before the window)
 
-Production D1 and R2 names do not use the staging prefix, so the staging scripts will not touch them. Create them by hand after the go decision, including a **production `ERASURE_RECORDS` R2 bucket** (a dedicated bucket, no lifecycle expiration rule, excluded from backups, never restored or copied with D1/MEDIA; without it erasure answers 503): **REQUIRES HUMAN APPROVAL**. **Cron limit:** Workers Free allows 5 cron triggers per account. The Worker dispatches 3 exact crons (`0 * * * *`, `* * * * *`, `*/1 * * * *`), staging holds 3, production needs 3, so 6 > 5. Before deploying production, redeploy staging with its `triggers.crons` emptied (or delete the staging Worker after the rehearsal is closed; deletion **REQUIRES HUMAN APPROVAL**), or take a paid decision. Never run production without all three crons: the `*/1` entry is the erasure retry. Use the top-level `wrangler.jsonc` block with real ids, set production secrets (section 2.3), configure bucket CORS and lifecycle, and deploy the Worker without a route. Confirm that `PUBLIC_ORIGIN` is the final custom origin, not `https://example.org` (the Worker returns `503 config-refused` otherwise). Run the production dry-run: `npx wrangler deploy --dry-run`.
+Production D1 and R2 names do not use the staging prefix, so the staging scripts will not touch them. Create them by hand after the go decision, including a **production `ERASURE_RECORDS` R2 bucket** (a dedicated bucket, no lifecycle expiration rule, excluded from backups, never restored or copied with D1/MEDIA; without it erasure answers 503): **REQUIRES HUMAN APPROVAL**. **Cron limit:** Workers Free allows 5 cron triggers per account. The Worker dispatches 3 exact crons (`0 * * * *`, `* * * * *`, `*/1 * * * *`), staging holds 3, production needs 3, so 6 > 5. Before deploying production, redeploy staging with its `triggers.crons` emptied (or delete the staging Worker after the rehearsal is closed; deletion **REQUIRES HUMAN APPROVAL**), or take a paid decision. Never run production without all three crons: the `*/1` entry is the erasure retry. Use the top-level `wrangler.jsonc` block with real ids, set production secrets (section 2.3), configure bucket CORS and lifecycle by hand with the same values as section 2.4 (the kit only ever touches `terrastories-staging-*`), and deploy the Worker without a route. Confirm that `PUBLIC_ORIGIN` is the final custom origin, not `https://example.org` (the Worker returns `503 config-refused` otherwise). Run the production dry-run: `npx wrangler deploy --dry-run`.
 
 ## 7. Maintenance window (blocked on frontend, section 0)
 

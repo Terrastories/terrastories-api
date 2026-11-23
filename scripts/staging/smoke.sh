@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Staging smoke: health, absent dev routes, walkthrough, R2 checksum probe, and
-# the Worker CPU measurement procedure. Dry run by default.
+# Staging smoke: health, absent dev routes, walkthrough, R2 CORS preflight,
+# R2 checksum probe, and the Worker CPU measurement procedure. Dry run by
+# default.
 #
 #   STAGING_URL=https://terrastories-staging-api.<sub>.workers.dev \
 #     scripts/staging/smoke.sh [--apply] [--community SLUG] [--cpu-procedure] [--local]
@@ -16,6 +17,7 @@
 # Env (names only, values never printed):
 #   WT_SUPER_IDENTIFIER, WT_SUPER_PASSWORD      super admin for the walkthrough
 #   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME  probe
+#   STAGING_FRONTEND_ORIGIN                     origin of the R2 CORS preflight
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -27,7 +29,9 @@ while [ $# -gt 0 ]; do
     --community) COMMUNITY="${2:?}"; shift ;;
     --cpu-procedure) CPU_ONLY=1 ;;
     --local) LOCAL=1 ;;
-    -h|--help) sed -n '2,19p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    # Print the whole comment header (line 2 up to the first non-comment line),
+    # so growing the header never truncates --help.
+    -h|--help) awk 'NR>1 {if (!/^#/) exit; print}' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
   shift
@@ -81,13 +85,20 @@ if [ "$APPLY" = 1 ]; then need_env WT_SUPER_IDENTIFIER WT_SUPER_PASSWORD; fi
 info "go/no-go needs summary.md to show PASS with every interaction row covered (89/89)"
 
 if [ "$LOCAL" = 1 ]; then
-  info "--local: R2 part-checksum probe and CPU procedure skipped (no S3 endpoint or Free-plan CPU limit on local workerd)"
+  info "--local: R2 CORS preflight, part-checksum probe and CPU procedure skipped (no S3 endpoint or Free-plan CPU limit on local workerd)"
   exit 0
 fi
 
 if [ "$APPLY" = 1 ]; then
   need_env R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET_NAME
   guard name "$R2_BUCKET_NAME"
+fi
+# Browser preflight for a direct part PUT: the bucket's CORS policy only
+# counts if the frontend origin is allowed to send it (SPEC-V2 section 6.7).
+if [ "$APPLY" = 1 ]; then
+  "$STAGING_DIR/cors-preflight.sh" --apply
+else
+  "$STAGING_DIR/cors-preflight.sh"
 fi
 (cd "$REPO_ROOT" && run npx tsx scripts/staging/verify-r2-part-checksum.ts) || {
   rc=$?

@@ -10,11 +10,18 @@
 #   CLOUDFLARE_ACCOUNT_ID  the expected work-account id; must appear in
 #                          `npx wrangler whoami` or the script refuses
 #   CLOUDFLARE_API_TOKEN   (or an interactive wrangler login)
+#   STAGING_FRONTEND_ORIGIN the frontend origin allowed to PUT parts straight
+#                          to R2; rendered into scripts/staging/r2-cors.json
 # Names are fixed (terrastories-staging-api / -db / -media / -erasure-records)
 # and checked against wrangler.jsonc env.staging, so the deployed config and
-# the created resources cannot diverge. Optional:
+# the created resources cannot diverge. Under --apply it also applies the
+# media bucket's CORS policy and its abort-incomplete-multipart lifecycle
+# rule, then reads both back and refuses if they are not in effect
+# (SPEC-V2 section 6.7); a dry run prints those commands only. Optional:
 #   OTHER_CRON_TRIGGERS (0) cron triggers already used by other Workers in the
 #                       account (production uses 3; the Free limit is 5)
+# A CLOUDFLARE_API_TOKEN exported for another account breaks wrangler: run
+# with 'env -u CLOUDFLARE_API_TOKEN' (the account guard checks whoami).
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -22,7 +29,9 @@ set -euo pipefail
 for arg in "$@"; do
   case "$arg" in
     --apply) APPLY=1 ;;
-    -h|--help) sed -n '2,19p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    # Print the whole comment header (line 2 up to the first non-comment line),
+    # so growing the header never truncates --help.
+    -h|--help) awk 'NR>1 {if (!/^#/) exit; print}' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) die "unknown argument: $arg" ;;
   esac
 done
@@ -31,11 +40,20 @@ D1_NAME="terrastories-staging-db"
 BUCKET="terrastories-staging-media"
 ERASURE_BUCKET="terrastories-staging-erasure-records"
 WORKER="terrastories-staging-api"
+# Media-bucket CORS (rendered from the committed template) and lifecycle.
+CORS_TEMPLATE="$STAGING_DIR/r2-cors.json"
+CORS_FILE="$STAGING_DIR/.r2-cors.json" # rendered with the origin; gitignored
+CORS_ORIGIN_PLACEHOLDER="__STAGING_FRONTEND_ORIGIN__"
+PART_UPLOAD_HEADER="x-amz-content-sha256"
+LIFECYCLE_RULE="terrastories-staging-abort-incomplete-multipart"
+LIFECYCLE_DAYS=1
 
-guard name "$D1_NAME" "$BUCKET" "$ERASURE_BUCKET" "$WORKER"
+guard name "$D1_NAME" "$BUCKET" "$ERASURE_BUCKET" "$WORKER" "$LIFECYCLE_RULE"
 guard config "$REPO_ROOT/wrangler.jsonc"
 check_account
 guard crons "$REPO_ROOT/wrangler.jsonc" staging "${OTHER_CRON_TRIGGERS:-0}"
+need_env STAGING_FRONTEND_ORIGIN
+guard origin "$STAGING_FRONTEND_ORIGIN"
 info "mode: $([ "$APPLY" = 1 ] && echo APPLY || echo DRY-RUN)"
 
 cd "$REPO_ROOT"
@@ -65,7 +83,56 @@ else
 fi
 info "erasure-records bucket: no lifecycle expiration, never restored/copied with D1 or MEDIA, excluded from backups (src/services/ERASURE-OPERATIONS.md)"
 
-info "R2 lifecycle (abort incomplete multipart after 1 day) and CORS (PUT, x-amz-content-sha256, content-type; expose ETag; MaxAge >= 3600) are set per docs/CUTOVER-RUNBOOK.md section 3"
+# Media-bucket CORS and lifecycle (SPEC-V2 section 6.7): applied under
+# --apply, then read back and refused if they are not in effect. A dry run
+# renders the same file and prints the wrangler commands, running none of
+# them. The erasure-records bucket is never touched by the frontend, so it
+# gets neither rule.
+render_cors() {
+  # Literal substitution, not a regex, so any origin the origin guard accepts
+  # lands in the file unchanged. The rename keeps a concurrent reader from
+  # seeing a half-written file.
+  local tmp="$CORS_FILE.tmp.$$"
+  node -e 'const fs=require("node:fs");const [src,dst,origin,token]=process.argv.slice(1);fs.writeFileSync(dst,fs.readFileSync(src,"utf8").split(token).join(origin));' \
+    "$CORS_TEMPLATE" "$tmp" "$STAGING_FRONTEND_ORIGIN" \
+    "$CORS_ORIGIN_PLACEHOLDER"
+  mv -f "$tmp" "$CORS_FILE"
+}
+render_cors
+guard cors-file "$CORS_FILE" "$STAGING_FRONTEND_ORIGIN"
+
+run npx wrangler r2 bucket cors set "$BUCKET" --file "$CORS_FILE" -y
+if [ "$APPLY" = 1 ]; then
+  cors_list="$(npx wrangler r2 bucket cors list "$BUCKET" 2>/dev/null)" \
+    || die "wrangler r2 bucket cors list failed"
+  printf '%s' "$cors_list" | guard cors-policy
+  info "R2 CORS verified on $BUCKET: PUT with $PART_UPLOAD_HEADER allowed for $STAGING_FRONTEND_ORIGIN"
+else
+  echo "+ npx wrangler r2 bucket cors list $BUCKET   (verify: PUT and $PART_UPLOAD_HEADER)"
+fi
+
+# The lifecycle rule is idempotent: it is added only when the read-back does
+# not already show it, and an added rule is read back before this passes.
+# A dry run reads nothing from the account: it prints the add command only.
+life_list=""
+if [ "$APPLY" = 1 ]; then
+  life_list="$(npx wrangler r2 bucket lifecycle list "$BUCKET" 2>/dev/null)" \
+    || die "wrangler r2 bucket lifecycle list failed"
+fi
+if [ "$APPLY" = 1 ] && guard_ok lifecycle "$LIFECYCLE_DAYS" <<<"$life_list"; then
+  info "R2 lifecycle verified on $BUCKET: abort incomplete multipart uploads after $LIFECYCLE_DAYS day(s)"
+else
+  run npx wrangler r2 bucket lifecycle add "$BUCKET" "$LIFECYCLE_RULE" \
+    --abort-multipart-days "$LIFECYCLE_DAYS" -y
+  if [ "$APPLY" = 1 ]; then
+    life_list="$(npx wrangler r2 bucket lifecycle list "$BUCKET" 2>/dev/null)" \
+      || die "wrangler r2 bucket lifecycle list failed"
+    printf '%s' "$life_list" | guard lifecycle "$LIFECYCLE_DAYS"
+    info "R2 lifecycle rule $LIFECYCLE_RULE added and verified on $BUCKET"
+  else
+    echo "+ npx wrangler r2 bucket lifecycle list $BUCKET   (verify the rule above)"
+  fi
+fi
 
 if grep -q 'REPLACE-WITH-STAGING-D1-ID' wrangler.jsonc; then
   info "wrangler.jsonc still has the placeholder staging database_id: not deploying the Worker"

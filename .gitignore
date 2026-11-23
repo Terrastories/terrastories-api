@@ -77,6 +77,10 @@ tmp/
 temp/
 .vercel
 
+# Staging kit output: the rendered R2 CORS file (scripts/staging/r2-cors.json
+# with STAGING_FRONTEND_ORIGIN substituted by provision.sh) and its temp file
+scripts/staging/.r2-cors.json*
+
 # Test files and uploads (generated during development)
 test_media.txt
 uploads/

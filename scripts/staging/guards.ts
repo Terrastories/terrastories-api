@@ -11,6 +11,11 @@
  *   tsx guards.ts d1-size <bytes>              D1 database within the free limit
  *   tsx guards.ts config <wrangler.jsonc>      env.staging matches the kit's fixed names
  *   tsx guards.ts url <staging-url> [--local]  URL is a staging origin (--local: loopback http only)
+ *   tsx guards.ts origin <origin>              bare frontend origin (scheme://host[:port])
+ *   tsx guards.ts cors-file <path> <origin>    R2 CORS rules[] file allows that origin's part PUT
+ *   tsx guards.ts cors-policy                  stdin: `wrangler r2 bucket cors list` allows the part PUT
+ *   tsx guards.ts lifecycle <days>             stdin: `wrangler r2 bucket lifecycle list` aborts after <days>
+ *   tsx guards.ts preflight <origin>           stdin: OPTIONS answer allows the part PUT from <origin>
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -32,6 +37,16 @@ export const STAGING_NAMES = {
 } as const;
 /** Exact cron strings src/worker.ts dispatches on (matched by string equality). */
 export const WORKER_CRONS = ['0 * * * *', '* * * * *', '*/1 * * * *'] as const;
+
+/** Placeholder origin in the committed CORS template (r2-cors.json); the kit
+ * substitutes STAGING_FRONTEND_ORIGIN before wrangler reads the file. */
+export const CORS_ORIGIN_PLACEHOLDER = '__STAGING_FRONTEND_ORIGIN__';
+/** The one header a direct part upload must be allowed to send (SPEC-V2 §6.7). */
+export const PART_UPLOAD_HEADER = 'x-amz-content-sha256';
+/** SPEC-V2 §6.7: allowed method PUT and MaxAgeSeconds of at least 3600. */
+export const CORS_MIN_MAX_AGE_SECONDS = 3600;
+/** SPEC-V2 §6.7: abort incomplete multipart uploads after 1 day. */
+export const ABORT_MULTIPART_DAYS = 1;
 
 const NAME_RE = /^terrastories-staging-[a-z0-9][a-z0-9-]*$/;
 
@@ -251,6 +266,208 @@ export function assertStagingUrl(
   }
 }
 
+// Wrangler colours its tables on a TTY: strip ANSI so a captured answer and
+// an interactive one parse the same way.
+const ANSI_RE = new RegExp(String.fromCharCode(27) + '\\[[0-9;]*m', 'g');
+const LABEL_RE = /^([A-Za-z][A-Za-z0-9_-]*):[ \t]*(.*)$/;
+
+/**
+ * Labelled blocks from `wrangler r2 bucket cors list` and `lifecycle list`:
+ * one block per rule, blocks separated by blank lines, `label: value` lines
+ * whose values are column-aligned, and a wrapped value continued on the next
+ * (indented) line. The same parser reads an HTTP header block, which is why
+ * the label charset includes `-`.
+ */
+export function parseLabelledBlocks(text: string): Record<string, string>[] {
+  const blocks: Record<string, string>[] = [];
+  for (const block of text
+    .replace(ANSI_RE, '')
+    .replace(/\r\n?/g, '\n')
+    .split(/\n[ \t]*\n+/)) {
+    const view: Record<string, string> = {};
+    let key = '';
+    for (const line of block.split('\n')) {
+      const field = LABEL_RE.exec(line);
+      if (field) {
+        key = field[1] as string;
+        view[key] = (field[2] as string).trim();
+      } else if (key && line.trim()) {
+        view[key] = (view[key] ?? '') + ' ' + line.trim();
+      }
+    }
+    if (key) blocks.push(view);
+  }
+  return blocks;
+}
+
+/** Comma-separated CORS list value as lowercase tokens (`PUT, GET` -> ...). */
+function tokens(value: string | string[] | undefined): string[] {
+  const list = Array.isArray(value) ? value : (value ?? '').split(',');
+  return list.map((token) => token.trim().toLowerCase()).filter(Boolean);
+}
+
+/** STAGING_FRONTEND_ORIGIN: a bare http(s) origin, no path, query or fragment. */
+export function assertFrontendOrigin(raw: string): void {
+  const value = (raw ?? '').trim();
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new GuardError(
+      'refused: STAGING_FRONTEND_ORIGIN is not a URL (expected an origin such as https://app.example.org)'
+    );
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    throw new GuardError(
+      'refused: STAGING_FRONTEND_ORIGIN must be an http(s) origin'
+    );
+  }
+  if ((url.pathname !== '' && url.pathname !== '/') || url.search || url.hash) {
+    throw new GuardError(
+      'refused: STAGING_FRONTEND_ORIGIN must be a bare origin (scheme://host[:port]), without a path, query or fragment'
+    );
+  }
+}
+
+type CorsRule = {
+  allowed?: { origins?: string[]; methods?: string[]; headers?: string[] };
+  exposeHeaders?: string[];
+  maxAgeSeconds?: number;
+};
+
+/**
+ * The rendered CORS file wrangler gets: R2's `rules` (not AWS `CORSRules`),
+ * one rule that allows the part upload, and — when the origin is passed —
+ * exactly the operator's frontend origin, so a template that was never
+ * rendered is refused before it reaches the bucket.
+ */
+export function assertCorsFile(path: string, origin?: string): void {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    throw new GuardError('refused: CORS config ' + path + ' is not valid JSON');
+  }
+  const rules = (parsed as { rules?: unknown }).rules;
+  if (!Array.isArray(rules) || rules.length === 0) {
+    throw new GuardError(
+      'refused: CORS config ' +
+        path +
+        ' must hold a non-empty rules array (the R2 format, not AWS CORSRules)'
+    );
+  }
+  const match = (rules as CorsRule[]).find(
+    (rule) =>
+      tokens(rule.allowed?.methods).includes('put') &&
+      tokens(rule.allowed?.headers).includes(PART_UPLOAD_HEADER)
+  );
+  if (!match) {
+    throw new GuardError(
+      'refused: CORS config ' +
+        path +
+        ' has no rule allowing PUT with ' +
+        PART_UPLOAD_HEADER
+    );
+  }
+  if (!tokens(match.exposeHeaders).includes('etag')) {
+    throw new GuardError('refused: CORS config ' + path + ' must expose ETag');
+  }
+  if ((match.maxAgeSeconds ?? 0) < CORS_MIN_MAX_AGE_SECONDS) {
+    throw new GuardError(
+      'refused: CORS config ' +
+        path +
+        ' must set maxAgeSeconds to at least ' +
+        String(CORS_MIN_MAX_AGE_SECONDS)
+    );
+  }
+  const origins = tokens(match.allowed?.origins);
+  if (origin !== undefined && !origins.includes(origin.toLowerCase())) {
+    throw new GuardError(
+      'refused: CORS config ' +
+        path +
+        ' does not allow the origin ' +
+        origin +
+        ' (was STAGING_FRONTEND_ORIGIN substituted?)'
+    );
+  }
+}
+
+/** stdin: `wrangler r2 bucket cors list` must show the part-upload rule. */
+export function assertCorsPolicyAllowsUploads(listText: string): void {
+  const allowed = parseLabelledBlocks(listText).some(
+    (rule) =>
+      tokens(rule.allowed_methods).includes('put') &&
+      tokens(rule.allowed_headers).includes(PART_UPLOAD_HEADER)
+  );
+  if (!allowed) {
+    throw new GuardError(
+      'refused: the R2 CORS policy has no rule allowing PUT with ' +
+        PART_UPLOAD_HEADER +
+        ' (wrangler r2 bucket cors list)'
+    );
+  }
+}
+
+/** stdin: `wrangler r2 bucket lifecycle list` must show an enabled rule that
+ * aborts incomplete multipart uploads after exactly <days> days. */
+export function assertLifecycleAbortRule(listText: string, days: number): void {
+  if (!Number.isInteger(days) || days < 1) {
+    throw new GuardError('refused: lifecycle days must be a positive integer');
+  }
+  const after = new RegExp('\\bafter\\s+' + String(days) + '\\s+days?\\b', 'i');
+  const found = parseLabelledBlocks(listText).some((rule) => {
+    const action = rule.action ?? '';
+    const enabled = (rule.enabled ?? 'yes').trim().toLowerCase();
+    return (
+      enabled === 'yes' &&
+      action.toLowerCase().includes('abort incomplete multipart uploads') &&
+      after.test(action)
+    );
+  });
+  if (!found) {
+    throw new GuardError(
+      'refused: no enabled lifecycle rule aborting incomplete multipart uploads after ' +
+        String(days) +
+        ' day(s) (wrangler r2 bucket lifecycle list)'
+    );
+  }
+}
+
+/** stdin: the OPTIONS answer a browser sends before a direct part PUT. */
+export function assertCorsPreflight(origin: string, response: string): void {
+  const want = origin.trim().toLowerCase();
+  // Header block only (up to the first blank line), and only a 2xx answer: a
+  // body that merely looks like headers must not pass.
+  const head = response.replace(/\r\n?/g, '\n').split(/\n[ \t]*\n/)[0] ?? '';
+  const statusOk = /^HTTP\/\S+\s+2\d\d\b/.test(head.trimStart());
+  const allowed =
+    statusOk &&
+    parseLabelledBlocks(head).some((block) => {
+      const header: Record<string, string> = {};
+      for (const [name, value] of Object.entries(block))
+        header[name.toLowerCase()] = value;
+      const allowOrigin = (header['access-control-allow-origin'] ?? '').trim();
+      const originsOk =
+        allowOrigin === '*' || tokens(allowOrigin).includes(want);
+      const methods = tokens(header['access-control-allow-methods']);
+      const headers = tokens(header['access-control-allow-headers']);
+      return (
+        originsOk &&
+        (methods.includes('put') || methods.includes('*')) &&
+        (headers.includes('*') || headers.includes(PART_UPLOAD_HEADER))
+      );
+    });
+  if (!allowed) {
+    throw new GuardError(
+      'refused: the R2 preflight answer does not allow PUT with ' +
+        PART_UPLOAD_HEADER +
+        ' from ' +
+        origin +
+        ' (Access-Control-Allow-Origin/Methods/Headers)'
+    );
+  }
+}
+
 function readStdin(): string {
   return readFileSync(0, 'utf8');
 }
@@ -277,9 +494,20 @@ export function main(argv: string[]): number {
       assertStagingUrl(rest[0] as string, process.env.STAGING_ALLOW_HOST);
     else if (cmd === 'url' && rest.length === 2 && rest[1] === '--local')
       assertStagingUrl(rest[0] as string, undefined, true);
+    else if (cmd === 'origin' && rest.length === 1)
+      assertFrontendOrigin(rest[0] as string);
+    else if (cmd === 'cors-file' && rest.length === 2)
+      assertCorsFile(rest[0] as string, rest[1]);
+    else if (cmd === 'cors-policy' && rest.length === 0)
+      assertCorsPolicyAllowsUploads(readStdin());
+    else if (cmd === 'lifecycle' && rest.length === 1)
+      assertLifecycleAbortRule(readStdin(), Number(rest[0]));
+    else if (cmd === 'preflight' && rest.length === 1)
+      assertCorsPreflight(rest[0] as string, readStdin());
     else {
       process.stderr.write(
-        'usage: guards.ts name|account|crons|d1-size|url ...\n'
+        'usage: guards.ts name|has-name|account|crons|d1-size|config|url|' +
+          'origin|cors-file|cors-policy|lifecycle|preflight ...\n'
       );
       return 2;
     }

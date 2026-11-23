@@ -15,10 +15,12 @@
 # --skip-walkthrough: skip the embedded walkthrough (use on a second run the same
 # UTC day: D1 allows one committed import per UTC day for the whole database and
 # the walkthrough commits one). Without the flag, smoke remembers the UTC day of
-# its last successful walkthrough (walkthrough-out/.staging-import-utc-day) and
-# prints 'walkthrough already ran today' instead of failing; a failure whose
-# output shows d1_daily_import_limit gets the same message. GET /v2/imports is
-# community-scoped, so it cannot show other runs' imports and is not used.
+# its last successful walkthrough per target URL (walkthrough-out/
+# .staging-import-utc-day-<hash of URL>, so local and remote runs do not share
+# it) and prints 'walkthrough already ran today' instead of failing. A run from
+# another machine is not seen; a walkthrough failure is never reclassified (it
+# could hide a real failed check), it only prints a hint about the daily rule.
+# GET /v2/imports is community-scoped, so it cannot show other runs' imports.
 # --allow-destructive is passed to the walkthrough: it only creates and erases
 # a disposable community, but it is a write run, so it stays staging-only.
 # Env (names only, values never printed):
@@ -93,28 +95,20 @@ else
 fi
 
 if [ "$APPLY" = 1 ]; then need_env WT_SUPER_IDENTIFIER WT_SUPER_PASSWORD; fi
-MARK_DIR="$REPO_ROOT/walkthrough-out"; MARK="$MARK_DIR/.staging-import-utc-day"; TODAY="$(date -u +%F)"
+MARK_DIR="$REPO_ROOT/walkthrough-out"; MARK="$MARK_DIR/.staging-import-utc-day-$(printf '%s' "$BASE" | sha256sum | cut -c1-12)"; TODAY="$(date -u +%F)"
 WT_MSG="walkthrough already ran today (UTC $TODAY): D1 allows one committed import per UTC day. Rerun after 00:00 UTC, or use --skip-walkthrough."
 if [ "$SKIP_WT" = 1 ]; then
   info "walkthrough skipped (--skip-walkthrough)"
 elif [ "$APPLY" = 1 ] && [ -f "$MARK" ] && [ "$(cat "$MARK")" = "$TODAY" ]; then
   info "$WT_MSG"
 else
-  WT_LOG="$(mktemp)"; chmod 600 "$WT_LOG"
-  set +e
+  WT_RC=0
   (cd "$REPO_ROOT" && run npm run walkthrough -- --base-url "$BASE" --community "$COMMUNITY" --d1 \
-    --super-credentials-env --allow-destructive --out "walkthrough-out/staging-$(date -u +%Y%m%dT%H%M%SZ)") 2>&1 | tee "$WT_LOG"
-  WT_RC=${PIPESTATUS[0]}
-  set -e
+    --super-credentials-env --allow-destructive --out "walkthrough-out/staging-$(date -u +%Y%m%dT%H%M%SZ)") || WT_RC=$?
   if [ "$WT_RC" != 0 ]; then
-    if grep -q 'd1_daily_import_limit' "$WT_LOG"; then
-      rm -f "$WT_LOG"; info "$WT_MSG"
-      echo "$TODAY" > "$MARK" 2>/dev/null || true
-    else
-      rm -f "$WT_LOG"; die "walkthrough failed (exit $WT_RC)"
-    fi
+    info "hint: if another run already committed an import today (UTC $TODAY), the import steps fail by design; read summary.md, and rerun after 00:00 UTC or with --skip-walkthrough"
+    die "walkthrough failed (exit $WT_RC)"
   else
-    rm -f "$WT_LOG"
     if [ "$APPLY" = 1 ]; then mkdir -p "$MARK_DIR"; echo "$TODAY" > "$MARK"; fi
     info "go/no-go needs summary.md to show PASS with every interaction row covered (89/89)"
   fi

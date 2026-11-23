@@ -307,7 +307,15 @@ exit 0
     join(sqlOut, 'r2-upload-manifest.json'),
     JSON.stringify({
       formatVersion: 1,
-      objects: [{ key: 'k1', size: 5, sha256: 'x', contentType: 'video/mp4' }],
+      objects: [
+        {
+          key: 'k1',
+          size: 5,
+          sha256:
+            '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
+          contentType: 'video/mp4',
+        },
+      ],
     })
   );
   const stamp = spawnSync('bash', [
@@ -342,6 +350,32 @@ exit 0
     const r = run([]);
     expect(r.status).not.toBe(0);
     expect(r.stderr).toMatch(/--r2-via-wrangler/);
+  });
+
+  it('refuses the whole wrangler path when an object is over 300 MiB', () => {
+    const manifest = join(sqlOut, 'r2-upload-manifest.json');
+    const original = readFileSync(manifest, 'utf8');
+    writeFileSync(
+      manifest,
+      JSON.stringify({
+        formatVersion: 1,
+        objects: [
+          {
+            key: 'big',
+            size: 400 * 1024 * 1024,
+            sha256: 'y',
+            contentType: 'video/mp4',
+          },
+        ],
+      })
+    );
+    try {
+      const r = run(['--r2-via-wrangler']);
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toMatch(/over 300 MiB/);
+    } finally {
+      writeFileSync(manifest, original);
+    }
   });
 
   it('puts with content-type, verifies, and skips on rerun', () => {

@@ -15,9 +15,11 @@
 #   6. [apply] migrate:rails:load --target r2 (dry run, then real); or, with
 #      --r2-via-wrangler (no R2_* S3 credentials), 'wrangler r2 object put
 #      --remote --content-type' per r2-upload-manifest.json entry, each object
-#      verified afterwards by 'wrangler r2 object get' size. Reruns skip
-#      objects already present with the right size. Objects over 300 MiB are
-#      refused (wrangler limit): use the S3 path for them.
+#      verified afterwards by 'wrangler r2 object get' (size and sha256). Reruns
+#      skip objects already present and matching. If any object is over 300 MiB
+#      (wrangler limit) the whole path is refused up front: the S3 loader needs
+#      x-amz-meta-sha256 on existing objects, which wrangler cannot set, so
+#      do not mix the two paths in one bucket.
 #   7. [apply] verify.sql
 # Prints counts and step status only. Wrangler output goes to a mode-600 log
 # under the --sql-out directory, never to the terminal.
@@ -70,16 +72,19 @@ load --target d1 --dry-run ${OVER:+"$OVER"}
 r2_via_wrangler() {
   local manifest="$SQL_OUT/r2-upload-manifest.json" listing key size ct src tmp got n=0 up=0 present=0 total
   [ -f "$manifest" ] || die "$manifest missing: run the D1 dump step first"
-  listing="$(node -e 'for (const o of JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).objects) console.log([o.key,o.size,o.contentType].join("\t"))' "$manifest")"
+  listing="$(node -e 'for (const o of JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).objects) console.log([o.key,o.size,o.contentType,o.sha256].join("\t"))' "$manifest")"
   total="$(printf '%s\n' "$listing" | grep -c . || true)"
+  # Wrangler cannot set the x-amz-meta-sha256 the S3 loader requires on existing
+  # objects, so the two paths must not be mixed: refuse before uploading anything.
+  node -e 'const m=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.exit(m.objects.some(o=>o.size>314572800)?1:0)' "$manifest" \
+    || die "an object is over 300 MiB: --r2-via-wrangler cannot upload it, and objects it uploads lack the checksum metadata the S3 loader needs; use the S3 path for the whole load"
   tmp="$(mktemp)"; chmod 600 "$tmp"
-  while IFS=$'\t' read -r key size ct; do
+  while IFS=$'\t' read -r key size ct sha; do
     [ -n "$key" ] || continue
     n=$((n+1))
     src="$TRANSFORM/v2-media/$key"
     [ -f "$src" ] || { rm -f "$tmp"; die "r2 object $n/$total: source file missing"; }
-    [ "$size" -le 314572800 ] || { rm -f "$tmp"; die "r2 object $n/$total is over 300 MiB: use the S3 path"; }
-    if wr r2 object get "$BUCKET/$key" --remote --file "$tmp" && [ "$(stat -c %s "$tmp")" = "$size" ]; then
+    if wr r2 object get "$BUCKET/$key" --remote --file "$tmp" && [ "$(stat -c %s "$tmp")" = "$size" ] && [ "$(sha256sum "$tmp" | cut -d' ' -f1)" = "$sha" ]; then
       present=$((present+1)); continue
     fi
     wr r2 object put "$BUCKET/$key" --remote --file "$src" --content-type "$ct" || { rm -f "$tmp"; die "r2 put $n/$total failed; see $LOG"; }
@@ -87,6 +92,7 @@ r2_via_wrangler() {
     wr r2 object get "$BUCKET/$key" --remote --file "$tmp" || { rm -f "$tmp"; die "r2 verify get $n/$total failed; see $LOG"; }
     got="$(stat -c %s "$tmp")"
     [ "$got" = "$size" ] || { rm -f "$tmp"; die "r2 verify $n/$total: size mismatch (expected $size, got $got)"; }
+    [ "$(sha256sum "$tmp" | cut -d' ' -f1)" = "$sha" ] || { rm -f "$tmp"; die "r2 verify $n/$total: sha256 mismatch"; }
     up=$((up+1))
   done <<< "$listing"
   rm -f "$tmp"

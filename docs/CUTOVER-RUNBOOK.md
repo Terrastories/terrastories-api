@@ -101,7 +101,7 @@ Operator notes from the run:
 - Without S3 credentials use `scripts/staging/load-community.sh ... --apply --r2-via-wrangler` (objects over 300 MiB need the S3 path).
 - `wrangler tail <worker> --format json` takes no `--env` (the worker name already includes `staging`) and prints pretty-printed multi-line JSON. Parse it with `node scripts/staging/parse-tail.mjs`.
 - `POST /v2/media` with raw bytes accepts only `role=user_photo`; send no role for the CPU measurement.
-- D1 allows one committed import per UTC day, so a second walkthrough on the same UTC day fails. Use `smoke.sh --skip-walkthrough`, or rerun after 00:00 UTC (smoke prints "walkthrough already ran today").
+- D1 allows one committed import per UTC day, so a second walkthrough on the same UTC day fails. Use `smoke.sh --skip-walkthrough`, or rerun after 00:00 UTC (smoke prints "walkthrough already ran today" when its own marker for that target shows a run today; a run from another machine is not seen, so use the flag).
 
 ## 4. Decisions to resolve before production
 

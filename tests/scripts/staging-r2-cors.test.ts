@@ -102,6 +102,9 @@ describe('frontend origin guard', () => {
       '*',
       'app.terrastories.test',
       'https://',
+      'https://app.terrastories.test/',
+      'https://APP.terrastories.test',
+      'https://app.terrastories.test:443',
       'https://app.terrastories.test/admin',
       'https://app.terrastories.test/?next=1',
       'https://app.terrastories.test/#x',
@@ -177,23 +180,83 @@ describe('the CORS file wrangler is given', () => {
 
 describe('wrangler list read-back', () => {
   it('accepts the part-upload rule, plain or coloured', () => {
-    expect(() => assertCorsPolicyAllowsUploads(CORS_LIST_OK)).not.toThrow();
+    expect(() =>
+      assertCorsPolicyAllowsUploads(CORS_LIST_OK, ORIGIN)
+    ).not.toThrow();
     const coloured = CORS_LIST_OK.replace(/PUT/g, '\x1b[32mPUT\x1b[39m');
-    expect(() => assertCorsPolicyAllowsUploads(coloured)).not.toThrow();
+    expect(() => assertCorsPolicyAllowsUploads(coloured, ORIGIN)).not.toThrow();
   });
 
   it('refuses a policy that cannot send the part header', () => {
-    expect(() => assertCorsPolicyAllowsUploads(CORS_LIST_NO_HEADER)).toThrow(
-      /no rule allowing PUT/
-    );
+    expect(() =>
+      assertCorsPolicyAllowsUploads(CORS_LIST_NO_HEADER, ORIGIN)
+    ).toThrow(/no rule for exactly the origin/);
     expect(() =>
       assertCorsPolicyAllowsUploads(
-        `There is no CORS configuration defined for bucket '${BUCKET}'.`
+        `There is no CORS configuration defined for bucket '${BUCKET}'.`,
+        ORIGIN
       )
-    ).toThrow(/no rule allowing PUT/);
-    expect(() => assertCorsPolicyAllowsUploads('')).toThrow(
-      /no rule allowing PUT/
+    ).toThrow(/no rule for exactly the origin/);
+    expect(() => assertCorsPolicyAllowsUploads('', ORIGIN)).toThrow(
+      /no rule for exactly the origin/
     );
+  });
+
+  it('refuses a policy that is not exactly the configured origin, ETag and max age', () => {
+    const bad = [
+      CORS_LIST_OK.replace(ORIGIN, '*'),
+      CORS_LIST_OK.replace(ORIGIN, 'https://elsewhere.test'),
+      CORS_LIST_OK.replace(ORIGIN, `${ORIGIN}, https://elsewhere.test`),
+      CORS_LIST_OK.replace(
+        'allowed_methods:    PUT',
+        'allowed_methods:    GET'
+      ),
+      CORS_LIST_OK.replace(
+        'exposed_headers:    ETag',
+        'exposed_headers:    x-other'
+      ),
+      CORS_LIST_OK.replace(
+        'max_age_seconds:    3600',
+        'max_age_seconds:    60'
+      ),
+      CORS_LIST_OK.replace('max_age_seconds:    3600\n', ''),
+    ];
+    for (const list of bad) {
+      expect(() => assertCorsPolicyAllowsUploads(list, ORIGIN), list).toThrow(
+        GuardError
+      );
+    }
+    expect(() =>
+      assertCorsPolicyAllowsUploads(
+        CORS_LIST_OK.replace('ETag', 'etag').replace('3600', '7200'),
+        ORIGIN.toUpperCase().replace('HTTPS', 'https')
+      )
+    ).not.toThrow();
+  });
+
+  it('refuses an abort rule scoped to a prefix or whose day count belongs to another action', () => {
+    for (const list of [
+      LIFECYCLE_LIST_OK.replace('(all prefixes)', 'uploads/'),
+      LIFECYCLE_LIST_OK.replace(
+        'Abort incomplete multipart uploads after 1 days',
+        'Abort incomplete multipart uploads after 7 days, expire objects after 1 day'
+      ),
+      LIFECYCLE_LIST_OK.replace(
+        'Abort incomplete multipart uploads after 1 days',
+        'Expire objects after 1 day, abort incomplete multipart uploads after 7 days'
+      ),
+      LIFECYCLE_LIST_OK.replace('after 1 days', 'after 10 days'),
+    ]) {
+      expect(() => assertLifecycleAbortRule(list, 1), list).toThrow(
+        /no enabled lifecycle rule/
+      );
+    }
+    expect(() =>
+      assertLifecycleAbortRule(
+        LIFECYCLE_LIST_OK.replace('(all prefixes)', ''),
+        1
+      )
+    ).not.toThrow();
   });
 
   it('requires an enabled abort rule at the configured age', () => {
@@ -225,6 +288,24 @@ describe('the browser preflight answer', () => {
     expect(() =>
       assertCorsPreflight(ORIGIN, PREFLIGHT_OK.replace(ORIGIN, '*'))
     ).not.toThrow();
+  });
+
+  it('refuses a comma-separated Access-Control-Allow-Origin list', () => {
+    for (const value of [
+      `${ORIGIN}, https://elsewhere.test`,
+      `https://elsewhere.test,${ORIGIN}`,
+      `${ORIGIN}, *`,
+    ]) {
+      expect(() =>
+        assertCorsPreflight(
+          ORIGIN,
+          PREFLIGHT_OK.replace(
+            `access-control-allow-origin: ${ORIGIN}`,
+            `access-control-allow-origin: ${value}`
+          )
+        )
+      ).toThrow(GuardError);
+    }
   });
 
   it('refuses answers that do not allow it', () => {
@@ -370,7 +451,7 @@ describe('provision.sh applies and verifies the bucket config', () => {
     writeFileSync(lifecycleListFile, LIFECYCLE_LIST_NONE);
     const r = provision({}, ['--apply']);
     expect(r.status).not.toBe(0);
-    expect(r.stderr).toMatch(/no rule allowing PUT/);
+    expect(r.stderr).toMatch(/no rule for exactly the origin/);
     const npx = logs.npx();
     expect(npx).toContain(`r2 bucket cors set ${BUCKET} --file ${RENDERED} -y`);
     expect(npx).toContain('r2 bucket cors list');

@@ -18,6 +18,7 @@ import {
   GuardError,
   WORKER_CRONS,
   assertAccountMatches,
+  assertMediaBucket,
   assertStagingConfig,
   listHasName,
   assertCronBudget,
@@ -127,6 +128,29 @@ describe('staging guards', () => {
       );
     // without the flag, loopback http stays refused
     expect(() => assertStagingUrl('http://127.0.0.1:8787')).toThrow(GuardError);
+  });
+});
+
+describe('media bucket pin', () => {
+  const config = {
+    env: {
+      staging: {
+        r2_buckets: [
+          { binding: 'MEDIA', bucket_name: 'terrastories-staging-media' },
+        ],
+      },
+    },
+  };
+  it('accepts the bound bucket only', () => {
+    expect(() =>
+      assertMediaBucket(config, 'terrastories-staging-media')
+    ).not.toThrow();
+    expect(() =>
+      assertMediaBucket(config, 'terrastories-staging-other')
+    ).toThrow(GuardError);
+    expect(() => assertMediaBucket({}, 'terrastories-staging-media')).toThrow(
+      GuardError
+    );
   });
 });
 
@@ -1158,6 +1182,28 @@ PATH="\${PATH#*:}" exec npx "$@"
     expect(r.status, r.stderr + r.stdout).toBe(0);
     expect(r.stdout).toMatch(/CORS preflight allowed/);
     expect(r.stdout).toMatch(/summary: R2 part-checksum probe done: enforced/);
+  });
+
+  it('refuses a probe bucket that is not the deployed Worker MEDIA bucket', () => {
+    const r = run(
+      ['--apply', '--skip-walkthrough'],
+      { ...probeEnv('0'), R2_BUCKET_NAME: 'terrastories-staging-other' },
+      REMOTE_URL
+    );
+    expect(r.status).not.toBe(0);
+    expect(r.stderr + r.stdout).toMatch(/not the deployed Worker MEDIA bucket/);
+    expect(r.stdout).not.toMatch(/CORS preflight allowed/);
+  });
+
+  it('refuses R2_ACCOUNT_ID that differs from CLOUDFLARE_ACCOUNT_ID', () => {
+    const r = run(
+      ['--apply', '--skip-walkthrough'],
+      { ...probeEnv('0'), CLOUDFLARE_ACCOUNT_ID: 'b'.repeat(32) },
+      REMOTE_URL
+    );
+    expect(r.status).not.toBe(0);
+    expect(r.stderr + r.stdout).toMatch(/does not match CLOUDFLARE_ACCOUNT_ID/);
+    expect(r.stdout).not.toMatch(/CORS preflight allowed/);
   });
 
   it('fails when R2 accepts corrupted part bytes (probe exit 2), never records it', () => {

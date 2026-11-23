@@ -239,6 +239,12 @@ else
   if [ "$APPLY" = 1 ]; then
     need_env R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET_NAME
     guard name "$R2_BUCKET_NAME"
+    # Pin the probe to the bucket the deployed Worker actually writes to.
+    guard media-bucket "$REPO_ROOT/wrangler.jsonc" "$R2_BUCKET_NAME"
+    if [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ] &&
+      [ "${R2_ACCOUNT_ID,,}" != "${CLOUDFLARE_ACCOUNT_ID,,}" ]; then
+      die "R2_ACCOUNT_ID does not match CLOUDFLARE_ACCOUNT_ID (wrong account)"
+    fi
   fi
   # Browser preflight for a direct part PUT: the bucket's CORS policy only
   # counts if the frontend origin is allowed to send it (SPEC-V2 section 6.7).

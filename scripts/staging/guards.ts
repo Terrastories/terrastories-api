@@ -322,6 +322,11 @@ export function assertFrontendOrigin(raw: string): void {
       'refused: STAGING_FRONTEND_ORIGIN must be an http(s) origin'
     );
   }
+  if (value !== url.origin) {
+    throw new GuardError(
+      'refused: STAGING_FRONTEND_ORIGIN must be exactly scheme://host[:port] (no trailing slash, path, query or fragment, lowercase host, no default port)'
+    );
+  }
   if ((url.pathname !== '' && url.pathname !== '/') || url.search || url.hash) {
     throw new GuardError(
       'refused: STAGING_FRONTEND_ORIGIN must be a bare origin (scheme://host[:port]), without a path, query or fragment'
@@ -392,17 +397,35 @@ export function assertCorsFile(path: string, origin?: string): void {
   }
 }
 
-/** stdin: `wrangler r2 bucket cors list` must show the part-upload rule. */
-export function assertCorsPolicyAllowsUploads(listText: string): void {
-  const allowed = parseLabelledBlocks(listText).some(
-    (rule) =>
+/**
+ * stdin: `wrangler r2 bucket cors list` must show one rule that allows
+ * exactly the configured origin (no other, no wildcard), PUT, the part header,
+ * exposes ETag and caches the preflight for at least CORS_MIN_MAX_AGE_SECONDS.
+ */
+export function assertCorsPolicyAllowsUploads(
+  listText: string,
+  origin: string
+): void {
+  const want = origin.trim().toLowerCase();
+  const allowed = parseLabelledBlocks(listText).some((rule) => {
+    const origins = tokens(rule.allowed_origins);
+    return (
+      origins.length === 1 &&
+      origins[0] === want &&
       tokens(rule.allowed_methods).includes('put') &&
-      tokens(rule.allowed_headers).includes(PART_UPLOAD_HEADER)
-  );
+      tokens(rule.allowed_headers).includes(PART_UPLOAD_HEADER) &&
+      tokens(rule.exposed_headers).includes('etag') &&
+      Number(rule.max_age_seconds) >= CORS_MIN_MAX_AGE_SECONDS
+    );
+  });
   if (!allowed) {
     throw new GuardError(
-      'refused: the R2 CORS policy has no rule allowing PUT with ' +
+      'refused: the R2 CORS policy has no rule for exactly the origin ' +
+        origin +
+        ' allowing PUT with ' +
         PART_UPLOAD_HEADER +
+        ', exposing ETag, with max age >= ' +
+        String(CORS_MIN_MAX_AGE_SECONDS) +
         ' (wrangler r2 bucket cors list)'
     );
   }
@@ -414,14 +437,26 @@ export function assertLifecycleAbortRule(listText: string, days: number): void {
   if (!Number.isInteger(days) || days < 1) {
     throw new GuardError('refused: lifecycle days must be a positive integer');
   }
-  const after = new RegExp('\\bafter\\s+' + String(days) + '\\s+days?\\b', 'i');
+  // One phrase, so "after N days" must belong to the abort action itself. The
+  // rule must cover the whole bucket: a prefix-scoped rule leaves the rest of
+  // the bucket's incomplete uploads in place.
+  const phrase = new RegExp(
+    'abort incomplete multipart uploads after ' + String(days) + ' days?\\b',
+    'i'
+  );
+  const wholeBucket = (prefix: string | undefined): boolean => {
+    if (prefix === undefined) return false;
+    const value = prefix.trim().toLowerCase();
+    return (
+      value === '' || value === '(all prefixes)' || value === 'all prefixes'
+    );
+  };
   const found = parseLabelledBlocks(listText).some((rule) => {
-    const action = rule.action ?? '';
     const enabled = (rule.enabled ?? 'yes').trim().toLowerCase();
     return (
       enabled === 'yes' &&
-      action.toLowerCase().includes('abort incomplete multipart uploads') &&
-      after.test(action)
+      wholeBucket(rule.prefix) &&
+      phrase.test(rule.action ?? '')
     );
   });
   if (!found) {
@@ -429,6 +464,35 @@ export function assertLifecycleAbortRule(listText: string, days: number): void {
       'refused: no enabled lifecycle rule aborting incomplete multipart uploads after ' +
         String(days) +
         ' day(s) (wrangler r2 bucket lifecycle list)'
+    );
+  }
+}
+
+/** The probe/preflight bucket must be the one the deployed Worker's MEDIA binding uses. */
+export function assertMediaBucket(config: unknown, bucket: string): void {
+  const staging = (
+    config as {
+      env?: {
+        staging?: {
+          r2_buckets?: Array<{ binding?: string; bucket_name?: string }>;
+        };
+      };
+    }
+  ).env?.staging;
+  const bound = staging?.r2_buckets?.find(
+    (b) => b.binding === 'MEDIA'
+  )?.bucket_name;
+  if (!bound) {
+    throw new GuardError(
+      'refused: wrangler.jsonc env.staging has no MEDIA bucket binding'
+    );
+  }
+  if (bound !== bucket) {
+    throw new GuardError(
+      'refused: R2_BUCKET_NAME ' +
+        bucket +
+        ' is not the deployed Worker MEDIA bucket ' +
+        bound
     );
   }
 }
@@ -447,8 +511,9 @@ export function assertCorsPreflight(origin: string, response: string): void {
       for (const [name, value] of Object.entries(block))
         header[name.toLowerCase()] = value;
       const allowOrigin = (header['access-control-allow-origin'] ?? '').trim();
+      // A single exact value: a comma-separated list is not a valid answer.
       const originsOk =
-        allowOrigin === '*' || tokens(allowOrigin).includes(want);
+        allowOrigin === '*' || allowOrigin.toLowerCase() === want;
       const methods = tokens(header['access-control-allow-methods']);
       const headers = tokens(header['access-control-allow-headers']);
       return (
@@ -498,8 +563,13 @@ export function main(argv: string[]): number {
       assertFrontendOrigin(rest[0] as string);
     else if (cmd === 'cors-file' && rest.length === 2)
       assertCorsFile(rest[0] as string, rest[1]);
-    else if (cmd === 'cors-policy' && rest.length === 0)
-      assertCorsPolicyAllowsUploads(readStdin());
+    else if (cmd === 'cors-policy' && rest.length === 1)
+      assertCorsPolicyAllowsUploads(readStdin(), rest[0] as string);
+    else if (cmd === 'media-bucket' && rest.length === 2)
+      assertMediaBucket(
+        parseJsonc(readFileSync(rest[0] as string, 'utf8')),
+        rest[1] as string
+      );
     else if (cmd === 'lifecycle' && rest.length === 1)
       assertLifecycleAbortRule(readStdin(), Number(rest[0]));
     else if (cmd === 'preflight' && rest.length === 1)
@@ -507,7 +577,7 @@ export function main(argv: string[]): number {
     else {
       process.stderr.write(
         'usage: guards.ts name|has-name|account|crons|d1-size|config|url|' +
-          'origin|cors-file|cors-policy|lifecycle|preflight ...\n'
+          'origin|cors-file|cors-policy|media-bucket|lifecycle|preflight ...\n'
       );
       return 2;
     }

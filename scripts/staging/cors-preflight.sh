@@ -11,8 +11,8 @@
 # header (SPEC-V2 section 6.7). Dry run by default: prints the curl command
 # only. Runs from smoke.sh; no wrangler call, no Cloudflare write. The bucket
 # must be a terrastories-staging-* name and, when CLOUDFLARE_ACCOUNT_ID is
-# set, the account it belongs to. Env values other than the origin are never
-# printed.
+# set, the account it belongs to. Env values other than the origin and the
+# bucket name are never printed.
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -50,7 +50,7 @@ if ! answer="$(curl -sS -i -X OPTIONS "$endpoint" \
     -H "Origin: $STAGING_FRONTEND_ORIGIN" \
     -H "Access-Control-Request-Method: PUT" \
     -H "Access-Control-Request-Headers: $PART_UPLOAD_HEADER")"; then
-  die "CORS preflight request to $endpoint failed"
+  die "CORS preflight request to bucket $R2_BUCKET_NAME failed"
 fi
 printf '%s' "$answer" | guard preflight "$STAGING_FRONTEND_ORIGIN"
 info "CORS preflight allowed: PUT with $PART_UPLOAD_HEADER from $STAGING_FRONTEND_ORIGIN"

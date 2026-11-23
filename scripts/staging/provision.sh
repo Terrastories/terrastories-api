@@ -105,8 +105,8 @@ run npx wrangler r2 bucket cors set "$BUCKET" --file "$CORS_FILE" -y
 if [ "$APPLY" = 1 ]; then
   cors_list="$(npx wrangler r2 bucket cors list "$BUCKET" 2>/dev/null)" \
     || die "wrangler r2 bucket cors list failed"
-  printf '%s' "$cors_list" | guard cors-policy
-  info "R2 CORS verified on $BUCKET: PUT with $PART_UPLOAD_HEADER allowed for $STAGING_FRONTEND_ORIGIN"
+  printf '%s' "$cors_list" | guard cors-policy "$STAGING_FRONTEND_ORIGIN"
+  info "R2 CORS verified on $BUCKET: only $STAGING_FRONTEND_ORIGIN, PUT with $PART_UPLOAD_HEADER, ETag exposed, max age >= 3600"
 else
   echo "+ npx wrangler r2 bucket cors list $BUCKET   (verify: PUT and $PART_UPLOAD_HEADER)"
 fi

@@ -882,9 +882,11 @@ esac
     if (existsSync(mark)) unlinkSync(mark);
     if (existsSync(wtOut)) rmSync(wtOut, { recursive: true, force: true });
   };
-  const runWithResults = (steps: unknown[]) => {
+  const runWithResults = (steps: unknown) =>
+    runWithRaw(JSON.stringify({ runId: 'wt-test', steps }));
+  const runWithRaw = (text: string) => {
     const fixture = join(work, 'results-fixture.json');
-    writeFileSync(fixture, JSON.stringify({ runId: 'wt-test', steps }));
+    writeFileSync(fixture, text);
     writeFileSync(join(work, 'date.state'), '0');
     cleanMarker();
     try {
@@ -982,6 +984,47 @@ esac
     expect(day).toBeNull();
   });
 
+  it('writes NO marker on a wrong-shape results.json (never the fallback)', () => {
+    expect(runWithResults({})).toBeNull();
+    expect(runWithResults([null])).toBeNull();
+    expect(runWithRaw('[]')).toBeNull();
+  });
+
+  it('falls back to the START day when results.json is not valid JSON', () => {
+    expect(runWithRaw('{ not json')).toBe('2026-01-01');
+  });
+
+  it('resolves a relative STAGING_MARKER_DIR against the caller cwd', () => {
+    const cwd = mkdtempSync(join(work, 'cwd-'));
+    writeFileSync(join(work, 'date.state'), '0');
+    const r = spawnSync(
+      'bash',
+      [join(ROOT, 'scripts/staging/smoke.sh'), '--apply', '--local'],
+      {
+        cwd,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          STAGING_URL: LOCAL_URL,
+          NPM_LOG: join(work, 'npm.log'),
+          DATE_STATE: join(work, 'date.state'),
+          STAGING_MARKER_DIR: 'rel-out',
+          WT_SUPER_IDENTIFIER: 'test-super',
+          WT_SUPER_PASSWORD: 'test-password',
+        },
+      }
+    );
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(
+      readFileSync(
+        join(cwd, 'rel-out', '.staging-import-utc-day-' + hash),
+        'utf8'
+      ).trim()
+    ).toBe('2026-01-01');
+    expect(existsSync(join(ROOT, 'rel-out'))).toBe(false);
+  });
+
   it('marker-skip branch says so and ends with a walkthrough NOT run summary', () => {
     writeFileSync(join(work, 'date.state'), '0');
     cleanMarker();
@@ -1016,8 +1059,10 @@ esac
   it('cpu procedure never puts the cookie on the curl command line', () => {
     const r = run(['--cpu-procedure']);
     expect(r.stdout).not.toMatch(/-H "Cookie:/);
-    expect(r.stdout).toContain('-H @cookie.hdr');
-    expect(r.stdout).toContain('umask 077');
+    expect(r.stdout).toContain('-H @"$f"');
+    expect(r.stdout).toContain('mktemp');
+    expect(r.stdout).toContain('rm -f "$f"');
+    expect(r.stdout).not.toContain('cookie.hdr');
   });
 
   it('--skip-r2-probe records the probe as NOT done, never a pass', () => {

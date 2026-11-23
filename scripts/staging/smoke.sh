@@ -68,13 +68,16 @@ Worker CPU measurement (manual; Workers Free budget is about 10 ms per invocatio
       (use a real 90 MB mp4/webm sample: the Worker sniffs the first 8 KiB, so random bytes are rejected)
       SHA=$(sha256sum sample90.mp4 | cut -d' ' -f1)
       (never put the session cookie on the curl command line: it shows in the process
-      list and shell history. Keep it in a mode-600 header file, read without echo:)
-      ( umask 077; read -rs -p 'ts_session value: ' TS; printf 'Cookie: ts_session=%s\n' "$TS" > cookie.hdr )
+      list and shell history. Keep it in a fresh mktemp header file (mode 600), read
+      without echo, and remove it on exit, never a fixed name that may pre-exist or
+      be a symlink:)
+      f="$(mktemp)"; trap 'rm -f "$f"' EXIT
+      read -rs -p 'ts_session value: ' TS; printf 'Cookie: ts_session=%s\n' "$TS" > "$f"
       curl -sS -X POST "$STAGING_URL/v2/media?filename=sample90.mp4" \
         -H "Content-Type: video/mp4" -H "x-content-sha256: $SHA" \
-        -H @cookie.hdr --data-binary @sample90.mp4 -o /dev/null -w '%{http_code}\n'
-      Delete cookie.hdr afterwards. (Or skip curl: upload-large.ts below signs in
-      in memory, but it runs the multipart flow only.)
+        -H @"$f" --data-binary @sample90.mp4 -o /dev/null -w '%{http_code}\n'
+      rm -f "$f"; trap - EXIT   # explicit cleanup. (Or skip curl: upload-large.ts
+      below signs in in memory, but it runs the multipart flow only.)
       Require 201. Role note: do NOT send a role param for this upload. POST /v2/media
       with raw bytes only accepts role=user_photo (binds the upload to a user); any
       other role is 400 "Direct upload binding only supports user_photo; use POST
@@ -139,14 +142,24 @@ fi
 
 # UTC day of the last successful import commit in a walkthrough results.json:
 # the step's server commit timestamp (serverAt) when present, else its client
-# `at`. Prints NONE when results.json parses but has no passing commit step
-# (no marker must be written), and nothing when the file is missing or
-# unreadable (the caller falls back to the walkthrough start day).
+# `at`. Prints nothing when the file is missing/unreadable or is not valid
+# JSON (the caller falls back to the walkthrough start day). Prints NONE when
+# it parses but has the wrong shape (steps not an array, non-object entries)
+# or has no passing commit step: no marker is written. A shape error never
+# falls into the fallback.
 import_commit_day() {
   node -e '
+    let text;
+    try { text = require("fs").readFileSync(process.argv[1], "utf8"); }
+    catch { process.exit(0); }
+    let r;
+    try { r = JSON.parse(text); } catch { process.exit(0); }
     try {
-      const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-      const commits = (r.steps ?? []).filter((s) =>
+      if (r === null || typeof r !== "object" || !Array.isArray(r.steps) ||
+          r.steps.some((s) => s === null || typeof s !== "object")) {
+        console.log("NONE"); process.exit(0);
+      }
+      const commits = r.steps.filter((s) =>
         s.outcome === "pass" && s.method === "POST" &&
         /^\/v2\/imports\/[^/]+\/commit$/.test(s.path ?? "") &&
         (s.status === 200 || s.status === 201));
@@ -158,12 +171,15 @@ import_commit_day() {
         return "";
       }).filter(Boolean);
       console.log(days.length ? days[days.length - 1] : "NONE");
-    } catch {}
+    } catch { console.log("NONE"); }
   ' "$1"
 }
 
 # STAGING_MARKER_DIR overrides where the marker and walkthrough output live (tests).
-MARK_DIR="${STAGING_MARKER_DIR:-$REPO_ROOT/walkthrough-out}"; MARK="$MARK_DIR/.staging-import-utc-day-$(printf '%s' "$BASE" | sha256sum | cut -c1-12)"; TODAY="$(date -u +%F)"
+MARK_DIR="${STAGING_MARKER_DIR:-$REPO_ROOT/walkthrough-out}"
+# Absolute once, before any cd: a relative override means the caller's cwd.
+case "$MARK_DIR" in /*) ;; *) MARK_DIR="$PWD/$MARK_DIR" ;; esac
+MARK="$MARK_DIR/.staging-import-utc-day-$(printf '%s' "$BASE" | sha256sum | cut -c1-12)"; TODAY="$(date -u +%F)"
 WT_MSG="walkthrough already ran today (UTC $TODAY): D1 allows one committed import per UTC day. Rerun after 00:00 UTC, or use --skip-walkthrough."
 WT_SUMMARY=""
 wt_summary() { [ -z "$WT_SUMMARY" ] || info "summary: walkthrough NOT run ($WT_SUMMARY)"; }

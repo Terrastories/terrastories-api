@@ -557,9 +557,20 @@ describe('runUpload target validation and redirects', () => {
 
   it('a 307 redirect fails the real fetch (nothing follows it)', async () => {
     const seen: string[] = [];
+    const landed: string[] = [];
+    // A LIVE handler the redirect points at: it must receive nothing.
+    const target = createServer((req, res) => {
+      landed.push(`${req.method} ${req.url}`);
+      res.writeHead(200);
+      res.end();
+    });
+    await new Promise<void>((r) => target.listen(0, '127.0.0.1', r));
+    const targetPort = (target.address() as { port: number }).port;
     const server = createServer((req, res) => {
       seen.push(`${req.method} ${req.url}`);
-      res.writeHead(307, { location: 'http://127.0.0.1:1/elsewhere' });
+      res.writeHead(307, {
+        location: `http://127.0.0.1:${targetPort}/elsewhere`,
+      });
       res.end();
     });
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
@@ -570,10 +581,12 @@ describe('runUpload target validation and redirects', () => {
           { ...input, baseUrl: `http://127.0.0.1:${port}` },
           { fetch: (u, i) => fetch(u, i) }
         )
-      ).rejects.toThrow();
+      ).rejects.toThrow(/redirect|fetch failed/i);
       expect(seen).toEqual(['POST /v2/media/uploads']);
+      expect(landed).toEqual([]);
     } finally {
       server.close();
+      target.close();
     }
   });
 });

@@ -19,7 +19,63 @@ describe('production container security', () => {
     expect(productionStage).toContain('/usr/local/bin/corepack');
     expect(productionStage).toContain('/usr/local/bin/yarn');
     expect(productionStage).toContain('/usr/local/bin/yarnpkg');
-    expect(productionStage).toContain('CMD ["node", "dist/server.js"]');
+    expect(productionStage).toContain('exec node dist/hono-server.js');
+    expect(productionStage).not.toContain('dist/server.js"]');
     expect(productionStage).not.toContain('CMD ["npm", "start"]');
+  });
+
+  it('runs the V2 Hono server on 3001 with a /health check and HONO_* defaults', () => {
+    expect(productionStage).toContain('EXPOSE 3001');
+    expect(productionStage).toContain('http://127.0.0.1:3001/health');
+    expect(productionStage).toContain('HONO_HOST=0.0.0.0');
+    expect(productionStage).toContain('HONO_STORAGE_ROOT=/app/uploads');
+    expect(productionStage).not.toContain('3000');
+  });
+
+  it('keeps source mounts out of the base Compose file', () => {
+    const base = readFileSync(
+      join(process.cwd(), 'docker-compose.yml'),
+      'utf8'
+    );
+    expect(base).not.toMatch(/\.\/src:\/app\/src/);
+    for (const file of [
+      'config/nginx/nginx.conf',
+      'config/nginx/nginx.field-kit.conf',
+    ]) {
+      const nginx = readFileSync(join(process.cwd(), file), 'utf8');
+      expect(nginx).toContain('client_max_body_size 128M');
+      expect(nginx).toMatch(
+        /location \/v2\/media \{[^}]*proxy_request_buffering off;/
+      );
+    }
+  });
+
+  it('requires an explicit DATABASE_SSL in production Compose', () => {
+    const prod = readFileSync(
+      join(process.cwd(), 'docker-compose.prod.yml'),
+      'utf8'
+    );
+    expect(prod).toContain('DATABASE_SSL=${DATABASE_SSL:?');
+    expect(prod).not.toContain('DATABASE_SSL:-');
+  });
+
+  it('runs V2 in the production and field-kit Compose profiles', () => {
+    for (const file of [
+      'docker-compose.prod.yml',
+      'docker-compose.field-kit.yml',
+    ]) {
+      const compose = readFileSync(join(process.cwd(), file), 'utf8');
+      expect(compose).toContain('127.0.0.1:3001');
+      expect(compose).toContain('AUTH_SERVER_SECRET');
+      expect(compose).toContain('BOOTSTRAP_SECRET');
+      expect(compose).toContain('HONO_PUBLIC_ORIGIN');
+      expect(compose).toContain('HONO_STORAGE_ROOT=/app/uploads');
+      expect(compose).not.toContain('exec node dist/server.js');
+      expect(compose).toContain('ERASURE_RECORDS_ROOT=/app/erasure-records');
+      // nginx must not mount V2 media/erasure volumes.
+      const nginx = compose.slice(compose.indexOf('\n  nginx:'));
+      const nginxBlock = nginx.slice(0, nginx.indexOf('\n  # ====', 10));
+      expect(nginxBlock).not.toMatch(/^\s+- (uploads_data|erasure_records):/m);
+    }
   });
 });

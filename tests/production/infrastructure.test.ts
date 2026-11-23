@@ -196,7 +196,7 @@ describe('Production Infrastructure Validation - Phase 1', () => {
       const nginxConfig = await fs.readFile('config/nginx/nginx.conf', 'utf-8');
 
       // Caching configuration
-      expect(nginxConfig).toContain('proxy_cache');
+      // Tile responses are cached; V2 API responses are never cached by nginx.
       expect(nginxConfig).toContain('expires');
       expect(nginxConfig).toContain('gzip');
     });
@@ -242,9 +242,9 @@ describe('Production Infrastructure Validation - Phase 1', () => {
     test('production startup uses the compiled server entry point', async () => {
       const prodCompose = await fs.readFile('docker-compose.prod.yml', 'utf-8');
 
-      // PostgreSQL migration parity is tracked by #135, so startup must fail closed through the compiled migrator until parity lands.
+      // Startup runs the dialect-matched compiled migrator (fails closed without a PostgreSQL journal), then the V2 Hono server.
       expect(prodCompose).toContain('node dist/db/migrate.js');
-      expect(prodCompose).toContain('exec node dist/server.js');
+      expect(prodCompose).toContain('exec node dist/hono-server.js');
       expect(prodCompose).not.toMatch(/\bnpm\b/);
     });
   });

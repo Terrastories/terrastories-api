@@ -6,7 +6,7 @@ describe('issue #141 production runtime boundaries', () => {
     const compose = await readFile('docker-compose.prod.yml', 'utf8');
 
     expect(compose).toContain('node dist/db/migrate.js');
-    expect(compose).toContain('exec node dist/server.js');
+    expect(compose).toContain('exec node dist/hono-server.js');
     expect(compose).not.toMatch(/\bnpm\b/);
   });
 });

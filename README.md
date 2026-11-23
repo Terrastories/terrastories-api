@@ -43,6 +43,29 @@ docker compose -f docker-compose.yml -f docker-compose.field-kit.yml up -d --rem
 This also removes other orphaned containers in the same Compose project; named
 volumes remain intact.
 
+## Container deployment (V2)
+
+The `production` image target and the production and field-kit Compose profiles run the V2 Hono server (`dist/hono-server.js`), not Fastify:
+
+- Listener: `HONO_PORT` (default `3001`), bound to `HONO_HOST` (`0.0.0.0` in the image; `127.0.0.1` when unset outside a container). Health: `GET /health` returns `{"status":"ok"}`; `GET /v2/bootstrap` returns JSON.
+- Startup: the image runs `node dist/db/migrate.js` (SQLite for a file path such as `/app/data/terrastories.sqlite`, PostgreSQL for a `postgresql://` URL) and then the server, so a fresh volume is migrated before it serves.
+- Required in `production`, `field-kit` and `offline` modes: `HONO_PUBLIC_ORIGIN`, `AUTH_SERVER_SECRET`, `BOOTSTRAP_SECRET` (see [OPERATIONS-GOVERNANCE](docs/OPERATIONS-GOVERNANCE.md)). `JWT_SECRET` and `SESSION_SECRET` are still required because the shared config loader validates them at startup. Media lives under `HONO_STORAGE_ROOT` (`/app/uploads`, a volume).
+- Field kit: the API port is not published; nginx on :80 is the only entry (the API trusts `X-Real-IP` from nginx). Set `HONO_PUBLIC_ORIGIN` to the `http://` address clients use; `HONO_ALLOW_PLAIN_HTTP` defaults to `true` for that trusted-LAN exception (use an `https://` origin and `false` when TLS is terminated in front). The database path stays `./data/field-kit.db` so an upgrade reopens the existing database.
+- nginx never mounts the media or erasure volumes: media is served only by the authenticated `/v2/` routes. `ERASURE_RECORDS_ROOT=/app/erasure-records` is a dedicated `erasure_records` volume that backups must never include or restore (`src/services/ERASURE-OPERATIONS.md`); the field-kit backup job does not mount it.
+- Run a single API replica: startup migrations take no cross-replica lock.
+- PostgreSQL TLS: production mode requires TLS by default. `DATABASE_SSL=disable|require|verify-full` overrides it for both the V2 and legacy entrypoints; `docker-compose.prod.yml` has no default and refuses to start without it: set `disable` only for its bundled in-network database (no TLS), and `require` or `verify-full` for an external `DATABASE_URL_PROD`.
+- Smoke test of a local image:
+
+```bash
+docker build --target production -t terrastories-api:local .
+docker run -d -p 3001:3001 -e NODE_ENV=production -e DATABASE_URL=/app/data/terrastories.sqlite \
+  -e HONO_PUBLIC_ORIGIN=https://stories.your-domain.org -e AUTH_SERVER_SECRET -e BOOTSTRAP_SECRET \
+  -e JWT_SECRET -e SESSION_SECRET terrastories-api:local   # export the secrets first
+curl -fsS localhost:3001/health && curl -fsS localhost:3001/v2/bootstrap
+```
+
+The Fastify server (`dist/server.js`, `npm start`) is retained only for the `development` image target, `docker-compose.dev.yml` and the legacy user-workflow/integration CI jobs; it is not a production entrypoint. nginx (`config/nginx`) proxies `/v2/` and `/health` to the API on port 3001.
+
 ## Current migration state
 
 `main` currently runs Fastify V1. Hono is the target framework, re-landed as a thin slice off `main` (health, login, durable session, revocation, one protected media read); PR #132 was closed on 2026-11-11 and superseded (#193). Production readiness must be proven by the active roadmap; historical “production ready” reports are intentionally not retained in this repository.

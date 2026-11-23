@@ -6,7 +6,9 @@
 
 services:
   # =============================================================================
-  # API SERVICE - Terrastories TypeScript/Fastify API
+  # API SERVICE - base/development definition (legacy Fastify on :3000 via the
+  # development target). The production and field-kit overrides run the V2 Hono
+  # server on :3001; see README "Container deployment (V2)".
   # =============================================================================
   api:
     build:
@@ -45,7 +47,6 @@ services:
         condition: service_healthy
     volumes:
       - uploads_data:/app/uploads
-      - ./src:/app/src:ro # Development only - overridden in production
     networks:
       - terrastories-network
     restart: unless-stopped

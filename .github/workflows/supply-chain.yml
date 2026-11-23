@@ -143,33 +143,35 @@ jobs:
         run: |
           jwt_secret="$(openssl rand -hex 32)"
           session_secret="$(openssl rand -hex 32)"
+          auth_server_secret="$(openssl rand -hex 32)"
+          bootstrap_secret="$(openssl rand -hex 24)"
 
           check_health() {
-            local health_json
-            if ! health_json="$(curl --fail --silent --show-error http://localhost:3000/health)"; then
+            local health_json bootstrap_json
+            if ! health_json="$(curl --fail --silent --show-error http://localhost:3001/health)"; then
+              return 1
+            fi
+            if ! bootstrap_json="$(curl --fail --silent --show-error http://localhost:3001/v2/bootstrap)"; then
               return 1
             fi
 
-            HEALTH_JSON="$health_json" node --input-type=module <<'NODE'
+            HEALTH_JSON="$health_json" BOOTSTRAP_JSON="$bootstrap_json" node --input-type=module <<'NODE'
           const health = JSON.parse(process.env.HEALTH_JSON);
-          if (
-            !health ||
-            health.status !== 'ok' ||
-            !health.config ||
-            health.config.valid !== true ||
-            !health.database ||
-            health.database.connected !== true
-          ) {
-            process.stderr.write(`Unhealthy API response: ${JSON.stringify(health)}\n`);
+          const bootstrap = JSON.parse(process.env.BOOTSTRAP_JSON);
+          if (!health || health.status !== 'ok' || !bootstrap || typeof bootstrap.open !== 'boolean') {
+            process.stderr.write('Unhealthy V2 API response\n');
             process.exit(1);
           }
           NODE
           }
 
           docker run --name supply-chain-api -d \
-            -p 3000:3000 \
+            -p 3001:3001 \
             -e NODE_ENV=production \
-            -e DATABASE_URL=./data/supply-chain.db \
+            -e DATABASE_URL=/app/data/supply-chain.sqlite \
+            -e HONO_PUBLIC_ORIGIN=https://stories.terrastories-host.org \
+            -e AUTH_SERVER_SECRET="$auth_server_secret" \
+            -e BOOTSTRAP_SECRET="$bootstrap_secret" \
             -e JWT_SECRET="$jwt_secret" \
             -e SESSION_SECRET="$session_secret" \
             terrastories-api:ci-${{ github.sha }}

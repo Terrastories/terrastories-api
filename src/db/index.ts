@@ -5,6 +5,15 @@ import postgres from 'postgres';
 import { getConfig } from '../shared/config/index.js';
 
 // Database type for repositories
+/** PostgreSQL TLS option for postgres.js from the validated config. */
+export function resolvePostgresSsl(database: {
+  ssl: boolean;
+  sslMode?: 'disable' | 'require' | 'verify-full' | undefined;
+}): false | 'require' | 'verify-full' {
+  const mode = database.sslMode ?? (database.ssl ? 'require' : 'disable');
+  return mode === 'disable' ? false : mode;
+}
+
 export type Database =
   | ReturnType<typeof drizzleSqlite>
   | ReturnType<typeof drizzlePostgres>;
@@ -46,7 +55,7 @@ export async function getDb(): Promise<Database> {
   if (isPostgres) {
     const queryClient = createPostgresClient(config.database.url, {
       max: config.database.poolSize,
-      ssl: config.database.ssl ? 'require' : false,
+      ssl: resolvePostgresSsl(config.database),
     });
     db = drizzlePostgres(queryClient);
     connectionProbe = async () => {

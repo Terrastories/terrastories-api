@@ -928,4 +928,29 @@ describe('direct multipart media upload (#286)', () => {
       }
     });
   });
+
+  describe('sweeper abort failures (#287 review)', () => {
+    it('keeps a journal whose abort keeps failing, marks it abandoned and never forgets it', async () => {
+      const failing = new FakeR2Bucket();
+      const storage = createR2Storage(failing.asR2Bucket());
+      const journalKey = 'communities/1/.multipart/stuck.json';
+      const key = 'communities/1/media/stuck';
+      await failing.put(journalKey, JSON.stringify({ key, uploadId: 'up-1' }));
+      failing.resumeMultipartUpload = () =>
+        ({
+          abort: async () => {
+            throw new Error('R2 unavailable');
+          },
+        }) as never;
+      for (let i = 0; i < 7; i++) {
+        await expect(storage.delete!(journalKey)).rejects.toThrow();
+      }
+      const journal = JSON.parse(
+        new TextDecoder().decode(failing.objects.get(journalKey))
+      );
+      expect(journal.abortAttempts).toBe(7);
+      expect(journal.abandoned).toBe(true);
+      expect(journal.uploadId).toBe('up-1');
+    });
+  });
 });

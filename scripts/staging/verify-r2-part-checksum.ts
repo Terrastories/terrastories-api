@@ -13,9 +13,10 @@
  *   R2_ACCOUNT_ID=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... \
  *   R2_BUCKET_NAME=<staging bucket> npx tsx scripts/staging/verify-r2-part-checksum.ts
  *
- * Exit 0: R2 rejected the corrupted part (checksum enforced; per-part signed
- * checksums could be reintroduced). Exit 2: R2 accepted it or answered 501
- * (keep relying on size + sniff). Exit 1: misconfiguration.
+ * Exit 0: R2 rejected the corrupted part with a checksum error code AND a
+ * control part with the correct checksum succeeded (enforced). Exit 2: the
+ * corrupted part was accepted (not enforced; keep relying on size + sniff).
+ * Exit 1: inconclusive (misconfiguration, 501, or any other error).
  */
 import { createHash } from 'node:crypto';
 import { createSigV4Presigner } from '../../src/shared/utils/sigv4-presign.js';
@@ -70,32 +71,55 @@ const good = new Uint8Array(6 * 1024 * 1024).fill(7);
 const corrupted = good.slice();
 corrupted[0] = 8;
 const claimed = createHash('sha256').update(good).digest('base64');
-const part = await fetch(
-  await sign(
-    'PUT',
-    { partNumber: '1', uploadId },
+
+const putPart = async (
+  partNumber: string,
+  bytes: Uint8Array,
+  checksum: string
+) => {
+  const response = await fetch(
+    await sign(
+      'PUT',
+      { partNumber, uploadId },
+      {
+        'content-length': String(bytes.byteLength),
+        'x-amz-checksum-sha256': checksum,
+      }
+    ),
     {
-      'content-length': String(corrupted.byteLength),
-      'x-amz-checksum-sha256': claimed,
+      method: 'PUT',
+      headers: { 'x-amz-checksum-sha256': checksum },
+      body: bytes,
     }
-  ),
-  {
-    method: 'PUT',
-    headers: { 'x-amz-checksum-sha256': claimed },
-    body: corrupted,
-  }
-);
+  );
+  return { status: response.status, text: await response.text() };
+};
+
+// Control: a correct checksum must succeed, otherwise nothing below means
+// anything (bad signing, 501, permissions...).
+const control = await putPart('1', good, claimed);
+const probe = await putPart('2', corrupted, claimed);
 await fetch(await sign('DELETE', { uploadId }), { method: 'DELETE' });
 
-if (part.status >= 400 && part.status !== 501) {
-  console.log(
-    `R2 REJECTED the corrupted part (HTTP ${part.status}): signed checksum is enforced.`
+const checksumError =
+  /<Code>(BadDigest|InvalidDigest|XAmzContentChecksumMismatch)<\/Code>/.test(
+    probe.text
   );
-  process.exit(0);
+if (control.status >= 200 && control.status < 300) {
+  if (probe.status >= 400 && checksumError) {
+    console.log(
+      `R2 ENFORCES the signed checksum: corrupted part refused with a checksum error (HTTP ${probe.status}), control accepted.`
+    );
+    process.exit(0);
+  }
+  if (probe.status >= 200 && probe.status < 300) {
+    console.log(
+      'R2 ACCEPTED the corrupted part: the checksum is not enforced.'
+    );
+    process.exit(2);
+  }
 }
 console.log(
-  part.status === 501
-    ? 'R2 answered 501: the signed checksum header is not implemented for UploadPart.'
-    : `R2 ACCEPTED the corrupted part (HTTP ${part.status}): the checksum is not enforced.`
+  `INCONCLUSIVE: control HTTP ${control.status}, corrupted-part HTTP ${probe.status} without a checksum error code (501 means the header is not implemented). Fix the setup and rerun.`
 );
-process.exit(2);
+process.exit(1);

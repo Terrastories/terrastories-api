@@ -383,20 +383,30 @@ export const createR2Storage = (
               message
             )
           ) {
-            // Bounded retries: after MAX_JOURNAL_ABORT_ATTEMPTS failed aborts
-            // the journal is treated as gone so one stuck upload cannot pin
-            // the sweeper forever (R2 lifecycle expires the parts).
+            // Never forget a journal whose abort keeps failing: R2 may still
+            // hold parts that no listing shows. Count the failure, mark the
+            // journal abandoned after MAX_JOURNAL_ABORT_ATTEMPTS, and rewrite
+            // it (a put refreshes its upload time, so the 24 h sweep grace
+            // restarts: a daily retry cap). The bucket lifecycle rule that
+            // aborts incomplete multipart uploads is the backstop. The
+            // content-free warning and the sweeper's failed count are the
+            // operator signal.
             const attempts =
-              (data as { abortAttempts?: number }).abortAttempts ?? 0;
-            if (attempts + 1 < MAX_JOURNAL_ABORT_ATTEMPTS) {
-              await bucket
-                .put(
-                  key,
-                  JSON.stringify({ ...data, abortAttempts: attempts + 1 })
-                )
-                .catch(() => {});
-              throw error;
-            }
+              ((data as { abortAttempts?: number }).abortAttempts ?? 0) + 1;
+            const abandoned = attempts >= MAX_JOURNAL_ABORT_ATTEMPTS;
+            await bucket
+              .put(
+                key,
+                JSON.stringify({ ...data, abortAttempts: attempts, abandoned })
+              )
+              .catch(() => {});
+            // eslint-disable-next-line no-console -- content-free operator channel
+            console.warn(
+              abandoned
+                ? 'media cleanup: multipart abort abandoned; lifecycle rule is the backstop'
+                : 'media cleanup: multipart abort failed; will retry'
+            );
+            throw error;
           }
         }
       }

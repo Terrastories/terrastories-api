@@ -23,7 +23,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { GuardError, assertStagingUrl } from './guards.js';
+import { GuardError, STAGING_PREFIX, assertStagingUrl } from './guards.js';
 import { loginMaterial, type PreloginAnswer } from '../walkthrough/kdf.js';
 
 /** The API's default and minimum part size (16 MiB); maximum is 64 MiB. */
@@ -172,6 +172,45 @@ const jsonHeaders = (cookie: string): Record<string, string> => ({
   cookie,
 });
 
+/** R2 S3 endpoint host: <account-id>.r2.cloudflarestorage.com (never the cookie's host). */
+const R2_HOST_RE = /^[a-z0-9]+\.r2\.cloudflarestorage\.com$/;
+
+/**
+ * Validate where a part PUT goes BEFORE any byte or cookie is sent.
+ * mode:api targets must share the validated staging origin (the cookie is
+ * attached only then); presigned targets must be https R2 S3 URLs for a
+ * terrastories-staging-* bucket and never get the cookie.
+ */
+export function assertPartTarget(
+  targetUrl: string,
+  baseUrl: string,
+  mode: 'presigned' | 'api'
+): void {
+  let target: URL;
+  try {
+    target = new URL(targetUrl);
+  } catch {
+    throw new Error('part target is not a valid URL');
+  }
+  if (mode === 'api') {
+    if (target.origin !== new URL(baseUrl).origin) {
+      throw new Error(
+        'part target origin does not match the staging origin: refusing to send the session cookie'
+      );
+    }
+    return;
+  }
+  if (
+    target.protocol !== 'https:' ||
+    !R2_HOST_RE.test(target.hostname) ||
+    !target.pathname.startsWith(`/${STAGING_PREFIX}`)
+  ) {
+    throw new Error(
+      `presigned part target is not an https R2 URL for a ${STAGING_PREFIX}* bucket`
+    );
+  }
+}
+
 /**
  * Run create -> parts -> complete -> delete. Every call must answer 2xx.
  * A failure before completion best-effort aborts the upload session so no
@@ -193,6 +232,7 @@ export async function runUpload(
     method: 'POST',
     headers: jsonHeaders(cookie),
     body: JSON.stringify(createBody),
+    redirect: 'error',
   });
   const createMs = Date.now() - createStart;
   if (!created.ok) {
@@ -220,6 +260,11 @@ export async function runUpload(
     const targets = [...session.parts].sort(
       (a, b) => a.partNumber - b.partNumber
     );
+    // Every target is validated before the first PUT: nothing is sent (and
+    // the cookie never leaves) if any one of them points off-origin.
+    for (const target of targets) {
+      assertPartTarget(target.url, baseUrl, session.mode);
+    }
     const etags: Array<{ partNumber: number; etag: string }> = [];
     for (const target of targets) {
       const plan = plans[target.partNumber - 1];
@@ -229,8 +274,14 @@ export async function runUpload(
         );
       }
       // Send EXACTLY the returned headers; the session cookie goes only to
-      // the API (mode:api). Presigned R2 URLs are credential-free.
-      const headers: Record<string, string> = { ...target.headers };
+      // the validated staging origin (mode:api). Presigned R2 URLs are
+      // credential-free: any cookie header the session returned is dropped.
+      const headers: Record<string, string> = {};
+      for (const [k, v] of Object.entries(target.headers)) {
+        if (session.mode === 'presigned' && k.toLowerCase() === 'cookie')
+          continue;
+        headers[k] = v;
+      }
       if (session.mode === 'api') headers.cookie = cookie;
       const slice = file.bytes.subarray(plan.offset, plan.offset + plan.size);
       const start = Date.now();
@@ -240,6 +291,7 @@ export async function runUpload(
         method: 'PUT',
         headers,
         body: slice,
+        redirect: 'error',
       });
       if (!res.ok) {
         throw new Error(
@@ -269,6 +321,7 @@ export async function runUpload(
         method: 'POST',
         headers: jsonHeaders(cookie),
         body: JSON.stringify({ parts: etags }),
+        redirect: 'error',
       }
     );
     const completeMs = Date.now() - completeStart;
@@ -289,6 +342,7 @@ export async function runUpload(
     const removed = await deps.fetch(`${baseUrl}/v2/media/${mediaId}`, {
       method: 'DELETE',
       headers: { cookie },
+      redirect: 'error',
     });
     const deleteMs = Date.now() - deleteStart;
     if (!removed.ok) {
@@ -327,6 +381,7 @@ async function abortSession(
     const res = await deps.fetch(`${baseUrl}/v2/media/uploads/${sessionId}`, {
       method: 'DELETE',
       headers: { cookie },
+      redirect: 'error',
     });
     deps.log?.(`abort ${res.status} (upload session ${sessionId})`);
   } catch {
@@ -350,6 +405,7 @@ export async function loginSuper(
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ identifier }),
+    redirect: 'error',
   });
   if (pre.status !== 200) {
     throw new Error(
@@ -369,6 +425,7 @@ export async function loginSuper(
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(loginBody),
+    redirect: 'error',
   });
   if (res.status !== 200) {
     throw new Error(
@@ -435,7 +492,15 @@ export async function main(
     return 2;
   }
   const name = basename(file);
-  const plans = planParts(bytes.byteLength, DEFAULT_PART_SIZE);
+  let plans: PartPlan[];
+  try {
+    plans = planParts(bytes.byteLength, DEFAULT_PART_SIZE);
+  } catch (error) {
+    process.stderr.write(
+      `cannot plan an upload for ${file}: ${error instanceof Error ? error.message : String(error)}\n`
+    );
+    return 2;
+  }
   if (dryRun) {
     const body = buildCreateBody({ name, contentType, bytes });
     process.stdout.write(

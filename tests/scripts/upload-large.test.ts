@@ -5,6 +5,7 @@
  * promises: cookie, password and presigned URLs never reach the log.
  */
 import { createHash } from 'node:crypto';
+import { createServer } from 'node:http';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -31,6 +32,7 @@ interface Call {
   url: string;
   headers: Record<string, string>;
   body?: string | Uint8Array;
+  redirect?: string;
 }
 
 /** A fetch stand-in that records every call and answers from a route fn. */
@@ -44,6 +46,7 @@ function fakeFetch(route: (call: Call) => Response | undefined) {
     const call: Call = {
       method: init.method ?? 'GET',
       url,
+      redirect: init.redirect,
       headers,
       body:
         typeof init.body === 'string' || init.body instanceof Uint8Array
@@ -64,7 +67,7 @@ const sha = (bytes: Uint8Array) =>
 const partTarget = (over: Record<string, unknown> = {}) => ({
   partNumber: 1,
   method: 'PUT',
-  url: 'https://acct.r2.cloudflarestorage.com/bucket/key?partNumber=1&uploadId=u&X-Amz-Signature=SECRET',
+  url: 'https://acct.r2.cloudflarestorage.com/terrastories-staging-media/key?partNumber=1&uploadId=u&X-Amz-Signature=SECRET',
   headers: {},
   size: PNG_BYTES.byteLength,
   ...over,
@@ -193,7 +196,7 @@ describe('runUpload (fake fetch)', () => {
     expect(outcome.partCount).toBe(1);
     expect(calls.map((c) => `${c.method} ${c.url.split('?')[0]}`)).toEqual([
       `POST ${BASE}/v2/media/uploads`,
-      'PUT https://acct.r2.cloudflarestorage.com/bucket/key',
+      'PUT https://acct.r2.cloudflarestorage.com/terrastories-staging-media/key',
       `POST ${BASE}/v2/media/uploads/sess-1/complete`,
       `DELETE ${BASE}/v2/media/media-1`,
     ]);
@@ -482,6 +485,99 @@ describe('loginSuper (fake fetch)', () => {
   });
 });
 
+describe('runUpload target validation and redirects', () => {
+  const file = {
+    name: 'sample.mp4',
+    contentType: 'video/mp4',
+    bytes: PNG_BYTES,
+  };
+  const input = { baseUrl: BASE, cookie: COOKIE, file };
+
+  it('wrong-origin API target throws before any PUT and never sends the cookie there', async () => {
+    const { calls, impl } = fakeFetch((call) => {
+      if (call.method === 'POST' && call.url === `${BASE}/v2/media/uploads`)
+        return sessionResponse(
+          [
+            partTarget({
+              url: 'https://evil.example.com/v2/media/uploads/s/parts/1',
+            }),
+          ],
+          'api'
+        );
+      if (call.method === 'DELETE') return new Response(null, { status: 204 });
+      return undefined;
+    });
+    await expect(runUpload(input, { fetch: impl })).rejects.toThrow(
+      /origin does not match/
+    );
+    expect(calls.some((c) => c.method === 'PUT')).toBe(false);
+    expect(
+      calls.filter((c) => c.url.includes('evil.example.com'))
+    ).toHaveLength(0);
+  });
+
+  it.each([
+    [
+      'non-staging bucket',
+      'https://acct.r2.cloudflarestorage.com/prod-media/k?x=1',
+    ],
+    ['wrong host', 'https://acct.example.com/terrastories-staging-media/k'],
+    [
+      'http scheme',
+      'http://acct.r2.cloudflarestorage.com/terrastories-staging-media/k',
+    ],
+  ])('presigned target with %s throws before any PUT', async (_n, url) => {
+    const { calls, impl } = fakeFetch((call) => {
+      if (call.method === 'POST' && call.url === `${BASE}/v2/media/uploads`)
+        return sessionResponse([partTarget({ url })]);
+      if (call.method === 'DELETE') return new Response(null, { status: 204 });
+      return undefined;
+    });
+    await expect(runUpload(input, { fetch: impl })).rejects.toThrow(
+      /not an https R2 URL/
+    );
+    expect(calls.some((c) => c.method === 'PUT')).toBe(false);
+  });
+
+  it('every fetch of a full flow uses redirect: error', async () => {
+    const { calls, impl } = fakeFetch((call) => {
+      if (call.method === 'POST' && call.url === `${BASE}/v2/media/uploads`)
+        return sessionResponse([partTarget()]);
+      if (call.method === 'PUT')
+        return new Response(null, { status: 200, headers: { ETag: '"e"' } });
+      if (call.url.endsWith('/complete'))
+        return Response.json({ data: { id: 'm' } }, { status: 201 });
+      if (call.method === 'DELETE') return new Response(null, { status: 204 });
+      return undefined;
+    });
+    await runUpload(input, { fetch: impl });
+    expect(calls.length).toBe(4);
+    for (const c of calls) expect(c.redirect).toBe('error');
+  });
+
+  it('a 307 redirect fails the real fetch (nothing follows it)', async () => {
+    const seen: string[] = [];
+    const server = createServer((req, res) => {
+      seen.push(`${req.method} ${req.url}`);
+      res.writeHead(307, { location: 'http://127.0.0.1:1/elsewhere' });
+      res.end();
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as { port: number }).port;
+    try {
+      await expect(
+        runUpload(
+          { ...input, baseUrl: `http://127.0.0.1:${port}` },
+          { fetch: (u, i) => fetch(u, i) }
+        )
+      ).rejects.toThrow();
+      expect(seen).toEqual(['POST /v2/media/uploads']);
+    } finally {
+      server.close();
+    }
+  });
+});
+
 describe('upload-large CLI', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -494,6 +590,21 @@ describe('upload-large CLI', () => {
     writeFileSync(path, PNG_BYTES);
     return path;
   };
+
+  it('an empty --file exits 2 with a message, not a stack trace', async () => {
+    const err: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      err.push(String(chunk));
+      return true;
+    });
+    const dir = mkdtempSync(join(tmpdir(), 'upload-large-'));
+    const empty = join(dir, 'empty.mp4');
+    writeFileSync(empty, '');
+    expect(await main(['--file', empty], {})).toBe(2);
+    expect(await main(['--file', empty, '--dry-run'], {})).toBe(2);
+    expect(err.join('')).toMatch(/cannot plan an upload/);
+    expect(err.join('')).not.toMatch(/\n\s+at /);
+  });
 
   it('--dry-run prints the plan and makes no network call', async () => {
     const out: string[] = [];

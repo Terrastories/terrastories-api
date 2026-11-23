@@ -806,6 +806,7 @@ case "$url" in
   */health) printf 200 ;;
   *) printf 404 ;;
 esac
+exit "\${FAKE_CURL_RC:-0}"
 `
   );
   // Fake date: the first two 'date -u +%F' calls (TODAY and the walkthrough
@@ -841,6 +842,7 @@ esac
         STAGING_URL: url,
         NPM_LOG: join(work, 'npm.log'),
         DATE_STATE: join(work, 'date.state'),
+        STAGING_MARKER_DIR: join(work, 'marker-out'),
         WT_SUPER_IDENTIFIER: '',
         WT_SUPER_PASSWORD: '',
         R2_ACCOUNT_ID: '',
@@ -871,17 +873,14 @@ esac
     .update(LOCAL_URL)
     .digest('hex')
     .slice(0, 12);
-  const markDir = join(ROOT, 'walkthrough-out');
+  // Markers and walkthrough output live in a temp dir (STAGING_MARKER_DIR),
+  // never in the repo's real walkthrough-out/.
+  const markDir = join(work, 'marker-out');
   const mark = join(markDir, '.staging-import-utc-day-' + hash);
   const wtOut = join(markDir, 'staging-20260101T000000Z');
   const cleanMarker = () => {
     if (existsSync(mark)) unlinkSync(mark);
     if (existsSync(wtOut)) rmSync(wtOut, { recursive: true, force: true });
-    try {
-      rmdirSync(markDir);
-    } catch {
-      // keep the directory if other markers exist
-    }
   };
   const runWithResults = (steps: unknown[]) => {
     const fixture = join(work, 'results-fixture.json');
@@ -896,7 +895,7 @@ esac
       });
       expect(r.status, r.stderr + r.stdout).toBe(0);
       expect(r.stdout).toMatch(/npm run walkthrough/);
-      return readFileSync(mark, 'utf8').trim();
+      return existsSync(mark) ? readFileSync(mark, 'utf8').trim() : null;
     } finally {
       cleanMarker();
     }
@@ -953,6 +952,72 @@ esac
       },
     ]);
     expect(day).toBe('2026-01-02');
+  });
+
+  it('marker prefers the server commit timestamp over the client response time', () => {
+    // server committed before midnight; the response reached the client after
+    const day = runWithResults([
+      {
+        outcome: 'pass',
+        method: 'POST',
+        path: '/v2/imports/7/commit',
+        status: 201,
+        serverAt: '2026-01-01T23:59:59.900Z',
+        at: '2026-01-02T00:00:00.400Z',
+      },
+    ]);
+    expect(day).toBe('2026-01-01');
+  });
+
+  it('writes NO marker when results.json parses but has no passing commit', () => {
+    const day = runWithResults([
+      {
+        outcome: 'skip',
+        method: 'POST',
+        path: '/v2/imports/7/commit',
+        at: '2026-01-01T10:00:00.000Z',
+      },
+      { outcome: 'pass', method: 'GET', path: '/health', status: 200 },
+    ]);
+    expect(day).toBeNull();
+  });
+
+  it('marker-skip branch says so and ends with a walkthrough NOT run summary', () => {
+    writeFileSync(join(work, 'date.state'), '0');
+    cleanMarker();
+    mkdirSync(markDir, { recursive: true });
+    writeFileSync(mark, '2026-01-01\n');
+    try {
+      const r = run(['--apply', '--local'], {});
+      expect(r.status, r.stderr + r.stdout).toBe(0);
+      expect(r.stdout).toMatch(/walkthrough already ran today/);
+      expect(r.stdout).toMatch(/summary: walkthrough NOT run \(/);
+      expect(r.stdout).not.toMatch(/npm run walkthrough/);
+    } finally {
+      cleanMarker();
+    }
+  });
+
+  it('--skip-walkthrough ends with a walkthrough NOT run summary', () => {
+    const r = run(['--apply', '--local', '--skip-walkthrough']);
+    expect(r.stdout).toMatch(
+      /summary: walkthrough NOT run \(--skip-walkthrough/
+    );
+  });
+
+  it('--apply fails when curl exits non-zero even if it printed the expected code', () => {
+    const r = run(['--apply', '--local', '--skip-walkthrough'], {
+      FAKE_CURL_RC: '18',
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/curl failed on GET \/health \(exit 18\)/);
+  });
+
+  it('cpu procedure never puts the cookie on the curl command line', () => {
+    const r = run(['--cpu-procedure']);
+    expect(r.stdout).not.toMatch(/-H "Cookie:/);
+    expect(r.stdout).toContain('-H @cookie.hdr');
+    expect(r.stdout).toContain('umask 077');
   });
 
   it('--skip-r2-probe records the probe as NOT done, never a pass', () => {

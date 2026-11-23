@@ -16,8 +16,10 @@
 # UTC day: D1 allows one committed import per UTC day for the whole database and
 # the walkthrough commits one). Without the flag, smoke remembers the UTC day
 # its last successful walkthrough COMMITTED the import (the commit step's
-# timestamp in results.json; fallback: the day the walkthrough started, never
-# the end time) per target URL (walkthrough-out/
+# server timestamp data.committedAt in results.json, else the client's; fallback
+# only when results.json is missing or unreadable: the day the walkthrough
+# started, never the end time; no passing commit step means no marker) per
+# target URL (walkthrough-out/ or $STAGING_MARKER_DIR/
 # .staging-import-utc-day-<hash of URL>, so local and remote runs do not share
 # it) and prints 'walkthrough already ran today' instead of failing. A run from
 # another machine is not seen; a walkthrough failure is never reclassified (it
@@ -65,9 +67,14 @@ Worker CPU measurement (manual; Workers Free budget is about 10 ms per invocatio
  2. Terminal B, 90 MB raw upload (POST /v2/media, one request, under the 100 MB ceiling):
       (use a real 90 MB mp4/webm sample: the Worker sniffs the first 8 KiB, so random bytes are rejected)
       SHA=$(sha256sum sample90.mp4 | cut -d' ' -f1)
+      (never put the session cookie on the curl command line: it shows in the process
+      list and shell history. Keep it in a mode-600 header file, read without echo:)
+      ( umask 077; read -rs -p 'ts_session value: ' TS; printf 'Cookie: ts_session=%s\n' "$TS" > cookie.hdr )
       curl -sS -X POST "$STAGING_URL/v2/media?filename=sample90.mp4" \
         -H "Content-Type: video/mp4" -H "x-content-sha256: $SHA" \
-        -H "Cookie: <staging session cookie>" --data-binary @sample90.mp4 -o /dev/null -w '%{http_code}\n'
+        -H @cookie.hdr --data-binary @sample90.mp4 -o /dev/null -w '%{http_code}\n'
+      Delete cookie.hdr afterwards. (Or skip curl: upload-large.ts below signs in
+      in memory, but it runs the multipart flow only.)
       Require 201. Role note: do NOT send a role param for this upload. POST /v2/media
       with raw bytes only accepts role=user_photo (binds the upload to a user); any
       other role is 400 "Direct upload binding only supports user_photo; use POST
@@ -113,20 +120,28 @@ if [ "$LOCAL" = 1 ]; then guard url "$STAGING_URL" --local; else guard url "$STA
 BASE="${STAGING_URL%/}"
 info "mode: $([ "$APPLY" = 1 ] && echo APPLY || echo DRY-RUN) target host checked"
 
+# code <curl args>: print the HTTP status; a curl failure is the function's
+# exit status, so callers must check it before comparing the code.
 code() { curl -sS -o /dev/null -w '%{http_code}' "$@"; }
 
 if [ "$APPLY" = 1 ]; then
-  [ "$(code "$BASE/health")" = 200 ] || die "GET /health is not 200"
-  [ "$(code "$BASE/dev/seed")" = 404 ] || die "GET /dev/seed is not 404"
-  [ "$(code -I "$BASE/dev/seed")" = 404 ] || die "HEAD /dev/seed is not 404"
+  HC="$(code "$BASE/health")" || die "curl failed on GET /health (exit $?)"
+  [ "$HC" = 200 ] || die "GET /health is not 200"
+  HC="$(code "$BASE/dev/seed")" || die "curl failed on GET /dev/seed (exit $?)"
+  [ "$HC" = 404 ] || die "GET /dev/seed is not 404"
+  HC="$(code -I "$BASE/dev/seed")" || die "curl failed on HEAD /dev/seed (exit $?)"
+  [ "$HC" = 404 ] || die "HEAD /dev/seed is not 404"
   info "health ok; dev routes absent (GET and HEAD)"
 else
   echo "+ curl GET $BASE/health (expect 200)"
   echo "+ curl GET and HEAD $BASE/dev/seed (expect 404)"
 fi
 
-# UTC day of the last successful import commit in a walkthrough results.json
-# (the step's `at` timestamp); empty when no such step or timestamp exists.
+# UTC day of the last successful import commit in a walkthrough results.json:
+# the step's server commit timestamp (serverAt) when present, else its client
+# `at`. Prints NONE when results.json parses but has no passing commit step
+# (no marker must be written), and nothing when the file is missing or
+# unreadable (the caller falls back to the walkthrough start day).
 import_commit_day() {
   node -e '
     try {
@@ -134,26 +149,34 @@ import_commit_day() {
       const commits = (r.steps ?? []).filter((s) =>
         s.outcome === "pass" && s.method === "POST" &&
         /^\/v2\/imports\/[^/]+\/commit$/.test(s.path ?? "") &&
-        (s.status === 200 || s.status === 201) && typeof s.at === "string");
-      const last = commits[commits.length - 1];
-      if (last) {
-        const t = Date.parse(last.at);
-        if (!Number.isNaN(t)) console.log(new Date(t).toISOString().slice(0, 10));
-      }
+        (s.status === 200 || s.status === 201));
+      const days = commits.map((s) => {
+        for (const v of [s.serverAt, s.at]) {
+          const t = typeof v === "string" ? Date.parse(v) : NaN;
+          if (!Number.isNaN(t)) return new Date(t).toISOString().slice(0, 10);
+        }
+        return "";
+      }).filter(Boolean);
+      console.log(days.length ? days[days.length - 1] : "NONE");
     } catch {}
   ' "$1"
 }
 
-MARK_DIR="$REPO_ROOT/walkthrough-out"; MARK="$MARK_DIR/.staging-import-utc-day-$(printf '%s' "$BASE" | sha256sum | cut -c1-12)"; TODAY="$(date -u +%F)"
+# STAGING_MARKER_DIR overrides where the marker and walkthrough output live (tests).
+MARK_DIR="${STAGING_MARKER_DIR:-$REPO_ROOT/walkthrough-out}"; MARK="$MARK_DIR/.staging-import-utc-day-$(printf '%s' "$BASE" | sha256sum | cut -c1-12)"; TODAY="$(date -u +%F)"
 WT_MSG="walkthrough already ran today (UTC $TODAY): D1 allows one committed import per UTC day. Rerun after 00:00 UTC, or use --skip-walkthrough."
+WT_SUMMARY=""
+wt_summary() { [ -z "$WT_SUMMARY" ] || info "summary: walkthrough NOT run ($WT_SUMMARY)"; }
 if [ "$SKIP_WT" = 1 ]; then
   info "walkthrough skipped (--skip-walkthrough)"
+  WT_SUMMARY="--skip-walkthrough; not verified, not a pass"
 elif [ "$APPLY" = 1 ] && [ -f "$MARK" ] && [ "$(cat "$MARK")" = "$TODAY" ]; then
   info "$WT_MSG"
+  WT_SUMMARY="already ran today per this machine's marker (UTC $TODAY); this run verified nothing"
 else
   # Credentials are needed only here: the walkthrough actually runs.
   if [ "$APPLY" = 1 ]; then need_env WT_SUPER_IDENTIFIER WT_SUPER_PASSWORD; fi
-  WT_OUT="walkthrough-out/staging-$(date -u +%Y%m%dT%H%M%SZ)"
+  WT_OUT="$MARK_DIR/staging-$(date -u +%Y%m%dT%H%M%SZ)"
   # Captured just before the run: the marker's fallback day (see below).
   WT_START_DAY="$(date -u +%F)"
   WT_RC=0
@@ -166,17 +189,24 @@ else
     # The marker records the UTC day the import COMMITTED, never the end time:
     # a walkthrough that crosses midnight must not move the marker to the new
     # day when the commit happened before midnight. Prefer the commit step's
-    # timestamp from results.json; fall back to the walkthrough's start day.
+    # timestamp (server's, else the client's) from results.json. A readable
+    # results.json with no passing commit writes NO marker; the start day is
+    # the fallback only when results.json is missing or unreadable.
     if [ "$APPLY" = 1 ]; then
       mkdir -p "$MARK_DIR"
-      IMPORT_DAY="$(import_commit_day "$REPO_ROOT/$WT_OUT/results.json")"
-      printf '%s\n' "${IMPORT_DAY:-$WT_START_DAY}" > "$MARK"
+      IMPORT_DAY="$(import_commit_day "$WT_OUT/results.json")"
+      if [ "$IMPORT_DAY" = NONE ]; then
+        info "no passing import commit in results.json: daily-import marker not written"
+      else
+        printf '%s\n' "${IMPORT_DAY:-$WT_START_DAY}" > "$MARK"
+      fi
     fi
     info "go/no-go needs summary.md to show PASS with every interaction row covered (89/89)"
   fi
 fi
 
 if [ "$LOCAL" = 1 ]; then
+  wt_summary
   info "--local: R2 part-checksum probe and CPU procedure skipped (no S3 endpoint or Free-plan CPU limit on local workerd)"
   info "summary: R2 part-checksum probe NOT done (--local); not verified, not a pass"
   exit 0
@@ -205,5 +235,6 @@ else
   fi
 fi
 echo
+wt_summary
 info "summary: R2 part-checksum probe $PROBE_SUMMARY"
 cpu_procedure

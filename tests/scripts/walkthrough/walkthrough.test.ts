@@ -145,6 +145,54 @@ describe('walkthrough runner', () => {
     }
   }, 240_000);
 
+  it('reports a gated real admin as GATED and never generates recovery codes for it', async () => {
+    const app = await startLocalApp();
+    try {
+      const before = await app.snapshotTarget();
+      const dir = await outDir();
+      const result = await runWalkthrough(
+        {
+          baseUrl: app.baseUrl,
+          community: app.community,
+          adminIdentifier: app.admin.identifier,
+          adminPassword: app.admin.password,
+          superIdentifier: app.superAdmin.identifier,
+          superPassword: app.superAdmin.password,
+          setupFromBootstrap: false,
+          allowDestructive: false,
+          loginRealAdmin: true,
+        },
+        { persona: 'super', outDir: dir, quiet: true }
+      );
+      expect(result.walk.records.filter((r) => r.outcome === 'fail')).toEqual(
+        []
+      );
+      const gate = result.walk.records.find(
+        (r) => r.path === '/v2/stories?limit=1' && r.status === 403
+      );
+      expect(gate?.outcome).toBe('pass');
+      const check = await readFile(
+        join(dir, 'migrated-community-check.md'),
+        'utf8'
+      );
+      expect(check).toContain('GATED');
+      expect(check).toContain('"admin_media":"gated"');
+      expect(
+        result.walk.records.some((r) => r.path?.includes('recovery-codes'))
+      ).toBe(false);
+      // the real admin's recovery-code state is untouched (the login itself
+      // upgrades the verifier, which is the one documented write)
+      const after = JSON.parse(await app.snapshotTarget()) as {
+        login_codes?: unknown[];
+      };
+      expect(after.login_codes ?? []).toEqual(
+        (JSON.parse(before) as { login_codes?: unknown[] }).login_codes ?? []
+      );
+    } finally {
+      await app.close();
+    }
+  }, 120_000);
+
   it('defers withdrawal and erasure unless --allow-destructive is given', async () => {
     const app = await startLocalApp();
     try {

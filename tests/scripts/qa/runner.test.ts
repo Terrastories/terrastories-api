@@ -433,6 +433,11 @@ describe('session replay and request lifecycle', () => {
   });
   it('times out a hanging handler and aborts its Request signal', async () => {
     let signal: AbortSignal | undefined;
+    // Keep the Request itself reachable until the assertion: undici propagates
+    // an abort to request.signal through a WeakRef to the Request's internal
+    // controller, so a collected Request (GC between the handler call and the
+    // 250 ms deadline on a loaded CI runner) silently stops propagating.
+    let received: Request | undefined;
     const report = await runJourneys({
       contract: 'canonical-v2',
       requestTimeoutMs: 250,
@@ -446,16 +451,19 @@ describe('session replay and request lifecycle', () => {
         },
       ],
       handler: async (request) => {
+        received = request;
         signal = request.signal;
         return new Promise<Response>(() => {});
       },
     });
+    expect(received).toBeDefined();
     expect(signal?.aborted).toBe(true);
     expect(report.results[0]).toMatchObject({
       pass: false,
       failure: 'request-timeout',
       message: 'Sending request exceeded request timeout',
     });
+    void received;
   });
   it('times out and cancels a hanging JSON response body', async () => {
     let cancelled = false;

@@ -161,6 +161,9 @@ describe('R2 upload: streaming, multipart, retries', () => {
       .prepare('SELECT checksum AS sha256 FROM files')
       .get() as { sha256: string };
     expect(stored.sha256Meta).toBe(sha256);
+    // the object carries its Content-Type (the Worker serves the type from the
+    // D1 files row, but R2 httpMetadata must match for direct R2 reads)
+    expect(stored.contentType).toBe('video/mp4');
     expect(report.peakBytesInFlight).toBeLessThanOrEqual(4 * 64 * MIB);
     expect(r2.peakBodyBytesInFlight()).toBeLessThanOrEqual(64 * MIB);
     const again = await run(dir);
@@ -208,6 +211,9 @@ describe('R2 upload: streaming, multipart, retries', () => {
     });
     expect(report.uploaded).toBe(1);
     expect(delays).toEqual([250, 500, 1000]);
+    expect(
+      r2.objects.get('/media/communities/3/media/small')!.contentType
+    ).toBe('image/png');
   });
 
   it('gives up after the bounded attempts without leaking secrets, and never retries a 403', async () => {

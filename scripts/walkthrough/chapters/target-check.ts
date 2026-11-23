@@ -10,6 +10,76 @@ import { dig } from '../walk.js';
 
 export const PERSONA_TARGET = 'Migrated community check';
 
+/** Distinct media types to probe in the real community (kept small: reads only). */
+const MEDIA_PROBES = 3;
+
+/**
+ * The real admin streams migrated files through the authenticated media route
+ * (GET /v2/media/:id, first bytes only). This proves the D1 files rows, the R2
+ * objects and the content type survive the migration for what the admin sees,
+ * including non-public stories the anonymous check above cannot reach.
+ */
+export async function authenticatedMedia(
+  ctx: Ctx,
+  admin: ReturnType<Ctx['w']['actor']>
+): Promise<void> {
+  const { w, s } = ctx;
+  type Att = { fileId: string; mimeType: string; byteSize: number };
+  const found = new Map<string, Att>();
+  for (
+    let offset = 0;
+    offset < 500 && found.size < MEDIA_PROBES;
+    offset += 100
+  ) {
+    // a step, so a non-200 is a recorded failure (status and code), never the
+    // end of the search
+    const page = await w.step({
+      who: admin,
+      say: `looks for media in the stories the admin can read (from ${offset})`,
+      method: 'GET',
+      path: `/v2/stories?limit=100&offset=${offset}`,
+      expect: 200,
+    });
+    const rows =
+      (dig(page, 'data', 'stories') as Array<{ attachments?: Att[] }>) ?? [];
+    for (const story of rows)
+      for (const a of story.attachments ?? [])
+        if (!found.has(a.mimeType) && found.size < MEDIA_PROBES)
+          found.set(a.mimeType, a);
+    if (rows.length < 100) break;
+  }
+  if (found.size === 0) {
+    s.targetCounts.admin_media = 'no media found';
+    w.narrate(
+      'The first stories the admin can read have no media attached, so authenticated media serving was not exercised.'
+    );
+    return;
+  }
+  let served = 0;
+  for (const a of found.values()) {
+    await w.step({
+      who: admin,
+      say: `streams a migrated ${a.mimeType} file through the authenticated media route (first bytes only)`,
+      method: 'GET',
+      path: `/v2/media/${a.fileId}`,
+      headers: { range: 'bytes=0-7' },
+      expect: [200, 206],
+      check: (r) => {
+        const type = (r.headers.get('content-type') ?? '').split(';')[0];
+        if (type !== a.mimeType)
+          return `content type ${type || 'missing'} differs from the file record ${a.mimeType}`;
+        return r.bytes.byteLength > 0 ? undefined : 'the file served no bytes';
+      },
+      show: (r) => [
+        field('content type', r.headers.get('content-type')),
+        field('bytes read', r.bytes.byteLength),
+      ],
+    });
+    served += 1;
+  }
+  s.targetCounts.admin_media = `served ${served}`;
+}
+
 export async function targetCheckChapter(ctx: Ctx): Promise<void> {
   const { w, s, cfg } = ctx;
   const slug = cfg.community;
@@ -183,9 +253,27 @@ export async function targetCheckChapter(ctx: Ctx): Promise<void> {
           dig(list, 'meta', 'total') ?? 0
         );
       }
+      await authenticatedMedia(ctx, admin);
     } else {
+      // Reported, never skipped silently: the gate is the product working as
+      // designed, and the run says exactly which checks it blocked.
+      await w.step({
+        who: admin,
+        say: 'the API gates the admin screens until recovery codes are saved (the real admin has none)',
+        method: 'GET',
+        path: '/v2/stories?limit=1',
+        expect: 403,
+        negative: true,
+        check: (r) =>
+          dig(r, 'code') === 'recovery_codes_required'
+            ? undefined
+            : 'expected the recovery_codes_required gate',
+        show: 'GATED: the real admin must save recovery codes (by a person) before authenticated reads can be checked',
+      });
+      s.targetCounts.admin_reads = 'gated';
+      s.targetCounts.admin_media = 'gated';
       w.narrate(
-        'The real admin has not saved recovery codes, so the API gates every screen. The walkthrough does not generate recovery codes for a real account.'
+        'GATED: the real admin has not saved recovery codes, so every authenticated read of the real community (counts, map settings and authenticated media serving) was NOT checked. The walkthrough never generates recovery codes for a real account: a person signs in as that admin, saves the codes, and the check is run again.'
       );
     }
     await w.step({

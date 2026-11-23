@@ -111,8 +111,9 @@ export class Actor {
     } else if (options.form) {
       body = options.form;
     } else if (options.rawBody) {
+      // fetch derives content-length from the byte body itself; setting it by
+      // hand is a forbidden header that some undici builds reject
       body = options.rawBody;
-      headers.set('content-length', String(options.rawBody.byteLength));
     }
     const response = await fetch(target, {
       method,

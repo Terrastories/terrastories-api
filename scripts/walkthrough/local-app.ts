@@ -47,11 +47,20 @@ export interface LocalApp {
   close: () => Promise<void>;
 }
 
-export async function startLocalApp(
+/**
+ * Seed the stand-in migrated community (and super admin) into any freshly
+ * migrated database handle: SQLite on Node, or D1 through drizzle in workerd.
+ * Credentials are generated at runtime and returned in memory only.
+ */
+export async function seedStandIn(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  db: any,
   options: { fresh?: boolean; withSuperAdmin?: boolean } = {}
-): Promise<LocalApp> {
-  const qa = await openPersonaQaDatabase();
-  const db = await qa.openFresh();
+): Promise<{
+  slug: string;
+  admin: { identifier: string; password: string };
+  superAdmin: { identifier: string; password: string };
+}> {
   const { communities, users } = tablesFor(db);
   const slug = 'barbara';
   const admin = { identifier: 'ana-barbara', password: randomPassword() };
@@ -116,6 +125,17 @@ export async function startLocalApp(
       passwordVerifier: await sha256Hex(key),
     });
   }
+
+  return { slug, admin, superAdmin };
+}
+
+export async function startLocalApp(
+  options: { fresh?: boolean; withSuperAdmin?: boolean } = {}
+): Promise<LocalApp> {
+  const qa = await openPersonaQaDatabase();
+  const db = await qa.openFresh();
+  const { slug, admin, superAdmin } = await seedStandIn(db, options);
+  const { communities } = tablesFor(db);
 
   const storageDir = mkdtempSync(join(tmpdir(), 'tsapi-walk-store-'));
   const erasureDir = mkdtempSync(join(tmpdir(), 'tsapi-walk-erasure-'));

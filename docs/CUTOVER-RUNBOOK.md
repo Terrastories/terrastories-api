@@ -74,7 +74,8 @@ Staging uses only `terrastories-staging-*` resources, a workers.dev URL, no DNS 
    export WT_SUPER_IDENTIFIER=... WT_SUPER_PASSWORD=...     # staging super admin, env only
    scripts/staging/smoke.sh --community barbara --apply
    ```
-   Checks `/health` is 200, `/dev/seed` is 404 for GET and HEAD, runs `npm run walkthrough` with `--super-credentials-env --allow-destructive` (disposable community only), runs the R2 part-checksum probe, and prints the CPU measurement procedure (`scripts/staging/smoke.sh --cpu-procedure`).
+   Checks `/health` is 200, `/dev/seed` is 404 for GET and HEAD, runs `npm run walkthrough` with `--d1 --super-credentials-env --allow-destructive` (disposable community only), runs the R2 part-checksum probe, and prints the CPU measurement procedure (`scripts/staging/smoke.sh --cpu-procedure`).
+   For a rehearsal on `wrangler dev --local` use `scripts/staging/smoke.sh --local` with `STAGING_URL=http://127.0.0.1:<port>` (loopback only; the R2 probe is skipped).
 5. **All communities in staging.** Only if the R2 budget allows (decision A below) or a paid plan is approved. Free R2 holds 10 GB, so 30 GB cannot be staged on Free. If not possible, rehearse the rest as D1-only (`--skip-r2` on `load-community.sh`), accept that media-dependent checks are covered by `barbara` only, and record that in the go/no-go sheet. Rehearse the real full capture timing at least once: its duration is the maintenance-window length.
 6. **Rollback rehearsal on staging**: restore from a Time Travel bookmark (section 9) at least once, with the orphan-sweep hold set first.
 
@@ -100,7 +101,8 @@ Upload routes must stay within the Free CPU budget (about 10 ms per invocation).
 
 All must be true on the final rehearsal, with evidence attached. A single NO is a NO-GO.
 
-- [ ] Staging walkthrough PASS **89/89** interaction rows (`summary.md`).
+- [ ] Staging walkthrough PASS **89/89** interaction rows (`summary.md`), run with `--d1`. D1 allows one committed import per UTC day for the whole database, so the walkthrough commits one import and asserts the `429 d1_daily_import_limit` for the second (a covered negative step, not a failure). Do not run it twice on the same UTC day, and not on a day a real import is planned: it uses the day's single import. Rehearse with `--login-real-admin` too; if the real admin is **GATED** (no recovery codes saved) the authenticated-media check did not run: a person must save the codes first, then rerun. A GATED result is not a PASS for that check.
+- [ ] Local workerd rehearsal (optional, before staging): `npm run walkthrough:workers` passes 89/89.
 - [ ] `verify.sql` passed on staging D1 (rows, applied-file count, sequence floors).
 - [ ] Row and object counts reconcile with the Stage-2 manifests (source, bundle, target, archive; `validation-summary.txt` has no unexplained difference).
 - [ ] R2 part-checksum probe result recorded (exit 0 enforced, or exit 2 not enforced: both are acceptable once recorded; exit 1 inconclusive is not).
@@ -131,7 +133,7 @@ Estimate the length from the full-capture rehearsal. Run from the trusted host. 
 6. **Transform, full**, then review `validation-summary.txt` and confirm MANUAL items are zero and the manifest counts equal the rehearsal counts.
 7. **Load production D1 + R2.** Take a D1 export and record a Time Travel bookmark first. Use the same flow as staging against the production names (the staging wrapper refuses them, so run the underlying commands by hand: `migrate:rails:load --target d1 --dry-run`, then `--target d1 --sql-out`, `wrangler d1 migrations apply <db> --remote`, each SQL file via `wrangler d1 execute <db> --remote --file` in `d1-import.json` order, `migrate:rails:load --target r2 --bucket <bucket>`, `verify.sql`). **REQUIRES HUMAN APPROVAL** before the first remote write.
 8. **Traffic switch.** Attach the custom domain `our.terrastories.app` to the Worker (or the frontend that calls it) and make `terrastories.herokuapp.com` redirect to it. DNS or route changes: **REQUIRES HUMAN APPROVAL.** Note the previous DNS records first (rollback needs them) and lower the TTL beforehand.
-9. **Production smoke.** Health 200, `/dev/seed` 404 (GET and HEAD) via curl. Then `npm run walkthrough -- --base-url https://our.terrastories.app --super-credentials-env` **without** `--allow-destructive` (the destructive walk creates and erases a disposable community; do not run it on production unless the owner decides). Capture summary.
+9. **Production smoke.** Health 200, `/dev/seed` 404 (GET and HEAD) via curl. Then `npm run walkthrough -- --base-url https://our.terrastories.app --d1 --super-credentials-env` **without** `--allow-destructive` (the destructive walk creates and erases a disposable community; do not run it on production unless the owner decides). Capture summary.
 10. **Community acceptance.** Each steward confirms their community; record acceptance date and custodian. Acceptance starts the 30-day retention clock.
 11. **Close the window**, announce completion. **REQUIRES HUMAN APPROVAL.**
 

@@ -16,6 +16,8 @@ import type { AddressInfo } from 'node:net';
 export interface FakeR2Object {
   size: number;
   sha256Meta: string;
+  /** Content-Type the uploader sent (R2 keeps it as the object's httpMetadata). */
+  contentType: string;
   parts: Array<{ size: number; sha256: string }> | null;
 }
 
@@ -107,6 +109,7 @@ export async function startFakeR2(options: FakeR2Options): Promise<FakeR2> {
     {
       path: string;
       sha256Meta: string;
+      contentType: string;
       parts: Map<number, { size: number; sha256: string; etag: string }>;
     }
   >();
@@ -175,6 +178,7 @@ export async function startFakeR2(options: FakeR2Options): Promise<FakeR2> {
           return end(res, 400, 'XAmzContentSHA256Mismatch');
         }
         const meta = String(req.headers['x-amz-meta-sha256'] ?? '');
+        const contentType = String(req.headers['content-type'] ?? '');
 
         if (method === 'HEAD') {
           const object = objects.get(path);
@@ -196,7 +200,12 @@ export async function startFakeR2(options: FakeR2Options): Promise<FakeR2> {
           return end(res, 200);
         }
         if (method === 'PUT') {
-          objects.set(path, { size, sha256Meta: meta, parts: null });
+          objects.set(path, {
+            size,
+            sha256Meta: meta,
+            contentType,
+            parts: null,
+          });
           if (
             String(req.headers['x-amz-checksum-sha256']) !==
             Buffer.from(bodySha, 'hex').toString('base64')
@@ -209,7 +218,12 @@ export async function startFakeR2(options: FakeR2Options): Promise<FakeR2> {
         if (method === 'POST' && 'uploads' in query) {
           uploadCounter += 1;
           const id = 'upload-' + String(uploadCounter);
-          uploads.set(id, { path, sha256Meta: meta, parts: new Map() });
+          uploads.set(id, {
+            path,
+            sha256Meta: meta,
+            contentType,
+            parts: new Map(),
+          });
           return end(
             res,
             200,
@@ -227,6 +241,7 @@ export async function startFakeR2(options: FakeR2Options): Promise<FakeR2> {
           objects.set(path, {
             size: listed.reduce((s, [, p]) => s + p.size, 0),
             sha256Meta: upload.sha256Meta,
+            contentType: upload.contentType,
             parts: listed.map(([, p]) => ({ size: p.size, sha256: p.sha256 })),
           });
           uploads.delete(query.uploadId);

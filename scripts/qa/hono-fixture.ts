@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { StorageChecksumMismatchError } from '../../src/services/hono-foundation.service.js';
 import { CommunityErasureService } from '../../src/services/community-erasure.service.js';
 import { CommunitySovereigntyRepository } from '../../src/repositories/community-sovereignty.repository.js';
 import type { ErasureRecord } from '../../src/services/erasure-record-store.js';
@@ -1775,7 +1777,7 @@ export async function createFixture(
               size: bytes.byteLength,
             };
           },
-          async put(key, body) {
+          async put(key, body, putOptions) {
             assertWritable(key);
             if (body instanceof Uint8Array) {
               const copy = Uint8Array.from(body);
@@ -1799,6 +1801,14 @@ export async function createFixture(
             for (const chunk of chunks) {
               merged.set(chunk, offset);
               offset += chunk.byteLength;
+            }
+            // Adapter contract (#249): verify the client digest before publishing.
+            if (
+              putOptions?.sha256 !== undefined &&
+              createHash('sha256').update(merged).digest('hex') !==
+                putOptions.sha256
+            ) {
+              throw new StorageChecksumMismatchError();
             }
             storage.set(key, merged);
             return { size: merged.byteLength };
@@ -6067,7 +6077,7 @@ export async function createFixture(
       createdAt: new Date(),
     });
 
-    // Slice 9 media journey helpers: multipart bodies are built at runtime
+    // Slice 9 media journey helpers: raw upload and multipart bodies are built at runtime
     // (no credential-shaped literals) and exercised identically by SQLite,
     // PostgreSQL, and the Workers/R2 build.
     const mediaPngBytes = Uint8Array.from([
@@ -6097,6 +6107,33 @@ export async function createFixture(
       buf.set(new TextEncoder().encode('data'), 36);
       return buf;
     })();
+    // Raw-body upload (#249): bytes are the request body; filename/role/owner
+    // ride in the query string and the client digest in x-content-sha256. The
+    // returned `path` overrides the step's bare `/v2/media` when spread.
+    const qaRawUpload = (options: {
+      filename: string;
+      contentType: string;
+      bytes: Uint8Array;
+      fields?: Record<string, string>;
+      sha256?: string;
+    }): {
+      path: string;
+      rawBody: Uint8Array;
+      headers: Record<string, string>;
+    } => ({
+      path: `/v2/media?${new URLSearchParams({
+        filename: options.filename,
+        ...(options.fields ?? {}),
+      }).toString()}`,
+      rawBody: options.bytes,
+      headers: {
+        'content-type': options.contentType,
+        'content-length': String(options.bytes.byteLength),
+        'x-content-sha256':
+          options.sha256 ??
+          createHash('sha256').update(options.bytes).digest('hex'),
+      },
+    });
     const qaMultipart = (options: {
       filename: string;
       contentType: string;
@@ -9417,7 +9454,7 @@ export async function createFixture(
             path: '/v2/media',
             expected: 201,
             captureId: 'qaStageFile',
-            ...qaMultipart({
+            ...qaRawUpload({
               filename: 'qa-still.png',
               contentType: 'image/png',
               bytes: mediaPngBytes,
@@ -9444,11 +9481,38 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/media',
             expected: 400,
-            ...qaMultipart({
+            ...qaRawUpload({
               filename: 'qa-spoof.mp3',
               contentType: 'audio/mpeg',
               bytes: mediaPngBytes,
             }),
+          },
+          {
+            name: 'reject upload whose body does not match x-content-sha256',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 422,
+            ...qaRawUpload({
+              filename: 'qa-badsum.png',
+              contentType: 'image/png',
+              bytes: mediaPngBytes,
+              sha256: 'ab'.repeat(32),
+            }),
+          },
+          {
+            name: 'reject upload without x-content-sha256',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 400,
+            ...(() => {
+              const raw = qaRawUpload({
+                filename: 'qa-nosum.png',
+                contentType: 'image/png',
+                bytes: mediaPngBytes,
+              });
+              delete raw.headers['x-content-sha256'];
+              return raw;
+            })(),
           },
           {
             name: 'preview CSV places import with staged media for discard',
@@ -10186,7 +10250,7 @@ export async function createFixture(
                   method: 'POST',
                   path: '/v2/media',
                   expected: 413,
-                  ...qaMultipart({
+                  ...qaRawUpload({
                     filename: 'qa-big.png',
                     contentType: 'image/png',
                     bytes: mediaOversizeBytes,
@@ -10223,7 +10287,7 @@ export async function createFixture(
             path: '/v2/media',
             expected: 201,
             captureId: 'qaStageFile2',
-            ...qaMultipart({
+            ...qaRawUpload({
               filename: 'qa-second.png',
               contentType: 'image/png',
               bytes: mediaPngBytes,
@@ -10305,7 +10369,7 @@ export async function createFixture(
             path: '/v2/media',
             expected: 201,
             captureId: 'qaAudioFile',
-            ...qaMultipart({
+            ...qaRawUpload({
               filename: 'qa-place.wav',
               contentType: 'audio/wav',
               bytes: mediaWavBytes,
@@ -10361,7 +10425,7 @@ export async function createFixture(
             path: '/v2/media',
             expected: 201,
             captureId: 'qaSpeakerFile',
-            ...qaMultipart({
+            ...qaRawUpload({
               filename: 'qa-speaker.png',
               contentType: 'image/png',
               bytes: mediaPngBytes,
@@ -10444,7 +10508,7 @@ export async function createFixture(
             path: '/v2/media',
             expected: 201,
             captureId: 'qaDeleteFile',
-            ...qaMultipart({
+            ...qaRawUpload({
               filename: 'qa-delete.png',
               contentType: 'image/png',
               bytes: mediaPngBytes,
@@ -10488,7 +10552,7 @@ export async function createFixture(
             path: '/v2/media',
             expected: 201,
             captureId: 'qaAdminFile',
-            ...qaMultipart({
+            ...qaRawUpload({
               filename: 'qa-admin.png',
               contentType: 'image/png',
               bytes: mediaPngBytes,
@@ -10717,7 +10781,7 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/media',
             expected: 403,
-            ...qaMultipart({
+            ...qaRawUpload({
               filename: 'qa-viewer.png',
               contentType: 'image/png',
               bytes: mediaPngBytes,
@@ -10729,7 +10793,7 @@ export async function createFixture(
             path: '/v2/media',
             expected: 201,
             captureId: 'qaViewerFile',
-            ...qaMultipart({
+            ...qaRawUpload({
               filename: 'qa-viewer-avatar.png',
               contentType: 'image/png',
               bytes: mediaPngBytes,
@@ -10800,7 +10864,7 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/media',
             expected: 403,
-            ...qaMultipart({
+            ...qaRawUpload({
               filename: 'qa-member.png',
               contentType: 'image/png',
               bytes: mediaPngBytes,
@@ -10812,7 +10876,7 @@ export async function createFixture(
             path: '/v2/media',
             expected: 201,
             captureId: 'qaMemberFile',
-            ...qaMultipart({
+            ...qaRawUpload({
               filename: 'qa-member-avatar.png',
               contentType: 'image/png',
               bytes: mediaPngBytes,
@@ -10880,7 +10944,7 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/media',
             expected: 403,
-            ...qaMultipart({
+            ...qaRawUpload({
               filename: 'qa-super.png',
               contentType: 'image/png',
               bytes: mediaPngBytes,
@@ -10891,7 +10955,7 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/media',
             expected: 403,
-            ...qaMultipart({
+            ...qaRawUpload({
               filename: 'qa-super-story.png',
               contentType: 'image/png',
               bytes: mediaPngBytes,
@@ -10904,7 +10968,7 @@ export async function createFixture(
             path: '/v2/media',
             expected: 201,
             captureId: 'qaSuperPhoto',
-            ...qaMultipart({
+            ...qaRawUpload({
               filename: 'qa-super-avatar.png',
               contentType: 'image/png',
               bytes: mediaPngBytes,
@@ -13521,7 +13585,7 @@ export async function createFixture(
               method: 'POST',
               path: '/v2/media',
               expected: 201,
-              ...qaMultipart({
+              ...qaRawUpload({
                 filename: 'qa-field-kit.png',
                 contentType: 'image/png',
                 bytes: mediaPngBytes,

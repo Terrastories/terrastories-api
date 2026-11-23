@@ -3,6 +3,8 @@
  * Cookies, tokens and derived keys never leave this module in clear text:
  * the recorder redacts every value registered through Run.secret().
  */
+import { createHash } from 'node:crypto';
+
 export interface Reply {
   status: number;
   headers: Headers;
@@ -14,6 +16,8 @@ export interface Reply {
 export interface CallOptions {
   json?: unknown;
   form?: FormData;
+  /** Raw request body (media uploads, #249); the caller sets content-type. */
+  rawBody?: Uint8Array;
   headers?: Record<string, string>;
   /** Do not send the actor's cookie (an anonymous probe). */
   noCookie?: boolean;
@@ -100,12 +104,15 @@ export class Actor {
     const target = new URL(path, this.baseUrl);
     const cookie = options.noCookie ? undefined : this.jar.header(target);
     if (cookie) headers.set('cookie', cookie);
-    let body: string | FormData | undefined;
+    let body: string | FormData | Uint8Array | undefined;
     if (options.json !== undefined) {
       headers.set('content-type', 'application/json');
       body = JSON.stringify(options.json);
     } else if (options.form) {
       body = options.form;
+    } else if (options.rawBody) {
+      body = options.rawBody;
+      headers.set('content-length', String(options.rawBody.byteLength));
     }
     const response = await fetch(target, {
       method,
@@ -136,6 +143,27 @@ export class Actor {
       bytes,
     };
   }
+}
+
+/**
+ * Raw-body upload for `POST /v2/media` (#249): the file bytes are the request
+ * body; filename and binding fields go in the query, the declared type in
+ * Content-Type, and the client SHA-256 in `x-content-sha256`. Spread the
+ * result into a step: `{ method: 'POST', path: '/v2/media', ...rawUpload(...) }`.
+ */
+export function rawUpload(
+  fields: Record<string, string>,
+  file: { name: string; type: string; bytes: Uint8Array }
+): { path: string; rawBody: Uint8Array; headers: Record<string, string> } {
+  const query = new URLSearchParams({ filename: file.name, ...fields });
+  return {
+    path: `/v2/media?${query.toString()}`,
+    rawBody: file.bytes,
+    headers: {
+      'content-type': file.type,
+      'x-content-sha256': createHash('sha256').update(file.bytes).digest('hex'),
+    },
+  };
 }
 
 /** Build a multipart body; fields go first so `role` precedes `file`. */

@@ -69,6 +69,7 @@ function createListableStorage(): {
         pos += c.byteLength;
       }
       store.set(storageKey, { bytes: merged, uploaded: new Date() });
+      return { size: total };
     },
     async delete(storageKey) {
       store.delete(storageKey);

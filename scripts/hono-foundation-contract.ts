@@ -16,7 +16,11 @@ import { HonoFoundationRepository } from '../src/repositories/hono-foundation.re
 import { HonoAuthRepository } from '../src/repositories/hono-auth.repository.js';
 import { CommunityExportRepository } from '../src/repositories/community-export.repository.js';
 import { CommunityExportService } from '../src/services/community-export.service.js';
-import type { FoundationStorage } from '../src/services/hono-foundation.service.js';
+import { createHash } from 'node:crypto';
+import {
+  StorageChecksumMismatchError,
+  type FoundationStorage,
+} from '../src/services/hono-foundation.service.js';
 import { EXPORT_GENERATION_STALE_MS } from '../src/shared/export-policy.js';
 import { MediaCleanupCoordinator } from '../src/services/media-cleanup.service.js';
 import { createHonoApp } from '../src/hono-app.js';
@@ -1569,7 +1573,7 @@ export async function runHonoFoundationContract(
       put: async (
         storageKey: string,
         stream: ReadableStream<Uint8Array>,
-        opts: { contentType?: string }
+        opts: { contentType?: string; sha256?: string }
       ) => {
         const reader = stream.getReader();
         const chunks: Uint8Array[] = [];
@@ -1588,11 +1592,18 @@ export async function runHonoFoundationContract(
           merged.set(chunk, pos);
           pos += chunk.byteLength;
         }
+        if (
+          opts.sha256 !== undefined &&
+          createHash('sha256').update(merged).digest('hex') !== opts.sha256
+        ) {
+          throw new StorageChecksumMismatchError();
+        }
         importStorageMap.set(storageKey, {
           bytes: merged,
           contentType: opts.contentType,
           uploaded: instant,
         });
+        return { size: total };
       },
       delete: async (storageKey: string) => {
         importStorageMap.delete(storageKey);
@@ -3324,24 +3335,22 @@ export async function runHonoFoundationContract(
         0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
         0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89,
       ]);
-      const uploadForm = buildImportMultipart({
-        mediaParts: [
-          {
-            fieldName: 'file',
-            filename: 'pg-race-reuse.png',
-            contentType: 'image/png',
-            bytes: racePngBytes,
+      const raceUploadRes = await send(
+        importApp,
+        '/v2/media?filename=pg-race-reuse.png',
+        {
+          method: 'POST',
+          headers: {
+            cookie: editorCookie,
+            'content-type': 'image/png',
+            'content-length': String(racePngBytes.byteLength),
+            'x-content-sha256': createHash('sha256')
+              .update(racePngBytes)
+              .digest('hex'),
           },
-        ],
-      });
-      const raceUploadRes = await send(importApp, '/v2/media', {
-        method: 'POST',
-        headers: {
-          cookie: editorCookie,
-          'content-type': uploadForm.contentType,
-        },
-        body: uploadForm.body,
-      });
+          body: racePngBytes,
+        }
+      );
       assert.equal(
         raceUploadRes.status,
         201,

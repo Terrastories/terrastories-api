@@ -5,6 +5,7 @@
  * - GET /v2/imports/:id
  * - DELETE /v2/imports/:id
  */
+import { assertPutSha256, rawUploadRequest } from '../helpers/raw-upload.js';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
@@ -76,7 +77,7 @@ function createListableMemoryStorage(): {
           contentType: opts.contentType,
           uploaded: new Date('2026-06-01T12:00:00.000Z'),
         });
-        return;
+        return { size: stream.byteLength };
       }
       const reader = stream.getReader();
       const chunks: Uint8Array[] = [];
@@ -95,11 +96,13 @@ function createListableMemoryStorage(): {
         merged.set(c, pos);
         pos += c.byteLength;
       }
+      assertPutSha256(merged, opts?.sha256);
       store.set(storageKey, {
         bytes: merged,
         contentType: opts.contentType,
         uploaded: new Date('2026-06-01T12:00:00.000Z'),
       });
+      return { size: total };
     },
     async delete(storageKey) {
       store.delete(storageKey);
@@ -455,26 +458,20 @@ describe('Slice 12-B GET /v2/imports, GET /v2/imports/:id, DELETE /v2/imports/:i
       ids.disabledCommunity
     );
 
-    const mp = buildImportMultipart({
-      mediaParts: [
-        {
-          fieldName: 'file',
-          filename: 'keep-active.png',
-          contentType: 'image/png',
-          bytes: PNG_BYTES,
-        },
-      ],
+    const mp = rawUploadRequest({
+      filename: 'keep-active.png',
+      contentType: 'image/png',
+      bytes: PNG_BYTES,
     });
-    const up = await app.request(`${API_ORIGIN}/v2/media`, {
+    const up = await app.request(`${API_ORIGIN}/v2/media${mp.search}`, {
       method: 'POST',
       headers: {
+        ...mp.headers,
         cookie: cookies.editorA,
         origin: CLIENT_ORIGIN,
-        'content-type': mp.contentTypeHeader,
       },
       body: mp.body,
-      duplex: 'half',
-    } as RequestInit);
+    });
     expect(up.status).toBe(201);
     existingOwnFileId = MediaUploadResponseSchema.parse(await up.json()).data
       .id;
@@ -1373,26 +1370,16 @@ describe('Slice 12-B GET /v2/imports, GET /v2/imports/:id, DELETE /v2/imports/:i
       'mgr-exp-admin@example.test',
       exportCommunityId
     );
-    const upMp = buildImportMultipart({
-      mediaParts: [
-        {
-          fieldName: 'file',
-          filename: 'export-live.png',
-          contentType: 'image/png',
-          bytes: PNG_BYTES,
-        },
-      ],
+    const upMp = rawUploadRequest({
+      filename: 'export-live.png',
+      contentType: 'image/png',
+      bytes: PNG_BYTES,
     });
-    const upRes = await app.request(`${API_ORIGIN}/v2/media`, {
+    const upRes = await app.request(`${API_ORIGIN}/v2/media${upMp.search}`, {
       method: 'POST',
-      headers: {
-        cookie: editorCookie,
-        origin: CLIENT_ORIGIN,
-        'content-type': upMp.contentTypeHeader,
-      },
+      headers: { ...upMp.headers, cookie: editorCookie, origin: CLIENT_ORIGIN },
       body: upMp.body,
-      duplex: 'half',
-    } as RequestInit);
+    });
     expect(upRes.status).toBe(201);
     const liveFileId = MediaUploadResponseSchema.parse(await upRes.json()).data
       .id;

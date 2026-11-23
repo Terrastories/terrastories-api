@@ -3,7 +3,7 @@
  * account (profile, photo, password, sessions) and is refused everything
  * else.
  */
-import { PNG_BYTES, multipart } from '../client.js';
+import { PNG_BYTES, rawUpload } from '../client.js';
 import { newVerifier, randomPassword } from '../kdf.js';
 import {
   activate,
@@ -108,14 +108,14 @@ export async function viewerChapter(ctx: Ctx): Promise<void> {
     });
     const up = await w.step({
       who: vera,
-      say: 'uploads a profile photo (png, under 5 MB); the file part follows the role part',
+      say: 'uploads a profile photo (png, under 5 MB) as a raw body with the role in the query',
       method: 'POST',
       path: '/v2/media',
-      form: multipart(
+      ...rawUpload(
         { role: 'user_photo' },
         { name: `${w.runId}-vera.png`, type: 'image/png', bytes: PNG_BYTES }
       ),
-      bodyNote: 'multipart: role=user_photo, then the png file',
+      bodyNote: 'raw png body; query: filename, role=user_photo',
       expect: 201,
       covers: ['B02'],
       check: (r) =>
@@ -252,7 +252,7 @@ export async function viewerChapter(ctx: Ctx): Promise<void> {
       say: 'tries to upload story media (only profile photos are open to viewers)',
       method: 'POST',
       path: '/v2/media',
-      form: multipart(
+      ...rawUpload(
         {},
         { name: `${w.runId}-no.png`, type: 'image/png', bytes: PNG_BYTES }
       ),

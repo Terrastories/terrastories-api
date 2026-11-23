@@ -5,6 +5,7 @@
  * for Slice 12-C:
  * - POST /v2/imports/:id/commit
  */
+import { assertPutSha256, rawUploadRequest } from '../helpers/raw-upload.js';
 import {
   describe,
   it,
@@ -117,11 +118,13 @@ function createListableMemoryStorage(): {
         merged.set(c, pos);
         pos += c.byteLength;
       }
+      assertPutSha256(merged, opts?.sha256);
       store.set(storageKey, {
         bytes: merged,
         contentType: opts.contentType,
         uploaded: new Date('2026-06-01T12:00:00.000Z'),
       });
+      return { size: total };
     },
     async delete(storageKey) {
       store.delete(storageKey);
@@ -517,26 +520,16 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
     );
 
     const uploadFile = async (cookie: string, filename: string) => {
-      const mp = buildImportMultipart({
-        mediaParts: [
-          {
-            fieldName: 'file',
-            filename,
-            contentType: 'image/png',
-            bytes: PNG_BYTES,
-          },
-        ],
+      const mp = rawUploadRequest({
+        filename: filename,
+        contentType: 'image/png',
+        bytes: PNG_BYTES,
       });
-      const res = await app.request(`${API_ORIGIN}/v2/media`, {
+      const res = await app.request(`${API_ORIGIN}/v2/media${mp.search}`, {
         method: 'POST',
-        headers: {
-          cookie,
-          origin: CLIENT_ORIGIN,
-          'content-type': mp.contentTypeHeader,
-        },
+        headers: { ...mp.headers, cookie: cookie, origin: CLIENT_ORIGIN },
         body: mp.body,
-        duplex: 'half',
-      } as RequestInit);
+      });
       expect(res.status).toBe(201);
       return MediaUploadResponseSchema.parse(await res.json()).data.id;
     };
@@ -2348,26 +2341,16 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
     // 1. SQLite deterministic interleaving: admin attaches existing file to viewer's
     // user_photo while editorA's commit is awaiting staged checksum verification.
     const uploadExisting = async (cookie: string, filename: string) => {
-      const mp = buildImportMultipart({
-        mediaParts: [
-          {
-            fieldName: 'file',
-            filename,
-            contentType: 'image/png',
-            bytes: PNG_BYTES,
-          },
-        ],
+      const mp = rawUploadRequest({
+        filename: filename,
+        contentType: 'image/png',
+        bytes: PNG_BYTES,
       });
-      const res = await app.request(`${API_ORIGIN}/v2/media`, {
+      const res = await app.request(`${API_ORIGIN}/v2/media${mp.search}`, {
         method: 'POST',
-        headers: {
-          cookie,
-          origin: CLIENT_ORIGIN,
-          'content-type': mp.contentTypeHeader,
-        },
+        headers: { ...mp.headers, cookie: cookie, origin: CLIENT_ORIGIN },
         body: mp.body,
-        duplex: 'half',
-      } as RequestInit);
+      });
       expect(res.status).toBe(201);
       return MediaUploadResponseSchema.parse(await res.json()).data.id;
     };
@@ -2715,26 +2698,23 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
         comm.id,
         true
       );
-      const d1UpMp = buildImportMultipart({
-        mediaParts: [
-          {
-            fieldName: 'file',
-            filename: 'd1-reuse-existing.png',
-            contentType: 'image/png',
-            bytes: PNG_BYTES,
-          },
-        ],
+      const d1UpMp = rawUploadRequest({
+        filename: 'd1-reuse-existing.png',
+        contentType: 'image/png',
+        bytes: PNG_BYTES,
       });
-      const d1UpRes = await d1App.request(`${API_ORIGIN}/v2/media`, {
-        method: 'POST',
-        headers: {
-          cookie: d1EdCookie,
-          origin: CLIENT_ORIGIN,
-          'content-type': d1UpMp.contentTypeHeader,
-        },
-        body: d1UpMp.body,
-        duplex: 'half',
-      } as RequestInit);
+      const d1UpRes = await d1App.request(
+        `${API_ORIGIN}/v2/media${d1UpMp.search}`,
+        {
+          method: 'POST',
+          headers: {
+            ...d1UpMp.headers,
+            cookie: d1EdCookie,
+            origin: CLIENT_ORIGIN,
+          },
+          body: d1UpMp.body,
+        }
+      );
       expect(d1UpRes.status).toBe(201);
       const d1ExistingId = MediaUploadResponseSchema.parse(await d1UpRes.json())
         .data.id;

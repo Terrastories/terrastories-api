@@ -171,7 +171,9 @@ export class Walk {
         ? JSON.stringify(mask(spec.json))
         : spec.form
           ? 'multipart form'
-          : '');
+          : spec.rawBody
+            ? `raw body (${spec.rawBody.byteLength} bytes) + x-content-sha256`
+            : '');
     const record: StepRecord = {
       label,
       chapter: this.chapterNo,
@@ -200,6 +202,7 @@ export class Walk {
       reply = await spec.who.call(spec.method, spec.path, {
         json: spec.json,
         form: spec.form,
+        rawBody: spec.rawBody,
         headers: spec.headers,
         noCookie: spec.noCookie,
       });

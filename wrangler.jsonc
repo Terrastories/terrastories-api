@@ -34,4 +34,52 @@
   // Separate invocation budgets: minute export expiry and minute erasure.
   "triggers": { "crons": ["0 * * * *", "* * * * *", "*/1 * * * *"] },
   "observability": { "enabled": false, "traces": { "enabled": false } },
+  // Staging environment template (scripts/staging/provision.sh, docs/CUTOVER-RUNBOOK.md).
+  // Placeholders only: replace the database_id with the id printed by
+  // `wrangler d1 create terrastories-staging-db` and PUBLIC_ORIGIN with the
+  // deployed workers.dev URL. Every staging resource name starts with
+  // "terrastories-staging-"; provision.sh refuses anything else. Bindings and
+  // vars are NOT inherited from the top level, so they are repeated here.
+  // Workers Free allows 5 cron triggers per account: staging needs all 3 the
+  // Worker dispatches, so staging and production (3) cannot both hold their
+  // crons at once; see docs/CUTOVER-RUNBOOK.md section 6.
+  "env": {
+    "staging": {
+      "name": "terrastories-staging-api",
+      "workers_dev": true,
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "terrastories-staging-db",
+          "database_id": "REPLACE-WITH-STAGING-D1-ID",
+          "migrations_dir": "src/db/migrations",
+        },
+      ],
+      "r2_buckets": [
+        { "binding": "MEDIA", "bucket_name": "terrastories-staging-media" },
+        // Out-of-band erasure records (src/services/ERASURE-OPERATIONS.md):
+        // dedicated bucket, never restored, rotated or copied with D1/MEDIA,
+        // excluded from backups, no lifecycle expiration rule. Without it
+        // erasure answers 503.
+        {
+          "binding": "ERASURE_RECORDS",
+          "bucket_name": "terrastories-staging-erasure-records",
+        },
+      ],
+      "vars": {
+        "PUBLIC_ORIGIN": "https://terrastories-staging-api.REPLACE-WITH-SUBDOMAIN.workers.dev",
+        "CORS_ORIGINS": "",
+        "R2_BUCKET_NAME": "terrastories-staging-media",
+      },
+      // src/worker.ts matches these exact strings: hourly sweep, minute
+      // export expiry, and the separate minute erasure retry.
+      "triggers": { "crons": ["0 * * * *", "* * * * *", "*/1 * * * *"] },
+      // Secrets (wrangler secret put ... --env staging, never vars):
+      // AUTH_SERVER_SECRET, BOOTSTRAP_SECRET, R2_ACCOUNT_ID,
+      // R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY; optional MAPBOX_ACCESS_TOKEN.
+      // ENVIRONMENT stays unset (production rules). ORPHAN_SWEEP_PAUSED is set
+      // only during a restore.
+      "observability": { "enabled": false, "traces": { "enabled": false } },
+    },
+  },
 }

@@ -321,31 +321,31 @@ Mapbox styles (`mapboxStyleUrl`, public `pk.*` `mapboxAccessToken`, `exposeMapbo
 ## 9. Staging
 
 - **API base:** `https://terrastories-staging-api.luandro.workers.dev` (Cloudflare Workers Free, work non-production account).
-- **Allowed browser origin:** `https://terrastories-staging.luandro.workers.dev` is the **only** allowed browser origin (deploy the UI as a Worker with static assets named `terrastories-staging`). Both the Worker `CORS_ORIGINS` setting and the R2 media bucket CORS policy pin it (no wildcards). Changing the frontend origin requires updating `CORS_ORIGINS` and re-provisioning via `STAGING_FRONTEND_ORIGIN=<origin> scripts/staging/provision.sh --apply` (which renders `scripts/staging/r2-cors.json`, applies and verifies bucket CORS, and deploys the Worker). The origin must share the API's registrable site (`luandro.workers.dev`; `workers.dev` and `pages.dev` are public suffixes): the `ts_session` cookie is `SameSite=Strict`, so a `*.pages.dev` UI would never receive it.
+- **Allowed browser origin:** `https://terrastories-staging.luandro.workers.dev` is the **only** allowed browser origin (deploy the UI as a Worker with static assets named `terrastories-staging`). The Worker `CORS_ORIGINS` var and the R2 media bucket CORS policy both pin it (no wildcards). The committed `wrangler.jsonc` keeps placeholders: the operator sets `CORS_ORIGINS` and `PUBLIC_ORIGIN` in a local `env.staging.vars` copy, and every deploy overwrites dashboard-set vars with that file. To change the origin, edit that local `CORS_ORIGINS`, then run `env -u CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID=<work account> STAGING_FRONTEND_ORIGIN=<origin> scripts/staging/provision.sh --apply` (the account guard requires `CLOUDFLARE_ACCOUNT_ID`). It renders `scripts/staging/r2-cors.json` into the gitignored `.r2-cors.json`, applies and verifies the bucket CORS, and deploys the Worker once the real D1 id is in place. The origin must share the API's registrable site (`luandro.workers.dev`; `workers.dev` and `pages.dev` are public suffixes): the `ts_session` cookie is `SameSite=Strict`, so a `*.pages.dev` UI would never receive it.
 - **Auth flow:** two-step client-stretched login (`POST /v2/auth/prelogin` -> client-side Argon2id stretching -> `POST /v2/auth/login`); see section 7.2 for parameters, legacy bcrypt upgrades, and failure behavior.
 - **Sample community:** `barbara` (private; small dataset: 4 stories, 4 places, 1 speaker). Because it is private, unauthenticated `/v2/public/communities/barbara` calls return `404` and readers must sign in first.
 - **Test accounts:** ask the API team for staging credentials. Never commit credentials to the repository, config files, or tests.
 
 ## 10. Direct media upload
 
-Single-request `POST /v2/media` is capped at 100 MiB (Workers Free 100 MB request-body ceiling; images 10 MiB, TIFF/HEIC/PDF/DOCX 25 MiB, audio 50 MiB, video 100 MiB). Larger media (video up to 512 MiB, audio up to 200 MiB; other types keep their `POST /v2/media` cap) use the direct multipart routes (`src/routes/media-uploads.hono.ts`, `src/services/direct-upload.service.ts`).
+Single-request `POST /v2/media` is capped at 100 MiB by the API, but Workers Free rejects request bodies over 100 MB (about 95.4 MiB) at the edge with `413`, so on Workers switch to direct upload below 100 MB (the staging smoke uses 90 MB) (per-type caps: images 10 MiB, TIFF/HEIC/PDF/DOCX 25 MiB, audio 50 MiB, video 100 MiB). Larger media (video up to 512 MiB, audio up to 200 MiB; other types keep their `POST /v2/media` cap) use the direct multipart routes (`src/routes/media-uploads.hono.ts`, `src/services/direct-upload.service.ts`).
 
 ### 10.1 Create session (`POST /v2/media/uploads`)
 
 Send `Content-Type: application/json` with session credentials (`CreateDirectUploadRequestSchema`, `src/shared/schemas/media-uploads-v2.ts`):
 
-| Field         | Required | Rules                                                                                                         |
-| ------------- | -------- | ------------------------------------------------------------------------------------------------------------- |
-| `filename`    | yes      | 1–255 chars; extension must match `contentType`                                                               |
-| `contentType` | yes      | 1–127 chars; supported media MIME type                                                                        |
-| `size`        | yes      | Positive integer byte size, within per-type cap                                                               |
-| `sha256`      | yes      | 64-char hex SHA-256 of the whole file                                                                         |
-| `partSha256`  | yes      | Array of 64-char hex SHA-256 digests, one per part (`Math.ceil(size / partSize)` entries, 1–10,000 parts)     |
-| `partSize`    | no       | Integer bytes; default 16 MiB, allowed 16 MiB–64 MiB                                                          |
-| `role`        | no       | Omit for an unbound file (attach later with `POST /v2/attachments`); inline binding only accepts `user_photo` |
-| `ownerType`   | no       | With `role: "user_photo"`, must be `"user"`                                                                   |
-| `ownerId`     | no       | Positive integer (or numeric string) target user ID for `user_photo`                                          |
-| `metadata`    | no       | Optional flat key/value object (at most 16 keys, JSON <= 4096 chars)                                          |
+| Field         | Required | Rules                                                                                                                                                                                                                                                |
+| ------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `filename`    | yes      | 1–255 chars; extension must match `contentType`                                                                                                                                                                                                      |
+| `contentType` | yes      | 1–127 chars; supported media MIME type                                                                                                                                                                                                               |
+| `size`        | yes      | Positive integer byte size, within per-type cap                                                                                                                                                                                                      |
+| `sha256`      | yes      | 64-char hex SHA-256 of the whole file                                                                                                                                                                                                                |
+| `partSha256`  | yes      | Array of 64-char hex SHA-256 digests, one per part (`Math.ceil(size / partSize)` entries, 1–10,000 parts)                                                                                                                                            |
+| `partSize`    | no       | Integer bytes; default 16 MiB, allowed 16 MiB–64 MiB                                                                                                                                                                                                 |
+| `role`        | no       | Omit for an unbound file (attach later with `POST /v2/attachments`); only editors and admins may omit it. Viewers, members, super admins and users without a community must send `user_photo` (else `403`); inline binding only accepts `user_photo` |
+| `ownerType`   | no       | With `role: "user_photo"`, must be `"user"`                                                                                                                                                                                                          |
+| `ownerId`     | no       | Positive integer (or numeric string) target user ID for `user_photo`                                                                                                                                                                                 |
+| `metadata`    | no       | Optional flat key/value object (at most 16 keys, JSON <= 4096 chars)                                                                                                                                                                                 |
 
 Returns `201` with `{ data: { id, mode, expiresAt, partSize, partCount, maxBytes, parts } }`, where `mode` is `"presigned"` (Workers) or `"api"` (Node), and each `parts[]` target is `{ partNumber, method: "PUT", url, headers, size }`. Returns `501` if Workers R2 S3 credentials are not configured.
 
@@ -368,7 +368,7 @@ Slice the file into `partSize` chunks (the last part may be smaller; each slice 
 
 ### 10.3 Complete, re-presign, and abort
 
-- **Complete:** `POST /v2/media/uploads/:id/complete` (with credentials and `Content-Type: application/json`) sending `{ parts: [{ partNumber, etag }] }`. Returns `201` with the same `MediaUploadResponse` shape as `POST /v2/media` (`data.id`, `data.url`, `data.attachment`, etc.). On Workers (`mode: "presigned"`), completion checks total stored size and sniffs the first 8 KiB, and `data.checksum` is `null`; on Node (`mode: "api"`), completion verifies the assembled whole-file `sha256` (`422` on mismatch) and stores `data.checksum`. A `400` (`invalid_parts`) leaves the session open so failed/missing parts can be re-sent and completion retried.
+- **Complete:** `POST /v2/media/uploads/:id/complete` (with credentials and `Content-Type: application/json`) sending `{ parts: [{ partNumber, etag }] }`. Returns `201` with the same `MediaUploadResponse` shape as `POST /v2/media` (`data.id`, `data.url`, `data.attachment`, etc.). On Workers (`mode: "presigned"`), completion checks total stored size and sniffs the first 8 KiB, and `data.checksum` is `null`; on Node (`mode: "api"`), completion verifies the assembled whole-file `sha256` (`422` on mismatch) and stores `data.checksum`. A `400` `validation_error` whose `details.fields[0].path` is `"parts"` leaves the session open, so missing or failed parts can be re-sent and completion retried. A `400` with `path: "file"` (size or content sniff failure) discards the session and its staged bytes; start a new upload.
 - **Re-presign and session cap:** Sessions and part URLs expire after **2 hours** (`expiresAt`; completion allows a 15-minute grace window). Call `POST /v2/media/uploads/:id/parts/presign` (with credentials) to get fresh part targets and extend `expiresAt` (`200`, same response shape as create), up to a **12-hour absolute session cap** from creation (`410` after 12 h).
 - **Abort:** `DELETE /v2/media/uploads/:id` (with credentials) aborts an unfinished session and returns `204`.
 
@@ -390,6 +390,9 @@ async function directUpload(apiBase: string, file: File) {
     const slice = file.slice(offset, Math.min(offset + PART_SIZE, file.size));
     partSha256.push(await sha256Hex(await slice.arrayBuffer()));
   }
+  // Sketch only: hashing the whole file at once holds it in memory (512 MiB
+  // video). Production code should hash incrementally (for example a
+  // streaming SHA-256 library in a Web Worker).
   const sha256 = await sha256Hex(await file.arrayBuffer());
 
   const createRes = await fetch(`${apiBase}/v2/media/uploads`, {
@@ -398,11 +401,12 @@ async function directUpload(apiBase: string, file: File) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       filename: file.name,
-      contentType: file.type,
+      contentType: file.type || contentTypeFromExtension(file.name), // file.type is '' for unknown types; the API needs a non-empty MIME type
       size: file.size,
       sha256,
       partSize: PART_SIZE,
       partSha256,
+      // Editors and admins only; other roles must send role: 'user_photo'.
     }),
   });
   if (!createRes.ok) throw new Error(`create failed: ${createRes.status}`);
@@ -425,6 +429,7 @@ async function directUpload(apiBase: string, file: File) {
       throw new Error(`part ${target.partNumber} failed: ${putRes.status}`);
     }
     const etag = (putRes.headers.get('ETag') ?? '').replace(/^"|"$/g, '');
+    if (!etag) throw new Error(`part ${target.partNumber}: no ETag (CORS?)`);
     completedParts.push({ partNumber: target.partNumber, etag });
   }
 

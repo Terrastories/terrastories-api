@@ -1,8 +1,13 @@
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmdirSync,
+  rmSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -22,6 +27,11 @@ import {
   countCrons,
   parseJsonc,
 } from '../../scripts/staging/guards.js';
+// @ts-expect-error plain .mjs helper without types
+import {
+  splitJsonObjects,
+  tailRows,
+} from '../../scripts/staging/parse-tail.mjs';
 
 const ROOT = resolve(__dirname, '../..');
 const ACCOUNT = 'a'.repeat(32);
@@ -263,5 +273,909 @@ esac
     const r = run(bare);
     expect(r.status).not.toBe(0);
     expect(r.stderr).toMatch(/without a transform stamp/);
+  });
+});
+
+describe('load-community.sh --r2-via-wrangler (fake npx)', () => {
+  const work = mkdtempSync(join(tmpdir(), 'load-r2-'));
+  const bin = join(work, 'bin');
+  mkdirSync(bin);
+  const calls = join(work, 'calls.log');
+  const store = join(work, 'store');
+  mkdirSync(store);
+  // Fake wrangler: r2 object put copies to store; get copies back (or fails).
+  writeFileSync(
+    join(bin, 'npx'),
+    `#!/usr/bin/env bash
+case "$*" in
+  *whoami*) echo "Account ${ACCOUNT}" ; exit 0 ;;
+  *tsx*) shift; shift; exec "${ROOT}/node_modules/.bin/tsx" "$@" ;;
+esac
+echo "$*" >> "${calls}"
+args=("$@")
+if [ "\${args[1]}" = r2 ] && [ "\${args[2]}" = object ]; then
+  op="\${args[3]}"; key="\${args[4]//\\//_}"
+  for i in "\${!args[@]}"; do [ "\${args[$i]}" = --file ] && f="\${args[$((i+1))]}"; done
+  if [ "$op" = put ]; then cp "$f" "${store}/$key"; fi
+  if [ "$op" = get ]; then
+    if [ ! -f "${store}/$key" ]; then echo "The specified key does not exist." >&2; exit 1; fi
+    cp "${store}/$key" "$f"
+  fi
+fi
+exit 0
+`
+  );
+  writeFileSync(join(bin, 'npm'), '#!/usr/bin/env bash\nexit 0\n');
+  chmodSync(join(bin, 'npx'), 0o755);
+  chmodSync(join(bin, 'npm'), 0o755);
+  const transform = join(work, 'transform');
+  mkdirSync(join(transform, 'v2-media'), { recursive: true });
+  writeFileSync(join(transform, 'manifest.json'), '{"a":1}');
+  writeFileSync(join(transform, 'v2-media', 'k1'), 'hello');
+  const sqlOut = join(work, 'sql');
+  mkdirSync(sqlOut);
+  writeFileSync(join(sqlOut, 'd1-import.json'), '{"files":[]}');
+  writeFileSync(join(sqlOut, '.backup-done'), '');
+  writeFileSync(
+    join(sqlOut, 'r2-upload-manifest.json'),
+    JSON.stringify({
+      formatVersion: 1,
+      objects: [
+        {
+          key: 'k1',
+          size: 5,
+          sha256:
+            '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
+          contentType: 'video/mp4',
+        },
+      ],
+    })
+  );
+  const stamp = spawnSync('bash', [
+    '-c',
+    `printf '%s' "$(sha256sum "${transform}/manifest.json" | cut -d' ' -f1)" > "${sqlOut}/.transform-manifest.sha256"`,
+  ]);
+  expect(stamp.status).toBe(0);
+  const env = {
+    ...process.env,
+    PATH: `${bin}:${process.env.PATH}`,
+    CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
+    R2_ACCESS_KEY_ID: '',
+    R2_SECRET_ACCESS_KEY: '',
+    R2_ACCOUNT_ID: '',
+  };
+  const run = (extra: string[]) =>
+    spawnSync(
+      'bash',
+      [
+        'scripts/staging/load-community.sh',
+        '--transform-output',
+        transform,
+        '--sql-out',
+        sqlOut,
+        '--apply',
+        ...extra,
+      ],
+      { cwd: ROOT, encoding: 'utf8', env }
+    );
+
+  it('refuses the S3 path without credentials', () => {
+    const r = run([]);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/--r2-via-wrangler/);
+  });
+
+  it('refuses the whole wrangler path when an object is over 300 MiB', () => {
+    const manifest = join(sqlOut, 'r2-upload-manifest.json');
+    const original = readFileSync(manifest, 'utf8');
+    writeFileSync(
+      manifest,
+      JSON.stringify({
+        formatVersion: 1,
+        objects: [
+          {
+            key: 'big',
+            size: 400 * 1024 * 1024,
+            sha256: 'y',
+            contentType: 'video/mp4',
+          },
+        ],
+      })
+    );
+    try {
+      const r = run(['--r2-via-wrangler']);
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toMatch(/over 300 MiB/);
+    } finally {
+      writeFileSync(manifest, original);
+    }
+  });
+
+  it('puts with content-type, verifies, and skips on rerun', () => {
+    const r = run(['--r2-via-wrangler']);
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(r.stdout).toMatch(/uploaded=1 already_present=0/);
+    const log = readFileSync(calls, 'utf8');
+    expect(log).toMatch(
+      /r2 object put terrastories-staging-media\/k1 --remote --file .*--content-type video\/mp4/
+    );
+    const again = run(['--r2-via-wrangler']);
+    expect(again.stdout).toMatch(/uploaded=0 already_present=1/);
+  });
+});
+
+describe('load-community.sh --r2-via-wrangler fail-closed get (fake npx)', () => {
+  // A fresh work dir per scenario. The fake wrangler stores objects under
+  // store/, logs every r2 call, and answers a missing key exactly like real
+  // wrangler ("The specified key does not exist.", exit 1). R2_GET_ERROR
+  // simulates a read failure that is NOT a not-found (a 403 from the R2 API).
+  const setup = () => {
+    const work = mkdtempSync(join(tmpdir(), 'load-r2-failclosed-'));
+    const bin = join(work, 'bin');
+    mkdirSync(bin);
+    const calls = join(work, 'calls.log');
+    const store = join(work, 'store');
+    mkdirSync(store);
+    writeFileSync(
+      join(bin, 'npx'),
+      `#!/usr/bin/env bash
+case "$*" in
+  *whoami*) echo "Account ${ACCOUNT}" ; exit 0 ;;
+  *tsx*) shift; shift; exec "${ROOT}/node_modules/.bin/tsx" "$@" ;;
+esac
+echo "$*" >> "${calls}"
+args=("$@")
+if [ "\${args[1]}" = r2 ] && [ "\${args[2]}" = object ]; then
+  op="\${args[3]}"; key="\${args[4]//\\//_}"
+  for i in "\${!args[@]}"; do [ "\${args[$i]}" = --file ] && f="\${args[$((i+1))]}"; done
+  if [ "$op" = put ]; then cp "$f" "${store}/$key"; fi
+  if [ "$op" = get ]; then
+    if [ -n "\${R2_GET_ERROR:-}" ]; then
+      echo "Failed to fetch /accounts/x/r2/buckets/b/objects/$key - 403: Forbidden;" >&2
+      exit 1
+    fi
+    if [ ! -f "${store}/$key" ]; then echo "The specified key does not exist." >&2; exit 1; fi
+    cp "${store}/$key" "$f"
+  fi
+fi
+exit 0
+`
+    );
+    writeFileSync(join(bin, 'npm'), '#!/usr/bin/env bash\nexit 0\n');
+    chmodSync(join(bin, 'npx'), 0o755);
+    chmodSync(join(bin, 'npm'), 0o755);
+    const transform = join(work, 'transform');
+    mkdirSync(join(transform, 'v2-media'), { recursive: true });
+    writeFileSync(join(transform, 'manifest.json'), '{"a":1}');
+    const body = 'hello';
+    writeFileSync(join(transform, 'v2-media', 'k1'), body);
+    const sha = createHash('sha256').update(body).digest('hex');
+    const sqlOut = join(work, 'sql');
+    mkdirSync(sqlOut);
+    writeFileSync(join(sqlOut, 'd1-import.json'), '{"files":[]}');
+    writeFileSync(join(sqlOut, '.backup-done'), '');
+    writeFileSync(
+      join(sqlOut, 'r2-upload-manifest.json'),
+      JSON.stringify({
+        formatVersion: 1,
+        objects: [
+          {
+            key: 'k1',
+            size: body.length,
+            sha256: sha,
+            contentType: 'video/mp4',
+          },
+        ],
+      })
+    );
+    writeFileSync(
+      join(sqlOut, '.transform-manifest.sha256'),
+      createHash('sha256').update('{"a":1}').digest('hex')
+    );
+    const run = (env: Record<string, string> = {}) =>
+      spawnSync(
+        'bash',
+        [
+          'scripts/staging/load-community.sh',
+          '--transform-output',
+          transform,
+          '--sql-out',
+          sqlOut,
+          '--apply',
+          '--r2-via-wrangler',
+        ],
+        {
+          cwd: ROOT,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
+            R2_ACCESS_KEY_ID: '',
+            R2_SECRET_ACCESS_KEY: '',
+            R2_ACCOUNT_ID: '',
+            ...env,
+          },
+        }
+      );
+    return { calls, store, run };
+  };
+  // the fake wrangler flattens bucket/key into one store filename
+  const stored = 'terrastories-staging-media_k1';
+
+  it('absent object: confirmed not-found leads to put and verify', () => {
+    const { calls, store, run } = setup();
+    const r = run();
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(r.stdout).toMatch(/uploaded=1 already_present=0/);
+    const log = readFileSync(calls, 'utf8');
+    expect(log).toMatch(/r2 object get terrastories-staging-media\/k1/);
+    expect(log).toMatch(/r2 object put terrastories-staging-media\/k1/);
+    expect(readFileSync(join(store, stored), 'utf8')).toBe('hello');
+  });
+
+  it('present and matching: skip, never put', () => {
+    const { calls, store, run } = setup();
+    writeFileSync(join(store, stored), 'hello');
+    const r = run();
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(r.stdout).toMatch(/uploaded=0 already_present=1/);
+    expect(readFileSync(calls, 'utf8')).not.toMatch(/r2 object put/);
+  });
+
+  it('present with a different sha256: die without overwriting', () => {
+    const { calls, store, run } = setup();
+    writeFileSync(join(store, stored), 'HELLO');
+    const r = run();
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/does not match the manifest/);
+    expect(readFileSync(calls, 'utf8')).not.toMatch(/r2 object put/);
+    expect(readFileSync(join(store, stored), 'utf8')).toBe('HELLO');
+  });
+
+  it('present with a different size: die without overwriting', () => {
+    const { calls, store, run } = setup();
+    writeFileSync(join(store, stored), 'hello world');
+    const r = run();
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/does not match the manifest/);
+    expect(readFileSync(calls, 'utf8')).not.toMatch(/r2 object put/);
+    expect(readFileSync(join(store, stored), 'utf8')).toBe('hello world');
+  });
+
+  it('get error that is not not-found: die without put, object untouched', () => {
+    const { calls, store, run } = setup();
+    // the object EXISTS: a blind put would overwrite it (and any S3 checksum
+    // metadata it carries), so the read error must abort the load instead
+    writeFileSync(join(store, stored), 'hello');
+    const r = run({ R2_GET_ERROR: '1' });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/without confirming the key is absent/);
+    expect(readFileSync(calls, 'utf8')).not.toMatch(/r2 object put/);
+    expect(readFileSync(join(store, stored), 'utf8')).toBe('hello');
+  });
+});
+
+describe('staging script --help', () => {
+  it('load-community.sh prints the whole header, not a fixed line range', () => {
+    const r = spawnSync(
+      'bash',
+      ['scripts/staging/load-community.sh', '--help'],
+      { cwd: ROOT, encoding: 'utf8' }
+    );
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain('--r2-via-wrangler');
+    // the last header line, beyond the old fixed sed range
+    expect(r.stdout).toContain('env -u CLOUDFLARE_API_TOKEN');
+    expect(r.stdout).not.toContain('set -euo pipefail');
+  });
+
+  it('smoke.sh prints the whole header, not a fixed line range', () => {
+    const r = spawnSync('bash', ['scripts/staging/smoke.sh', '--help'], {
+      cwd: ROOT,
+      encoding: 'utf8',
+    });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain('--skip-r2-probe');
+    // the last header line, beyond the old fixed sed range
+    expect(r.stdout).toContain(
+      '(not required with --skip-r2-probe or --local)'
+    );
+    expect(r.stdout).not.toContain('set -euo pipefail');
+  });
+});
+
+describe('load-community.sh --r2-via-wrangler empty fields (fake npx)', () => {
+  const work = mkdtempSync(join(tmpdir(), 'load-r2-empty-'));
+  const bin = join(work, 'bin');
+  mkdirSync(bin);
+  const calls = join(work, 'calls.log');
+  const store = join(work, 'store');
+  mkdirSync(store);
+  writeFileSync(
+    join(bin, 'npx'),
+    `#!/usr/bin/env bash
+case "$*" in
+  *whoami*) echo "Account ${ACCOUNT}" ; exit 0 ;;
+  *tsx*) shift; shift; exec "${ROOT}/node_modules/.bin/tsx" "$@" ;;
+esac
+echo "$*" >> "${calls}"
+args=("$@")
+if [ "\${args[1]}" = r2 ] && [ "\${args[2]}" = object ]; then
+  op="\${args[3]}"; key="\${args[4]//\\//_}"
+  for i in "\${!args[@]}"; do [ "\${args[$i]}" = --file ] && f="\${args[$((i+1))]}"; done
+  if [ "$op" = put ]; then cp "$f" "${store}/$key"; fi
+  if [ "$op" = get ]; then
+    if [ ! -f "${store}/$key" ]; then echo "The specified key does not exist." >&2; exit 1; fi
+    cp "${store}/$key" "$f"
+  fi
+fi
+exit 0
+`
+  );
+  writeFileSync(join(bin, 'npm'), '#!/usr/bin/env bash\nexit 0\n');
+  chmodSync(join(bin, 'npx'), 0o755);
+  chmodSync(join(bin, 'npm'), 0o755);
+  const transform = join(work, 'transform');
+  mkdirSync(join(transform, 'v2-media'), { recursive: true });
+  writeFileSync(join(transform, 'manifest.json'), '{"a":1}');
+  const body = 'world';
+  writeFileSync(join(transform, 'v2-media', 'k2'), body);
+  const sha = createHash('sha256').update(body).digest('hex');
+  const sqlOut = join(work, 'sql');
+  mkdirSync(sqlOut);
+  writeFileSync(join(sqlOut, 'd1-import.json'), '{"files":[]}');
+  writeFileSync(join(sqlOut, '.backup-done'), '');
+  // an empty contentType sits between size and sha256: with a whitespace IFS
+  // separator the fields would collapse and the sha check would fail
+  writeFileSync(
+    join(sqlOut, 'r2-upload-manifest.json'),
+    JSON.stringify({
+      formatVersion: 1,
+      objects: [{ key: 'k2', size: body.length, sha256: sha, contentType: '' }],
+    })
+  );
+  const stamp = spawnSync('bash', [
+    '-c',
+    `printf '%s' "$(sha256sum "${transform}/manifest.json" | cut -d' ' -f1)" > "${sqlOut}/.transform-manifest.sha256"`,
+  ]);
+  expect(stamp.status).toBe(0);
+
+  it('uploads and verifies an object whose contentType is empty', () => {
+    const r = spawnSync(
+      'bash',
+      [
+        'scripts/staging/load-community.sh',
+        '--transform-output',
+        transform,
+        '--sql-out',
+        sqlOut,
+        '--apply',
+        '--r2-via-wrangler',
+      ],
+      {
+        cwd: ROOT,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
+          R2_ACCESS_KEY_ID: '',
+          R2_SECRET_ACCESS_KEY: '',
+          R2_ACCOUNT_ID: '',
+        },
+      }
+    );
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(r.stdout).toMatch(/uploaded=1 already_present=0/);
+    // the empty contentType stays the last argument; fields did not shift
+    expect(readFileSync(calls, 'utf8')).toMatch(/--content-type\s*$/m);
+  });
+});
+
+describe('parse-tail.mjs', () => {
+  it('reads pretty-printed concatenated JSON', () => {
+    const ev = (cpu: number) =>
+      JSON.stringify(
+        {
+          outcome: 'ok',
+          cpuTime: cpu,
+          wallTime: 9,
+          event: {
+            request: { method: 'POST', url: 'https://x/v2/media?a={b}' },
+          },
+          logs: [{ message: ['brace } in "string"'] }],
+        },
+        null,
+        2
+      );
+    const text = ev(9) + '\n' + ev(18) + '\n';
+    expect(splitJsonObjects(text)).toHaveLength(2);
+    expect(tailRows(text)).toEqual([
+      ['POST', 'https://x/v2/media', 'ok', 9, 9],
+      ['POST', 'https://x/v2/media', 'ok', 18, 9],
+    ]);
+  });
+
+  it('runs as a CLI when invoked with a relative script path', () => {
+    const work = mkdtempSync(join(tmpdir(), 'tail-cli-'));
+    const data = join(work, 'tail.json');
+    writeFileSync(
+      data,
+      JSON.stringify({
+        outcome: 'ok',
+        cpuTime: 3,
+        wallTime: 4,
+        event: { request: { method: 'GET', url: 'https://x/health?q=1' } },
+      })
+    );
+    const r = spawnSync(
+      process.execPath,
+      ['scripts/staging/parse-tail.mjs', data],
+      { cwd: ROOT, encoding: 'utf8' }
+    );
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout.split('\n')[0]).toBe(
+      'method\turl\toutcome\tcpuTime_ms\twallTime_ms'
+    );
+    expect(r.stdout).toContain('GET\thttps://x/health\tok\t3\t4');
+  });
+});
+
+describe('smoke.sh walkthrough gating (fake npm)', () => {
+  const work = mkdtempSync(join(tmpdir(), 'smoke-'));
+  const bin = join(work, 'bin');
+  mkdirSync(bin);
+  writeFileSync(
+    join(bin, 'npm'),
+    '#!/usr/bin/env bash\necho "npm $*" >> "${NPM_LOG}"\nexit "${NPM_RC:-0}"\n'
+  );
+  chmodSync(join(bin, 'npm'), 0o755);
+  const run = (args: string[]) =>
+    spawnSync('bash', ['scripts/staging/smoke.sh', '--local', ...args], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        STAGING_URL: 'http://127.0.0.1:9',
+        NPM_LOG: join(work, 'npm.log'),
+      },
+    });
+
+  it('skips the walkthrough with --skip-walkthrough', () => {
+    const r = run(['--skip-walkthrough']);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toMatch(/walkthrough skipped/);
+    expect(r.stdout).not.toMatch(/npm run walkthrough/);
+  });
+
+  it('cpu procedure has no --env on tail and no role on upload', () => {
+    const r = run(['--cpu-procedure']);
+    expect(r.stdout).toMatch(
+      /wrangler tail terrastories-staging-api --format json/
+    );
+    expect(r.stdout).not.toMatch(/tail .*--env/);
+    expect(r.stdout).not.toMatch(/role=story_media/);
+    expect(r.stdout).toMatch(/parse-tail\.mjs/);
+  });
+
+  it('cpu procedure is a concrete 300 MB create -> parts -> complete flow', () => {
+    const r = run(['--cpu-procedure']);
+    expect(r.status, r.stderr).toBe(0);
+    // the helper and the exact routes/bodies of the direct-upload contract
+    expect(r.stdout).toContain('scripts/staging/upload-large.ts --file');
+    expect(r.stdout).toContain('--dry-run');
+    expect(r.stdout).toContain('POST $STAGING_URL/v2/media/uploads');
+    expect(r.stdout).toContain('partSha256');
+    expect(r.stdout).toContain('EXACTLY its returned headers');
+    expect(r.stdout).toContain('{parts: [{partNumber, etag}]}');
+    expect(r.stdout).toContain('DELETEs /v2/media/<fileId>');
+    // 2xx required everywhere; cpuTime AND wallTime for create AND complete
+    expect(r.stdout).toMatch(/require 2xx for every part/);
+    expect(r.stdout).toContain('(create) AND POST .../complete');
+    expect(r.stdout).toMatch(/cpuTime \(ms\), wallTime \(ms\)/);
+    // the old pointer at a walkthrough that never calls /v2/media/uploads
+    expect(r.stdout).not.toContain('walkthrough media chapter');
+    expect(r.stdout).not.toContain('record the complete call only');
+  });
+});
+
+describe('smoke.sh --apply gating (fake npm, curl, date)', () => {
+  const work = mkdtempSync(join(tmpdir(), 'smoke-apply-'));
+  const bin = join(work, 'bin');
+  mkdirSync(bin);
+  // Fake npm: when WT_RESULTS_FIXTURE is set, play the walkthrough far enough
+  // to copy that results.json into the --out directory smoke passes.
+  writeFileSync(
+    join(bin, 'npm'),
+    `#!/usr/bin/env bash
+echo "npm $*" >> "\${NPM_LOG}"
+if [ -n "\${WT_RESULTS_FIXTURE:-}" ]; then
+  out=""
+  args=("$@")
+  for i in "\${!args[@]}"; do
+    if [ "\${args[$i]}" = --out ]; then out="\${args[$((i+1))]}"; fi
+  done
+  if [ -n "$out" ]; then mkdir -p "$out"; cp "$WT_RESULTS_FIXTURE" "$out/results.json"; fi
+fi
+exit "\${NPM_RC:-0}"
+`
+  );
+  // Fake curl: /health answers 200, everything else 404 (dev routes absent).
+  writeFileSync(
+    join(bin, 'curl'),
+    `#!/usr/bin/env bash
+# The R2 CORS preflight (OPTIONS) gets an allowing answer for FAKE_ORIGIN.
+for a in "$@"; do
+  if [ "$a" = OPTIONS ]; then
+    printf 'HTTP/2 204\\r\\naccess-control-allow-origin: %s\\r\\naccess-control-allow-methods: PUT\\r\\naccess-control-allow-headers: x-amz-content-sha256\\r\\n\\r\\n' "\${FAKE_ORIGIN:-}"
+    exit 0
+  fi
+done
+for a in "$@"; do url="$a"; done
+case "$url" in
+  */health) printf 200 ;;
+  *) printf 404 ;;
+esac
+exit "\${FAKE_CURL_RC:-0}"
+`
+  );
+  // Fake date: the first two 'date -u +%F' calls (TODAY and the walkthrough
+  // START day) say 2026-01-01; any later one says 2026-01-02, so a marker that
+  // wrongly used the END time would be observable. Other formats (the
+  // walkthrough out-dir stamp) stay fixed at 20260101T000000Z.
+  writeFileSync(
+    join(bin, 'date'),
+    `#!/usr/bin/env bash
+case "$*" in
+  *+%F*)
+    n="$(cat "$DATE_STATE" 2>/dev/null || echo 0)"
+    n=$((n+1)); printf '%s' "$n" > "$DATE_STATE"
+    if [ "$n" -le 2 ]; then echo 2026-01-01; else echo 2026-01-02; fi ;;
+  *) echo 20260101T000000Z ;;
+esac
+`
+  );
+  // Fake npx: the R2 part-checksum probe exits with FAKE_PROBE_RC.
+  writeFileSync(
+    join(bin, 'npx'),
+    `#!/usr/bin/env bash
+# Only the probe is faked; guards and everything else run the real npx.
+case "$*" in
+  *verify-r2-part-checksum*)
+    echo "npx $*" >> "\${NPM_LOG}"
+    exit "\${FAKE_PROBE_RC:-0}" ;;
+esac
+PATH="\${PATH#*:}" exec npx "$@"
+`
+  );
+  for (const f of ['npm', 'curl', 'date', 'npx'])
+    chmodSync(join(bin, f), 0o755);
+  const LOCAL_URL = 'http://127.0.0.1:9';
+  const REMOTE_URL = 'https://terrastories-staging-api.x.workers.dev';
+  const run = (
+    args: string[],
+    env: Record<string, string> = {},
+    url = LOCAL_URL
+  ) =>
+    spawnSync('bash', ['scripts/staging/smoke.sh', ...args], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        STAGING_URL: url,
+        NPM_LOG: join(work, 'npm.log'),
+        DATE_STATE: join(work, 'date.state'),
+        STAGING_MARKER_DIR: join(work, 'marker-out'),
+        WT_SUPER_IDENTIFIER: '',
+        WT_SUPER_PASSWORD: '',
+        R2_ACCOUNT_ID: '',
+        R2_ACCESS_KEY_ID: '',
+        R2_SECRET_ACCESS_KEY: '',
+        R2_BUCKET_NAME: '',
+        ...env,
+      },
+    });
+
+  it('--apply --skip-walkthrough needs no walkthrough credentials', () => {
+    const r = run(['--apply', '--local', '--skip-walkthrough']);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toMatch(/walkthrough skipped/);
+  });
+
+  it('--apply still requires credentials when the walkthrough will run', () => {
+    const r = run(['--apply', '--local']);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/WT_SUPER_IDENTIFIER/);
+  });
+
+  // The marker must record the UTC day the import COMMITTED: prefer the
+  // commit step's timestamp in the walkthrough's results.json, fall back to
+  // the walkthrough START day, never the end time (fake date: the first two
+  // +%F calls say 2026-01-01, any later one says 2026-01-02).
+  const hash = createHash('sha256')
+    .update(LOCAL_URL)
+    .digest('hex')
+    .slice(0, 12);
+  // Markers and walkthrough output live in a temp dir (STAGING_MARKER_DIR),
+  // never in the repo's real walkthrough-out/.
+  const markDir = join(work, 'marker-out');
+  const mark = join(markDir, '.staging-import-utc-day-' + hash);
+  const wtOut = join(markDir, 'staging-20260101T000000Z');
+  const cleanMarker = () => {
+    if (existsSync(mark)) unlinkSync(mark);
+    if (existsSync(wtOut)) rmSync(wtOut, { recursive: true, force: true });
+  };
+  const runWithResults = (steps: unknown) =>
+    runWithRaw(JSON.stringify({ runId: 'wt-test', steps }));
+  const runWithRaw = (text: string) => {
+    const fixture = join(work, 'results-fixture.json');
+    writeFileSync(fixture, text);
+    writeFileSync(join(work, 'date.state'), '0');
+    cleanMarker();
+    try {
+      const r = run(['--apply', '--local'], {
+        WT_SUPER_IDENTIFIER: 'test-super',
+        WT_SUPER_PASSWORD: 'test-password',
+        WT_RESULTS_FIXTURE: fixture,
+      });
+      expect(r.status, r.stderr + r.stdout).toBe(0);
+      expect(r.stdout).toMatch(/npm run walkthrough/);
+      return existsSync(mark) ? readFileSync(mark, 'utf8').trim() : null;
+    } finally {
+      cleanMarker();
+    }
+  };
+
+  it('marker falls back to the walkthrough START day, never the end time', () => {
+    // no results.json: the fake npm writes nothing without a fixture
+    writeFileSync(join(work, 'date.state'), '0');
+    cleanMarker();
+    try {
+      const r = run(['--apply', '--local'], {
+        WT_SUPER_IDENTIFIER: 'test-super',
+        WT_SUPER_PASSWORD: 'test-password',
+      });
+      expect(r.status, r.stderr + r.stdout).toBe(0);
+      expect(r.stdout).toMatch(/npm run walkthrough/);
+      // start day was 2026-01-01; an end-time marker would say 2026-01-02
+      expect(readFileSync(mark, 'utf8').trim()).toBe('2026-01-01');
+    } finally {
+      cleanMarker();
+    }
+  });
+
+  it('marker records the commit day from results.json, ignoring the 429 retry', () => {
+    // committed just before midnight; the run (and a refused second commit)
+    // ended on the next day: the marker must stay on the commit day
+    const day = runWithResults([
+      {
+        outcome: 'pass',
+        method: 'POST',
+        path: '/v2/imports/7/commit',
+        status: 201,
+        at: '2026-01-01T23:59:50.000Z',
+      },
+      {
+        outcome: 'pass',
+        method: 'POST',
+        path: '/v2/imports/8/commit',
+        status: 429,
+        at: '2026-01-02T00:00:05.000Z',
+      },
+    ]);
+    expect(day).toBe('2026-01-01');
+  });
+
+  it('marker follows a commit that happened after midnight', () => {
+    const day = runWithResults([
+      {
+        outcome: 'pass',
+        method: 'POST',
+        path: '/v2/imports/7/commit',
+        status: 200,
+        at: '2026-01-02T00:00:10.000Z',
+      },
+    ]);
+    expect(day).toBe('2026-01-02');
+  });
+
+  it('marker prefers the server commit timestamp over the client response time', () => {
+    // server committed before midnight; the response reached the client after
+    const day = runWithResults([
+      {
+        outcome: 'pass',
+        method: 'POST',
+        path: '/v2/imports/7/commit',
+        status: 201,
+        serverAt: '2026-01-01T23:59:59.900Z',
+        at: '2026-01-02T00:00:00.400Z',
+      },
+    ]);
+    expect(day).toBe('2026-01-01');
+  });
+
+  it('writes NO marker when results.json parses but has no passing commit', () => {
+    const day = runWithResults([
+      {
+        outcome: 'skip',
+        method: 'POST',
+        path: '/v2/imports/7/commit',
+        at: '2026-01-01T10:00:00.000Z',
+      },
+      { outcome: 'pass', method: 'GET', path: '/health', status: 200 },
+    ]);
+    expect(day).toBeNull();
+  });
+
+  it('writes NO marker on a wrong-shape results.json (never the fallback)', () => {
+    expect(runWithResults({})).toBeNull();
+    expect(runWithResults([null])).toBeNull();
+    expect(runWithRaw('[]')).toBeNull();
+    // An array entry or a non-string path never counts as a commit step.
+    const commit = {
+      outcome: 'pass',
+      method: 'POST',
+      path: '/v2/imports/7/commit',
+      status: 200,
+      serverAt: '2026-01-03T10:00:00.000Z',
+    };
+    expect(runWithResults([[], commit])).toBeNull();
+    expect(
+      runWithResults([{ ...commit, path: ['/v2/imports/7/commit'] }])
+    ).toBeNull();
+  });
+
+  it('falls back to the START day when results.json is not valid JSON', () => {
+    expect(runWithRaw('{ not json')).toBe('2026-01-01');
+  });
+
+  it('resolves a relative STAGING_MARKER_DIR against the caller cwd', () => {
+    const cwd = mkdtempSync(join(work, 'cwd-'));
+    writeFileSync(join(work, 'date.state'), '0');
+    const relFixture = join(work, 'rel-results.json');
+    writeFileSync(
+      relFixture,
+      JSON.stringify({
+        runId: 'wt-rel',
+        steps: [
+          {
+            outcome: 'pass',
+            method: 'POST',
+            path: '/v2/imports/7/commit',
+            status: 200,
+            serverAt: '2026-01-05T12:00:00.000Z',
+          },
+        ],
+      })
+    );
+    const r = spawnSync(
+      'bash',
+      [join(ROOT, 'scripts/staging/smoke.sh'), '--apply', '--local'],
+      {
+        cwd,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          STAGING_URL: LOCAL_URL,
+          NPM_LOG: join(work, 'npm.log'),
+          DATE_STATE: join(work, 'date.state'),
+          STAGING_MARKER_DIR: 'rel-out',
+          // A real commit day (not the start-day fallback) proves smoke read
+          // the results.json the walkthrough wrote under the resolved dir.
+          WT_RESULTS_FIXTURE: relFixture,
+          WT_SUPER_IDENTIFIER: 'test-super',
+          WT_SUPER_PASSWORD: 'test-password',
+        },
+      }
+    );
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(
+      readFileSync(
+        join(cwd, 'rel-out', '.staging-import-utc-day-' + hash),
+        'utf8'
+      ).trim()
+    ).toBe('2026-01-05');
+    expect(existsSync(join(ROOT, 'rel-out'))).toBe(false);
+  });
+
+  it('marker-skip branch says so and ends with a walkthrough NOT run summary', () => {
+    writeFileSync(join(work, 'date.state'), '0');
+    cleanMarker();
+    mkdirSync(markDir, { recursive: true });
+    writeFileSync(mark, '2026-01-01\n');
+    try {
+      const r = run(['--apply', '--local'], {});
+      expect(r.status, r.stderr + r.stdout).toBe(0);
+      expect(r.stdout).toMatch(/walkthrough already ran today/);
+      expect(r.stdout).toMatch(/summary: walkthrough NOT run \(/);
+      expect(r.stdout).not.toMatch(/npm run walkthrough/);
+    } finally {
+      cleanMarker();
+    }
+  });
+
+  it('--skip-walkthrough ends with a walkthrough NOT run summary', () => {
+    const r = run(['--apply', '--local', '--skip-walkthrough']);
+    expect(r.stdout).toMatch(
+      /summary: walkthrough NOT run \(--skip-walkthrough/
+    );
+  });
+
+  it('--apply fails when curl exits non-zero even if it printed the expected code', () => {
+    const r = run(['--apply', '--local', '--skip-walkthrough'], {
+      FAKE_CURL_RC: '18',
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/curl failed on GET \/health \(exit 18\)/);
+  });
+
+  it('cpu procedure never puts the cookie on the curl command line', () => {
+    const r = run(['--cpu-procedure']);
+    expect(r.stdout).not.toMatch(/-H "Cookie:/);
+    expect(r.stdout).toContain('-H @"$f"');
+    expect(r.stdout).toContain('mktemp');
+    expect(r.stdout).toContain('rm -f "$f"');
+    expect(r.stdout).not.toContain('cookie.hdr');
+  });
+
+  it('--skip-r2-probe records the probe as NOT done, never a pass', () => {
+    const r = run(
+      ['--apply', '--skip-walkthrough', '--skip-r2-probe'],
+      {},
+      REMOTE_URL
+    );
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(r.stdout).toMatch(/R2 probe skipped: not verified/);
+    expect(r.stdout).toMatch(/summary: R2 part-checksum probe NOT done/);
+    expect(r.stdout).not.toMatch(/verify-r2-part-checksum/);
+    expect(r.stdout).not.toMatch(/done: enforced/);
+  });
+
+  it('dry run with --skip-r2-probe prints the skip and no probe command', () => {
+    const r = run(['--skip-r2-probe'], {}, REMOTE_URL);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toMatch(/R2 probe skipped: not verified/);
+    expect(r.stdout).toMatch(/summary: R2 part-checksum probe NOT done/);
+    expect(r.stdout).not.toMatch(/verify-r2-part-checksum/);
+  });
+
+  const probeEnv = (rc: string) => ({
+    R2_ACCOUNT_ID: 'a'.repeat(32),
+    R2_ACCESS_KEY_ID: 'test-key-id',
+    R2_SECRET_ACCESS_KEY: 'test-secret',
+    R2_BUCKET_NAME: 'terrastories-staging-media',
+    STAGING_FRONTEND_ORIGIN: 'https://app.terrastories-staging.example.org',
+    FAKE_ORIGIN: 'https://app.terrastories-staging.example.org',
+    FAKE_PROBE_RC: rc,
+  });
+
+  it('an apply run with an enforced probe (exit 0) passes after the CORS preflight', () => {
+    const r = run(['--apply', '--skip-walkthrough'], probeEnv('0'), REMOTE_URL);
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(r.stdout).toMatch(/CORS preflight allowed/);
+    expect(r.stdout).toMatch(/summary: R2 part-checksum probe done: enforced/);
+  });
+
+  it('fails when R2 accepts corrupted part bytes (probe exit 2), never records it', () => {
+    const r = run(['--apply', '--skip-walkthrough'], probeEnv('2'), REMOTE_URL);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr + r.stdout).toMatch(/R2 ACCEPTED corrupted part bytes/);
+    expect(r.stdout).not.toMatch(/recorded, not a failure/);
+  });
+
+  it('fails when the probe is inconclusive (exit 1)', () => {
+    const r = run(['--apply', '--skip-walkthrough'], probeEnv('1'), REMOTE_URL);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr + r.stdout).toMatch(/probe inconclusive \(exit 1\)/);
+  });
+
+  it('without --skip-r2-probe an apply run still fails closed on missing R2 creds', () => {
+    const r = run(['--apply', '--skip-walkthrough'], {}, REMOTE_URL);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/R2_ACCOUNT_ID/);
   });
 });

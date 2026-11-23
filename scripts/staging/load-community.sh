@@ -3,6 +3,7 @@
 #
 #   scripts/staging/load-community.sh --transform-output DIR [--sql-out DIR]
 #       [--apply] [--wipe-and-retry] [--allow-over-budget] [--skip-r2]
+#       [--r2-via-wrangler]
 #
 # Flow (each step resumable; rerun the same command after a failure):
 #   1. migrate:rails:load --target d1 --dry-run   (row budget check)
@@ -11,7 +12,17 @@
 #   4. [apply] wrangler d1 migrations apply --remote
 #   5. [apply] execute SQL files in d1-import.json order, skipping files already
 #      in the _rails_migration_load ledger
-#   6. [apply] migrate:rails:load --target r2 (dry run, then real)
+#   6. [apply] migrate:rails:load --target r2 (dry run, then real); or, with
+#      --r2-via-wrangler (no R2_* S3 credentials), 'wrangler r2 object put
+#      --remote --content-type' per r2-upload-manifest.json entry, each object
+#      verified afterwards by 'wrangler r2 object get' (size and sha256). Reruns
+#      skip objects already present and matching. An object is uploaded ONLY
+#      when wrangler confirms the key is absent ("The specified key does not
+#      exist."); any other read error, or an existing object whose size/sha256
+#      does not match the manifest, aborts the load without overwriting. If
+#      any object is over 300 MiB (wrangler limit) the whole path is refused
+#      up front: the S3 loader needs x-amz-meta-sha256 on existing objects,
+#      which wrangler cannot set, so do not mix the two paths in one bucket.
 #   7. [apply] verify.sql
 # Prints counts and step status only. Wrangler output goes to a mode-600 log
 # under the --sql-out directory, never to the terminal.
@@ -20,13 +31,15 @@
 # Resume safety: the SQL dump directory records the SHA-256 of the transform
 # output's manifest.json (.transform-manifest.sha256); a directory made from a
 # different transform output is refused, never reused.
-# Env: CLOUDFLARE_ACCOUNT_ID (resource names are fixed); for r2:
+# Env: CLOUDFLARE_ACCOUNT_ID (resource names are fixed); for r2 (S3 path):
 #   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY (environment only).
+#   A CLOUDFLARE_API_TOKEN exported for another account breaks wrangler: run
+#   with 'env -u CLOUDFLARE_API_TOKEN' (the account guard checks whoami).
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-TRANSFORM="" SQL_OUT="" WIPE=0 OVER="" SKIP_R2=0
+TRANSFORM="" SQL_OUT="" WIPE=0 OVER="" SKIP_R2=0 R2_WRANGLER=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --apply) APPLY=1 ;;
@@ -35,7 +48,10 @@ while [ $# -gt 0 ]; do
     --wipe-and-retry) WIPE=1 ;;
     --allow-over-budget) OVER="--allow-over-budget" ;;
     --skip-r2) SKIP_R2=1 ;;
-    -h|--help) sed -n '2,22p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    --r2-via-wrangler) R2_WRANGLER=1 ;;
+    # Print the whole comment header (line 2 up to the first non-comment line),
+    # so growing the header never truncates --help.
+    -h|--help) awk 'NR>1 {if (!/^#/) exit; print}' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
   shift
@@ -57,9 +73,60 @@ load() { npm run --silent migrate:rails:load -- --transform-output "$TRANSFORM" 
 
 info "step 1: D1 budget dry run"
 load --target d1 --dry-run ${OVER:+"$OVER"}
+# wrangler-based R2 upload: get first, put only a confirmed-absent key, then
+# verify size and sha256. Any other outcome aborts without overwriting.
+r2_via_wrangler() {
+  local manifest="$SQL_OUT/r2-upload-manifest.json" listing key size ct src tmp got log_start n=0 up=0 present=0 total
+  [ -f "$manifest" ] || die "$manifest missing: run the D1 dump step first"
+  # \x1f (unit separator) is not IFS whitespace, so empty fields (e.g. an empty
+  # contentType) keep their position instead of collapsing into the next field.
+  listing="$(node -e 'for (const o of JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).objects) console.log([o.key,o.size,o.contentType,o.sha256].join("\x1f"))' "$manifest")"
+  total="$(printf '%s\n' "$listing" | grep -c . || true)"
+  # Wrangler cannot set the x-amz-meta-sha256 the S3 loader requires on existing
+  # objects, so the two paths must not be mixed: refuse before uploading anything.
+  node -e 'const m=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.exit(m.objects.some(o=>o.size>314572800)?1:0)' "$manifest" \
+    || die "an object is over 300 MiB: --r2-via-wrangler cannot upload it, and objects it uploads lack the checksum metadata the S3 loader needs; use the S3 path for the whole load"
+  tmp="$(mktemp)"; chmod 600 "$tmp"
+  while IFS=$'\x1f' read -r key size ct sha; do
+    [ -n "$key" ] || continue
+    n=$((n+1))
+    src="$TRANSFORM/v2-media/$key"
+    [ -f "$src" ] || { rm -f "$tmp"; die "r2 object $n/$total: source file missing"; }
+    # Read before writing: an existing object may carry S3 checksum metadata
+    # this path cannot reproduce, so it must never be overwritten blindly.
+    log_start="$(stat -c %s "$LOG")"
+    if wr r2 object get "$BUCKET/$key" --remote --file "$tmp"; then
+      got="$(stat -c %s "$tmp")"
+      if [ "$got" = "$size" ] && [ "$(sha256sum "$tmp" | cut -d' ' -f1)" = "$sha" ]; then
+        present=$((present+1)); continue
+      fi
+      rm -f "$tmp"
+      die "r2 object $n/$total already exists but does not match the manifest (expected size $size, got $got, or sha256 differs): refusing to overwrite; see $LOG"
+    fi
+    # Upload ONLY on a confirmed not-found. wrangler answers a missing key with
+    # the exact UserError "The specified key does not exist." (404 from the R2
+    # API); permission, network and other API errors print different messages.
+    # If that distinction is ever unavailable, fail closed: never PUT over an
+    # object whose absence was not confirmed.
+    if ! tail -c +"$((log_start + 1))" "$LOG" | grep -qF 'The specified key does not exist.'; then
+      rm -f "$tmp"
+      die "r2 get $n/$total failed without confirming the key is absent: refusing to upload (an existing object could be overwritten); read $LOG, fix the cause, rerun"
+    fi
+    wr r2 object put "$BUCKET/$key" --remote --file "$src" --content-type "$ct" || { rm -f "$tmp"; die "r2 put $n/$total failed; see $LOG"; }
+    : > "$tmp"
+    wr r2 object get "$BUCKET/$key" --remote --file "$tmp" || { rm -f "$tmp"; die "r2 verify get $n/$total failed; see $LOG"; }
+    got="$(stat -c %s "$tmp")"
+    [ "$got" = "$size" ] || { rm -f "$tmp"; die "r2 verify $n/$total: size mismatch (expected $size, got $got)"; }
+    [ "$(sha256sum "$tmp" | cut -d' ' -f1)" = "$sha" ] || { rm -f "$tmp"; die "r2 verify $n/$total: sha256 mismatch"; }
+    up=$((up+1))
+  done <<< "$listing"
+  rm -f "$tmp"
+  info "r2 via wrangler: objects=$total uploaded=$up already_present=$present (all size-verified)"
+}
+
 if [ "$APPLY" != 1 ]; then
   info "dry run only. Planned: d1 sql dump -> backup+bookmark -> migrations -> SQL files -> r2 upload -> verify.sql"
-  [ "$SKIP_R2" = 1 ] || { info "r2 dry run"; if [ -n "${R2_ACCESS_KEY_ID:-}" ]; then load --target r2 --bucket "$BUCKET" --dry-run; else info "R2_* not set: skipping r2 dry run"; fi; }
+  [ "$SKIP_R2" = 1 ] || { info "r2 dry run"; if [ "$R2_WRANGLER" = 1 ]; then info "--r2-via-wrangler: objects are put and size-verified with wrangler at apply time"; elif [ -n "${R2_ACCESS_KEY_ID:-}" ]; then load --target r2 --bucket "$BUCKET" --dry-run; else info "R2_* not set: skipping r2 dry run"; fi; }
   exit 0
 fi
 
@@ -118,8 +185,13 @@ info "step 5 done: files=$total already_applied=$skipped"
 
 if [ "$SKIP_R2" = 1 ]; then
   info "step 6 skipped (--skip-r2)"
+elif [ "$R2_WRANGLER" = 1 ]; then
+  info "step 6: R2 upload via wrangler (reruns skip size-verified objects)"
+  r2_via_wrangler
 else
-  need_env R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY
+  if [ -z "${R2_ACCESS_KEY_ID:-}" ] || [ -z "${R2_SECRET_ACCESS_KEY:-}" ] || [ -z "${R2_ACCOUNT_ID:-}" ]; then
+    die "R2_* S3 credentials are not set: export them, or rerun with --r2-via-wrangler"
+  fi
   info "step 6: R2 upload (reruns skip verified objects)"
   load --target r2 --bucket "$BUCKET" --dry-run
   load --target r2 --bucket "$BUCKET"

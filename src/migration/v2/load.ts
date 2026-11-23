@@ -480,9 +480,12 @@ async function loadD1(
   options: LoadOptions,
   objects: MediaObject[]
 ): Promise<LoadReport> {
-  if (!options.sqlOut) throw new Error('--sql-out is required for d1');
+  // A dry run writes nothing, so it does not need an output directory.
+  if (!options.sqlOut && !options.dryRun) {
+    throw new Error('--sql-out is required for d1');
+  }
   const dir = resolve(options.transformDir);
-  const out = resolve(options.sqlOut);
+  const out = resolve(options.sqlOut ?? '.');
   const fileLimit = options.maxFileBytes ?? D1_DEFAULT_FILE_BYTES;
   // Room for the trailing ledger statement of each file.
   const LEDGER_RESERVE = 400;

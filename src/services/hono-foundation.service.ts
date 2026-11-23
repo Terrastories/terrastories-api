@@ -121,6 +121,12 @@ export interface StorageListOptions {
 }
 
 export interface FoundationStorage {
+  /**
+   * True when `put` pipes a native request-body stream without per-chunk
+   * JavaScript (R2 on Workers). The upload route then requires Content-Length
+   * and tees the body instead of wrapping it in a JS pass-through stream.
+   */
+  nativeStreamPut?: boolean;
   read(
     key: string,
     range?: StorageReadRange

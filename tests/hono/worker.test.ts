@@ -617,6 +617,26 @@ it('serves the foundation through workerd D1/R2 without Node compatibility', asy
       { method: 'POST', headers: rawHeaders(notPng), body: notPng }
     );
     expect(sniffRes.status).toBe(400);
+    // Chunked upload without Content-Length: rejected before any body byte is read.
+    const noLenRes = await mf.dispatchFetch(
+      'https://worker.test/v2/media?filename=nolen.png',
+      {
+        method: 'POST',
+        headers: Object.fromEntries(
+          Object.entries(rawHeaders(pngBytes)).filter(
+            ([k]) => k !== 'content-length'
+          )
+        ),
+        body: new ReadableStream({
+          start(c) {
+            c.enqueue(pngBytes);
+            c.close();
+          },
+        }),
+        duplex: 'half',
+      } as RequestInit
+    );
+    expect(noLenRes.status).toBe(411);
     // Missing digest header.
     const noSumRes = await mf.dispatchFetch(
       'https://worker.test/v2/media?filename=nosum.png',

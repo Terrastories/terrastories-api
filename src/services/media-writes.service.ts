@@ -505,6 +505,15 @@ export class MediaWritesService {
       };
     }
 
+    // Native-stream storage (R2 on Workers) takes the request body without any
+    // per-chunk JavaScript: require a valid Content-Length before reading a byte,
+    // tee the native body, sniff 8 KiB off one branch, and hand the other
+    // branch straight to storage (#249 CPU budget).
+    const nativeStream = this.storage.nativeStreamPut === true;
+    if (nativeStream && contentLength === undefined) {
+      return { status: 411, body: { error: 'Content-Length required' } };
+    }
+
     let storageKey: string | null = null;
 
     const cleanupPartialStorage = async (key: string | null) => {
@@ -515,7 +524,14 @@ export class MediaWritesService {
       await this.cleanup.deleteStorageBestEffort(key, 'upload_rollback');
     };
 
-    const streamReader = input.body.getReader();
+    let uploadBranch: ReadableStream<Uint8Array> | null = null;
+    let sniffSource: ReadableStream<Uint8Array> = input.body;
+    if (nativeStream) {
+      const [sniffBranch, passBranch] = input.body.tee();
+      sniffSource = sniffBranch;
+      uploadBranch = passBranch;
+    }
+    const streamReader = sniffSource.getReader();
     try {
       // Sniff only the first MAGIC_SNIFF_BYTES for type detection; every other
       // byte is passed through to storage unread (no TypeScript hashing/parsing).
@@ -589,44 +605,52 @@ export class MediaWritesService {
           ? `communities/${actor.communityId}/media/${fileId}`
           : `users/${actor.id}/media/${fileId}`;
 
-      // Pass-through stream: only chunk *lengths* are inspected (for the size
+      if (nativeStream) {
+        // Sniff branch is done; cancelling it drops its buffering and leaves the
+        // other native branch flowing to storage.
+        await streamReader.cancel().catch(() => {});
+      }
+      // JS pass-through (Node): only chunk *lengths* are inspected (for the size
       // cap when Content-Length is absent); chunk contents are never read.
-      let byteSize = initialLen;
-      let initialIndex = 0;
-      const passThrough = new ReadableStream<Uint8Array>({
-        async pull(controller) {
-          if (initialIndex < initialChunks.length) {
-            controller.enqueue(initialChunks[initialIndex]!);
-            initialChunks[initialIndex] = new Uint8Array(0);
-            initialIndex += 1;
-            return;
-          }
-          try {
-            const { done, value } = await streamReader.read();
-            if (done) {
-              controller.close();
+      const buildPassThrough = (): ReadableStream<Uint8Array> => {
+        let byteSize = initialLen;
+        let initialIndex = 0;
+        return new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            if (initialIndex < initialChunks.length) {
+              controller.enqueue(initialChunks[initialIndex]!);
+              initialChunks[initialIndex] = new Uint8Array(0);
+              initialIndex += 1;
               return;
             }
-            if (value && value.byteLength > 0) {
-              byteSize += value.byteLength;
-              if (byteSize > maxBytes) {
-                controller.error(
-                  new UploadCategoryLimitError(
-                    'File exceeds maximum allowed size for media type'
-                  )
-                );
+            try {
+              const { done, value } = await streamReader.read();
+              if (done) {
+                controller.close();
                 return;
               }
-              controller.enqueue(value);
+              if (value && value.byteLength > 0) {
+                byteSize += value.byteLength;
+                if (byteSize > maxBytes) {
+                  controller.error(
+                    new UploadCategoryLimitError(
+                      'File exceeds maximum allowed size for media type'
+                    )
+                  );
+                  return;
+                }
+                controller.enqueue(value);
+              }
+            } catch (error) {
+              controller.error(error);
             }
-          } catch (error) {
-            controller.error(error);
-          }
-        },
-        async cancel() {
-          await streamReader.cancel().catch(() => {});
-        },
-      });
+          },
+          async cancel() {
+            await streamReader.cancel().catch(() => {});
+          },
+        });
+      };
+      const passThrough = uploadBranch ?? buildPassThrough();
 
       let stored: { size: number };
       try {
@@ -727,6 +751,7 @@ export class MediaWritesService {
       return { status: 201, body: responsePayload.data };
     } catch (error) {
       await streamReader.cancel().catch(() => {});
+      await uploadBranch?.cancel().catch(() => {});
       try {
         streamReader.releaseLock();
       } catch {

@@ -220,6 +220,65 @@ describe('raw-body upload pass-through (#249)', () => {
   });
 });
 
+describe('native-stream storage path (#249)', () => {
+  it('requires Content-Length (411) and never builds a JS pull stream after the sniff', async () => {
+    const storage: FoundationStorage = {
+      nativeStreamPut: true,
+      read: async () => null,
+      async put(_key, body) {
+        let size = 0;
+        const reader = (body as ReadableStream<Uint8Array>).getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value!.byteLength;
+        }
+        return { size };
+      },
+    };
+    const { repository } = stubRepository();
+    const service = new MediaWritesService(repository as never, storage, {
+      deleteStorageBestEffort: async () => true,
+    } as never);
+    const base = {
+      actor,
+      contentTypeHeader: 'image/png',
+      checksumHeader: sha256Hex(PNG_HEAD),
+      params: new URLSearchParams({ filename: 'x.png' }),
+      origin: 'https://api.test',
+    };
+    const noLength = await service.uploadMedia({
+      ...base,
+      contentLengthHeader: undefined,
+      body: chunked([PNG_HEAD]),
+    });
+    expect(noLength.status).toBe(411);
+
+    // Count JS-defined pull streams constructed while the service runs.
+    const Original = globalThis.ReadableStream;
+    let pullStreams = 0;
+    globalThis.ReadableStream = new Proxy(Original, {
+      construct(target, args, newTarget) {
+        if (args[0] && typeof args[0].pull === 'function') pullStreams += 1;
+        return Reflect.construct(target, args, newTarget);
+      },
+    }) as typeof ReadableStream;
+    let result;
+    try {
+      const body = chunked([PNG_HEAD]); // the test's own stream: counted once
+      result = await service.uploadMedia({
+        ...base,
+        contentLengthHeader: String(PNG_HEAD.byteLength),
+        body,
+      });
+    } finally {
+      globalThis.ReadableStream = Original;
+    }
+    expect(result.status).toBe(201);
+    expect(pullStreams).toBe(1);
+  });
+});
+
 describe('local (Node) storage verifies sha256 with node:crypto (#249)', () => {
   it('stores matching bytes and leaves nothing behind on mismatch', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'tsapi-249-'));

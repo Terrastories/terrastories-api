@@ -78,6 +78,7 @@ export interface WorkerBindings {
 
 /** R2-backed storage adapter with object listing for the orphan sweeper. */
 export const createR2Storage = (bucket: R2Bucket): FoundationStorage => ({
+  nativeStreamPut: true,
   async read(key, range) {
     const object = range
       ? await bucket.get(key, {

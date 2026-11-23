@@ -13,6 +13,7 @@ import { MAX_DATABASE_ID } from '../types/public.js';
 import {
   PublicMapPointFeatureSchema,
   PublicMediaRefSchema,
+  PublicPlacePhotoRefSchema,
 } from './public-communities.js';
 
 export const DEFAULT_PUBLIC_PAGE_LIMIT = 10;
@@ -71,7 +72,7 @@ export const PublicPlaceSummarySchema = z.object({
 export type PublicPlaceSummary = z.infer<typeof PublicPlaceSummarySchema>;
 
 export const PublicPlaceDetailSchema = PublicPlaceSummarySchema.extend({
-  photos: z.array(PublicMediaRefSchema),
+  photos: z.array(PublicPlacePhotoRefSchema),
   placenameAudio: PublicMediaRefSchema.nullable(),
 });
 

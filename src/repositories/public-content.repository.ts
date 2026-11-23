@@ -207,6 +207,8 @@ export interface PublicPlacesPageResult {
   total: number;
   places: PublicPlaceRecord[];
   photosByPlaceId: Map<number, string[]>;
+  /** Stored MIME type per place photo file id. */
+  photoMimeByFileId: Map<string, string>;
   placenameAudioByPlaceId: Map<number, string>;
 }
 
@@ -214,6 +216,7 @@ export interface PublicPlaceDetailResult {
   community: PublicCommunityRow;
   place: PublicPlaceRecord;
   photos: string[];
+  photoMimeByFileId: Map<string, string>;
   placenameAudioFileId: string | null;
 }
 
@@ -1064,7 +1067,7 @@ export class PublicContentRepository {
         .offset(query.offset);
     }
 
-    const { photosByPlaceId, placenameAudioByPlaceId } =
+    const { photosByPlaceId, photoMimeByFileId, placenameAudioByPlaceId } =
       await this.loadPlaceMediaMaps(
         community.id,
         places.map((p) => p.id),
@@ -1076,6 +1079,7 @@ export class PublicContentRepository {
       total,
       places,
       photosByPlaceId,
+      photoMimeByFileId,
       placenameAudioByPlaceId,
     };
   }
@@ -1122,13 +1126,14 @@ export class PublicContentRepository {
       return null;
     }
 
-    const { photosByPlaceId, placenameAudioByPlaceId } =
+    const { photosByPlaceId, photoMimeByFileId, placenameAudioByPlaceId } =
       await this.loadPlaceMediaMaps(community.id, [place.id], viewer);
 
     return {
       community,
       place,
       photos: photosByPlaceId.get(place.id) ?? [],
+      photoMimeByFileId,
       placenameAudioFileId: placenameAudioByPlaceId.get(place.id) ?? null,
     };
   }
@@ -1793,12 +1798,14 @@ export class PublicContentRepository {
     viewer: ReadRuleViewer = ANON_PUBLIC
   ): Promise<{
     photosByPlaceId: Map<number, string[]>;
+    photoMimeByFileId: Map<string, string>;
     placenameAudioByPlaceId: Map<number, string>;
   }> {
     const photosByPlaceId = new Map<number, string[]>();
+    const photoMimeByFileId = new Map<string, string>();
     const placenameAudioByPlaceId = new Map<number, string>();
     if (!associatedMediaAllowedForViewer(viewer) || placeIds.length === 0) {
-      return { photosByPlaceId, placenameAudioByPlaceId };
+      return { photosByPlaceId, photoMimeByFileId, placenameAudioByPlaceId };
     }
 
     for (const chunk of chunkValues(Array.from(new Set(placeIds)))) {
@@ -1806,6 +1813,7 @@ export class PublicContentRepository {
         .select({
           placeId: this.tables.attachments.ownerId,
           fileId: this.tables.files.id,
+          mimeType: this.tables.files.mimeType,
           role: this.tables.attachments.role,
           ordinal: this.tables.attachments.ordinal,
         })
@@ -1837,6 +1845,7 @@ export class PublicContentRepository {
           const list = photosByPlaceId.get(row.placeId) ?? [];
           list.push(row.fileId);
           photosByPlaceId.set(row.placeId, list);
+          photoMimeByFileId.set(row.fileId, row.mimeType);
         } else if (
           row.role === 'place_name_audio' &&
           !placenameAudioByPlaceId.has(row.placeId)
@@ -1846,7 +1855,7 @@ export class PublicContentRepository {
       }
     }
 
-    return { photosByPlaceId, placenameAudioByPlaceId };
+    return { photosByPlaceId, photoMimeByFileId, placenameAudioByPlaceId };
   }
 
   private async loadSpeakerPhotosMap(

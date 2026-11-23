@@ -17,11 +17,28 @@ export const MAX_MEDIA_UPLOAD_BYTES = 100 * 1024 * 1024; // 100 MiB
 export const MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MiB
 export const MAX_AUDIO_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MiB
 export const MAX_VIDEO_UPLOAD_BYTES = 100 * 1024 * 1024; // 100 MiB
+export const MAX_DOCUMENT_UPLOAD_BYTES = 25 * 1024 * 1024; // 25 MiB
+/** TIFF/HEIC photos are larger than web-ready images; download-only. */
+export const MAX_DOWNLOAD_IMAGE_UPLOAD_BYTES = 25 * 1024 * 1024; // 25 MiB
 export const MAGIC_SNIFF_BYTES = 8192;
 export const MAX_REORDER_ATTACHMENTS = 100;
 export const MAX_METADATA_JSON_LENGTH = 4096;
 
-export type MediaCategory = 'image' | 'audio' | 'video';
+/**
+ * - `image`: browser-renderable raster image.
+ * - `image_download`: image format browsers cannot render (TIFF, HEIC); clients
+ *   show a download card. Never inline-rendered.
+ * - `document`: PDF / DOCX; download card only.
+ */
+export type MediaCategory =
+  | 'image'
+  | 'image_download'
+  | 'document'
+  | 'audio'
+  | 'video';
+
+export const DOCX_MIME =
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
 export interface MediaMimeRule {
   category: MediaCategory;
@@ -49,6 +66,31 @@ export const MEDIA_MIME_RULES: Readonly<Record<string, MediaMimeRule>> = {
     category: 'image',
     extensions: ['gif'],
     maxBytes: MAX_IMAGE_UPLOAD_BYTES,
+  },
+  'image/tiff': {
+    category: 'image_download',
+    extensions: ['tif', 'tiff'],
+    maxBytes: MAX_DOWNLOAD_IMAGE_UPLOAD_BYTES,
+  },
+  'image/heic': {
+    category: 'image_download',
+    extensions: ['heic', 'heif'],
+    maxBytes: MAX_DOWNLOAD_IMAGE_UPLOAD_BYTES,
+  },
+  'application/pdf': {
+    category: 'document',
+    extensions: ['pdf'],
+    maxBytes: MAX_DOCUMENT_UPLOAD_BYTES,
+  },
+  [DOCX_MIME]: {
+    category: 'document',
+    extensions: ['docx'],
+    maxBytes: MAX_DOCUMENT_UPLOAD_BYTES,
+  },
+  'audio/aac': {
+    category: 'audio',
+    extensions: ['aac', 'adts'],
+    maxBytes: MAX_AUDIO_UPLOAD_BYTES,
   },
   'audio/mpeg': {
     category: 'audio',
@@ -110,7 +152,170 @@ const MIME_ALIASES: Readonly<Record<string, string>> = {
   'audio/x-m4a': 'audio/mp4',
   'audio/x-flac': 'audio/flac',
   'video/x-m4v': 'video/mp4',
+  'audio/vnd.dlna.adts': 'audio/aac',
+  'audio/x-aac': 'audio/aac',
+  'audio/aacp': 'audio/aac',
+  'image/tif': 'image/tiff',
+  'image/heif': 'image/heic',
+  'image/heic-sequence': 'image/heic',
+  'image/heif-sequence': 'image/heic',
 };
+
+const ASCII = (s: string): number[] => Array.from(s, (ch) => ch.charCodeAt(0));
+
+function startsWith(bytes: Uint8Array, sig: number[], offset = 0): boolean {
+  if (bytes.length < offset + sig.length) return false;
+  return sig.every((b, i) => bytes[offset + i] === b);
+}
+
+const HEIC_BRANDS: readonly string[] = [
+  'heic',
+  'heix',
+  'hevc',
+  'hevx',
+  'heim',
+  'heis',
+];
+
+function ascii4(bytes: Uint8Array, at: number): string {
+  return String.fromCharCode(...bytes.subarray(at, at + 4));
+}
+
+/** Major or compatible brand must be an HEVC-image brand (mif1/msf1 alone are AVIF-capable). */
+function sniffHeic(bytes: Uint8Array): boolean {
+  if (bytes.length < 12 || !startsWith(bytes, ASCII('ftyp'), 4)) return false;
+  if (HEIC_BRANDS.includes(ascii4(bytes, 8))) return true;
+  const boxSize = Math.min(
+    ((bytes[0]! << 24) | (bytes[1]! << 16) | (bytes[2]! << 8) | bytes[3]!) >>>
+      0,
+    bytes.length
+  );
+  for (let i = 16; i + 4 <= boxSize; i += 4) {
+    if (HEIC_BRANDS.includes(ascii4(bytes, i))) return true;
+  }
+  return false;
+}
+
+/**
+ * Walks ZIP local file headers inside the window and returns the entry names
+ * that are fully visible. Stops at the first entry it cannot step over
+ * (data descriptor, truncated window, bad signature).
+ */
+function zipLocalEntryNames(bytes: Uint8Array): string[] {
+  const names: string[] = [];
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let pos = 0;
+  while (pos + 30 <= bytes.length && view.getUint32(pos, true) === 0x04034b50) {
+    const flags = view.getUint16(pos + 6, true);
+    const compressedSize = view.getUint32(pos + 18, true);
+    const nameLen = view.getUint16(pos + 26, true);
+    const extraLen = view.getUint16(pos + 28, true);
+    const nameEnd = pos + 30 + nameLen;
+    if (nameEnd > bytes.length) break;
+    names.push(new TextDecoder().decode(bytes.subarray(pos + 30, nameEnd)));
+    const dataStart = nameEnd + extraLen;
+    if ((flags & 0x08) !== 0) {
+      // Streaming writers set bit 3: sizes live in a trailing data descriptor.
+      // Scan (bounded to the window) for the next local file header.
+      let next = -1;
+      for (let i = dataStart; i + 4 <= bytes.length; i++) {
+        if (view.getUint32(i, true) === 0x04034b50) {
+          next = i;
+          break;
+        }
+      }
+      if (next < 0) break;
+      pos = next;
+      continue;
+    }
+    pos = dataStart + compressedSize;
+  }
+  return names;
+}
+
+function sniffDocx(bytes: Uint8Array): boolean {
+  const names = zipLocalEntryNames(bytes);
+  if (names.some((n) => n.startsWith('xl/') || n.startsWith('ppt/'))) {
+    return false;
+  }
+  return names.some(
+    (n) => n === '[Content_Types].xml' || n.startsWith('word/')
+  );
+}
+
+interface AdtsHeader {
+  frameLength: number;
+}
+
+function parseAdtsHeader(bytes: Uint8Array, at: number): AdtsHeader | null {
+  if (at + 7 > bytes.length) return null;
+  if (bytes[at] !== 0xff || (bytes[at + 1]! & 0xf6) !== 0xf0) return null;
+  const protectionAbsent = (bytes[at + 1]! & 0x01) === 1;
+  const samplingIndex = (bytes[at + 2]! >> 2) & 0x0f;
+  if (samplingIndex > 12) return null;
+  const frameLength =
+    ((bytes[at + 3]! & 0x03) << 11) |
+    (bytes[at + 4]! << 3) |
+    (bytes[at + 5]! >> 5);
+  if (frameLength < (protectionAbsent ? 7 : 9)) return null;
+  return { frameLength };
+}
+
+/**
+ * ADTS: sync 0xFFF, layer 00, valid sampling index, sane frame length. When a
+ * second frame fits in the window it must also be a valid ADTS header.
+ */
+function sniffAdts(bytes: Uint8Array): boolean {
+  const first = parseAdtsHeader(bytes, 0);
+  if (!first) return false;
+  const next = first.frameLength;
+  if (next === bytes.length) return true;
+  if (next + 7 > bytes.length) return true; // second header outside the window
+  return parseAdtsHeader(bytes, next) !== null;
+}
+
+/**
+ * Deterministic magic-byte sniffers for the document / download-only /
+ * ADTS types (decided on the 8 KiB header window).
+ */
+function sniffExtraType(bytes: Uint8Array, mime: string): boolean {
+  switch (mime) {
+    case 'image/tiff':
+      // II*\0 (little endian) or MM\0* (big endian).
+      return (
+        startsWith(bytes, [0x49, 0x49, 0x2a, 0x00]) ||
+        startsWith(bytes, [0x4d, 0x4d, 0x00, 0x2a])
+      );
+    case 'image/heic':
+      return sniffHeic(bytes);
+    case 'application/pdf':
+      return startsWith(bytes, ASCII('%PDF-'));
+    case DOCX_MIME:
+      return sniffDocx(bytes);
+    case 'audio/aac':
+      return sniffAdts(bytes);
+    default:
+      return false;
+  }
+}
+
+const EXTRA_SNIFFED_MIMES: ReadonlySet<string> = new Set([
+  'image/tiff',
+  'image/heic',
+  'application/pdf',
+  DOCX_MIME,
+  'audio/aac',
+]);
+
+/**
+ * Whether a browser can render this stored MIME type inline (e.g. in `img`).
+ * False for tiff/heic and documents: clients show a download card instead.
+ * Note: the API itself always serves media as an attachment.
+ */
+export function isBrowserRenderableMime(mime: string): boolean {
+  const category = MEDIA_MIME_RULES[normalizeMediaMimeType(mime)]?.category;
+  return category === 'image' || category === 'audio' || category === 'video';
+}
 
 export function normalizeMediaMimeType(raw: string | undefined): string {
   if (!raw) return '';
@@ -176,6 +381,16 @@ export async function validateMediaHeaderBytes(input: {
     };
   }
 
+  if (EXTRA_SNIFFED_MIMES.has(declared)) {
+    if (!sniffExtraType(input.headerBytes, declared)) {
+      return {
+        ok: false,
+        message: 'File signature does not match declared Content-Type',
+      };
+    }
+    return { ok: true, mimeType: declared, rule: declaredRule, originalName };
+  }
+
   const sniffed = await fileTypeFromBuffer(input.headerBytes);
   if (!sniffed) {
     return {
@@ -222,8 +437,9 @@ export const ATTACHMENT_ROLE_TO_OWNER_TYPE: Readonly<
 export const ATTACHMENT_ROLE_ALLOWED_CATEGORIES: Readonly<
   Record<AttachmentRole, readonly MediaCategory[]>
 > = {
-  story_media: ['image', 'audio', 'video'],
-  place_photo: ['image'],
+  story_media: ['image', 'image_download', 'document', 'audio', 'video'],
+  // TIFF/HEIC place photos exist in legacy Rails data; served download-only.
+  place_photo: ['image', 'image_download'],
   place_name_audio: ['audio'],
   speaker_photo: ['image'],
   user_photo: ['image'],

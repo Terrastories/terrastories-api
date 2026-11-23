@@ -738,6 +738,86 @@ describe('Slice 9 media upload, metadata, ranged serving, and deletion (#140)', 
     expect(asB.status).toBe(404);
   });
 
+  it('uploads pdf/docx/tiff/heic/aac and serves them only as sandboxed attachments', async () => {
+    const enc = (s: string) => Array.from(s, (c) => c.charCodeAt(0));
+    const cases: Array<[string, string, number[]]> = [
+      ['application/pdf', 'doc.pdf', enc('%PDF-1.4\n%%EOF')],
+      [
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'doc.docx',
+        [
+          0x50,
+          0x4b,
+          0x03,
+          0x04,
+          ...new Array(22).fill(0),
+          '[Content_Types].xml'.length,
+          0,
+          0,
+          0,
+          ...enc('[Content_Types].xml'),
+        ],
+      ],
+      ['image/tiff', 'scan.tif', [0x49, 0x49, 0x2a, 0x00, 8, 0, 0, 0]],
+      ['image/heic', 'p.heic', [0, 0, 0, 24, ...enc('ftypheic'), 0, 0, 0, 0]],
+      [
+        'audio/vnd.dlna.adts',
+        'a.aac',
+        [0xff, 0xf1, 0x50, 0x80, 0x02, 0x1f, 0xfc],
+      ],
+    ];
+    for (const [contentType, filename, raw] of cases) {
+      const bytes = Uint8Array.from(raw);
+      const res = await uploadMedia({
+        cookie: cookies.editorA,
+        filename,
+        contentType,
+        bytes,
+      });
+      expect(res.status, filename).toBe(201);
+      const body = MediaUploadResponseSchema.parse(await res.json());
+      expect(body.data.mimeType).toBe(
+        contentType === 'audio/vnd.dlna.adts' ? 'audio/aac' : contentType
+      );
+      const served = await app.request(
+        `${API_ORIGIN}/v2/media/${body.data.id}`,
+        {
+          headers: { cookie: cookies.editorA },
+        }
+      );
+      expect(served.status).toBe(200);
+      expect(served.headers.get('content-disposition')).toBe('attachment');
+      expect(served.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(served.headers.get('content-security-policy')).toBe(
+        "default-src 'none'; sandbox"
+      );
+      expect(new Uint8Array(await served.arrayBuffer())).toEqual(bytes);
+    }
+
+    // Signature must match the declared type.
+    const bad = await uploadMedia({
+      cookie: cookies.editorA,
+      filename: 'fake.pdf',
+      contentType: 'application/pdf',
+      bytes: PNG_BYTES,
+    });
+    expect(bad.status).toBe(400);
+
+    // user_photo accepts only browser-renderable images.
+    const photo = await uploadMedia({
+      cookie: cookies.superAdminA,
+      filename: 'me.tif',
+      contentType: 'image/tiff',
+      bytes: Uint8Array.from([0x49, 0x49, 0x2a, 0x00, 8, 0, 0, 0]),
+      fields: {
+        role: 'user_photo',
+        ownerType: 'user',
+        ownerId: String(ids.superAdminA),
+      },
+    });
+    expect(photo.status).toBe(400);
+  });
+
   it('rejects SVG/HTML payloads, magic-byte/extension mismatches, oversize Content-Length, and CSRF origin mismatches', async () => {
     const before = memStore.size;
 

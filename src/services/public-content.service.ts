@@ -42,6 +42,8 @@ import {
   type PublicStorySort,
   type PublicStorySummary,
 } from '../shared/schemas/public-content.js';
+import { isBrowserRenderableMime } from '../shared/schemas/media-v2.js';
+import { toPublicPlacePhotoRef } from '../shared/schemas/public-communities.js';
 import { isDatabaseIdString, MAX_DATABASE_ID } from '../shared/types/public.js';
 import {
   INTERNAL_ERROR_BODY,
@@ -495,10 +497,14 @@ export class PublicContentService {
       const audioFileId = page.placenameAudioByPlaceId.get(place.id) ?? null;
       return {
         ...projectPlaceSummary(place),
-        photos: photoIds.map((fileId) => ({
-          fileId,
-          url: publicMediaUrl(origin, page.community.slug, fileId),
-        })),
+        photos: photoIds.map((fileId) =>
+          toPublicPlacePhotoRef(
+            fileId,
+            publicMediaUrl(origin, page.community.slug, fileId),
+            page.photoMimeByFileId.get(fileId),
+            isBrowserRenderableMime
+          )
+        ),
         placenameAudio: audioFileId
           ? {
               fileId: audioFileId,
@@ -536,10 +542,14 @@ export class PublicContentService {
     return validatePublicResponse(PublicPlaceDetailResponseSchema, {
       data: {
         ...projectPlaceSummary(detail.place),
-        photos: detail.photos.map((fileId) => ({
-          fileId,
-          url: publicMediaUrl(origin, detail.community.slug, fileId),
-        })),
+        photos: detail.photos.map((fileId) =>
+          toPublicPlacePhotoRef(
+            fileId,
+            publicMediaUrl(origin, detail.community.slug, fileId),
+            detail.photoMimeByFileId.get(fileId),
+            isBrowserRenderableMime
+          )
+        ),
         placenameAudio: detail.placenameAudioFileId
           ? {
               fileId: detail.placenameAudioFileId,

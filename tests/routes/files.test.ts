@@ -363,7 +363,13 @@ describe('File Routes Integration', () => {
 
       expect(response.statusCode).toBe(200);
       expect(response.headers['content-type']).toBe('image/jpeg');
-      expect(response.headers['content-disposition']).toContain('test.jpg');
+      expect(response.headers['content-disposition']).toMatch(
+        /^attachment; filename="test\.jpg"/
+      );
+      expect(response.headers['x-content-type-options']).toBe('nosniff');
+      expect(response.headers['content-security-policy']).toBe(
+        "default-src 'none'; sandbox"
+      );
     });
 
     it('should block access without authentication', async () => {

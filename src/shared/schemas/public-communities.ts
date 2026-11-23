@@ -32,6 +32,27 @@ export const PublicMediaRefSchema = z.object({
 
 export type PublicMediaRef = z.infer<typeof PublicMediaRefSchema>;
 
+/**
+ * Place photo reference: carries the stored `mimeType` and a `renderable` hint
+ * so clients show a download card for tiff/heic (legacy Rails photos).
+ */
+export const PublicPlacePhotoRefSchema = PublicMediaRefSchema.extend({
+  mimeType: z.string().min(1),
+  renderable: z.boolean(),
+});
+
+export type PublicPlacePhotoRef = z.infer<typeof PublicPlacePhotoRefSchema>;
+
+export function toPublicPlacePhotoRef(
+  fileId: string,
+  url: string,
+  mimeType: string | undefined,
+  isRenderable: (mime: string) => boolean
+): PublicPlacePhotoRef {
+  const mime = mimeType ?? 'application/octet-stream';
+  return { fileId, url, mimeType: mime, renderable: isRenderable(mime) };
+}
+
 export const PublicSponsorLogoRefSchema = z.object({
   fileId: z.string().min(1),
   url: z.string().url(),

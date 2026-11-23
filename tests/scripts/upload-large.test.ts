@@ -934,6 +934,103 @@ describe('uploadViaThrowawayCommunity (fake fetch)', () => {
     }
   });
 
+  it('408 and 499 on create are ambiguous, not definitive', async () => {
+    for (const createStatus of [408, 499]) {
+      const { calls, impl } = world({ create: 'reject', createStatus });
+      const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
+      expect(res.communityMayExist, String(createStatus)).toBe(true);
+      expect(res.manualDisableSlug).toBe(
+        JSON.parse(String(calls[0]!.body)).slug
+      );
+      expect(res.attemptedSlug).toBe(res.manualDisableSlug);
+      expect(patches(calls)).toHaveLength(0);
+    }
+  });
+
+  describe('CLI summary and recovery command', () => {
+    const ENV = {
+      STAGING_URL: BASE,
+      WT_SUPER_IDENTIFIER: 'super',
+      WT_SUPER_PASSWORD: 'super-password-secret',
+    };
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    });
+    async function runCli(
+      opts: Parameters<typeof world>[0],
+      argv: string[] = [],
+      env: Record<string, string> = {}
+    ) {
+      const dir = mkdtempSync(join(tmpdir(), 'upload-large-'));
+      const path = join(dir, 'sample.mp4');
+      writeFileSync(path, PNG_BYTES);
+      const w = world(opts);
+      const out: string[] = [];
+      const err: string[] = [];
+      vi.spyOn(process.stdout, 'write').mockImplementation((c) => {
+        out.push(String(c));
+        return true;
+      });
+      vi.spyOn(process.stderr, 'write').mockImplementation((c) => {
+        err.push(String(c));
+        return true;
+      });
+      const LOOP = 'http://127.0.0.1:8787';
+      // --local rehearsal: serve the loopback origin from the same fake world
+      vi.stubGlobal('fetch', (u: string, init?: RequestInit) =>
+        w.impl(u.replace(LOOP, BASE), init)
+      );
+      const code = await main(['--file', path, ...argv], {
+        ...ENV,
+        ...(argv.includes('--local') ? { STAGING_URL: LOOP } : {}),
+        ...env,
+      });
+      const slug = JSON.parse(
+        String(
+          w.calls.find((c) => c.url.endsWith('/v2/admin/communities'))!.body
+        )
+      ).slug as string;
+      const cmds = err
+        .join('')
+        .split('\n')
+        .filter((l) => l.includes('--disable-community'));
+      return { code, out: out.join(''), cmds, slug };
+    }
+
+    it('a failed PATCH or a mismatched 200 body exits 1 with exactly one recovery command', async () => {
+      for (const o of [
+        { disableStatus: 500 },
+        { disableBody: 'mismatch' as const },
+      ]) {
+        const r = await runCli(o);
+        expect(r.code).toBe(1);
+        expect(r.cmds).toEqual([
+          `STAGING_URL=${BASE} npx tsx scripts/staging/upload-large.ts --disable-community ${r.slug}`,
+        ]);
+        vi.restoreAllMocks();
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('the recovery command repeats --local and STAGING_ALLOW_HOST', async () => {
+      const r = await runCli({ disableStatus: 500 }, ['--local'], {
+        STAGING_ALLOW_HOST: 'staging.example.test',
+      });
+      expect(r.cmds).toEqual([
+        `STAGING_URL=http://127.0.0.1:8787 STAGING_ALLOW_HOST=staging.example.test npx tsx scripts/staging/upload-large.ts --disable-community ${r.slug} --local`,
+      ]);
+    });
+
+    it('an ambiguous create prints the attempted slug as creation unconfirmed', async () => {
+      const r = await runCli({ create: 'error5xx' });
+      expect(r.out).toContain(`community: ${r.slug} (creation unconfirmed)`);
+      expect(r.out).not.toContain('(not created)');
+      const rej = await runCli({ create: 'reject', createStatus: 409 });
+      expect(rej.out).toContain('community: (not created)');
+    });
+  });
+
   it('a confirmed create whose disable fails reports the slug to disable by hand', async () => {
     const { impl } = world({ disableStatus: 500 });
     const res = await uploadViaThrowawayCommunity(input, { fetch: impl });

@@ -672,7 +672,9 @@ export async function provisionThrowaway(
       options.onCreateAmbiguous?.();
       throw error;
     }
-    if (res.status >= 400 && res.status < 500) {
+    // 408 and 499 are timeout-style answers: the row may already exist.
+    const ambiguous4xx = res.status === 408 || res.status === 499;
+    if (res.status >= 400 && res.status < 500 && !ambiguous4xx) {
       throw new Error(
         `POST /v2/admin/communities answered ${res.status} (expected 201)`
       );
@@ -743,6 +745,8 @@ export interface ThroughCommunityResult {
   disableStatus?: number;
   /** True when the create was confirmed or ambiguous (a row may exist). */
   communityMayExist?: boolean;
+  /** The slug attempted when the create is ambiguous (no confirmed community). */
+  attemptedSlug?: string;
   /** Set when the disable is not confirmed and a row may exist: the REAL slug. */
   manualDisableSlug?: string;
   communityDisabled: boolean;
@@ -832,6 +836,7 @@ export async function uploadViaThrowawayCommunity(
       result.communityDisabled = res.ok;
     }
     result.communityMayExist = created !== undefined || createAmbiguous;
+    if (!created && createAmbiguous) result.attemptedSlug = plannedSlug;
     if (result.communityMayExist && !result.communityDisabled) {
       result.manualDisableSlug = created?.slug ?? plannedSlug;
     }
@@ -1016,7 +1021,7 @@ export async function main(
   );
   const o = res.outcome;
   const lines = [
-    `community: ${res.community?.slug ?? '(not created)'}`,
+    `community: ${res.community?.slug ?? (res.attemptedSlug ? `${res.attemptedSlug} (creation unconfirmed)` : '(not created)')}`,
     `bytes: ${bytes.byteLength}, parts: ${o?.partCount ?? plans.length}, file id: ${o?.mediaId ?? '(none)'}`,
   ];
   if (o) {
@@ -1031,8 +1036,11 @@ export async function main(
   process.stdout.write(lines.join('\n') + '\n');
   if (res.error) process.stderr.write(res.error + '\n');
   if (res.manualDisableSlug) {
+    const allow = env.STAGING_ALLOW_HOST
+      ? ` STAGING_ALLOW_HOST=${env.STAGING_ALLOW_HOST}`
+      : '';
     process.stderr.write(
-      `STAGING_URL=${baseUrl} npx tsx scripts/staging/upload-large.ts --disable-community ${res.manualDisableSlug}\n`
+      `STAGING_URL=${baseUrl}${allow} npx tsx scripts/staging/upload-large.ts --disable-community ${res.manualDisableSlug}${local ? ' --local' : ''}\n`
     );
   }
   return res.error || !res.communityDisabled ? 1 : 0;

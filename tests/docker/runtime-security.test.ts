@@ -44,6 +44,11 @@ describe('production container security', () => {
       expect(compose).toContain('HONO_PUBLIC_ORIGIN');
       expect(compose).toContain('HONO_STORAGE_ROOT=/app/uploads');
       expect(compose).not.toContain('exec node dist/server.js');
+      expect(compose).toContain('ERASURE_RECORDS_ROOT=/app/erasure-records');
+      // nginx must not mount V2 media/erasure volumes.
+      const nginx = compose.slice(compose.indexOf('\n  nginx:'));
+      const nginxBlock = nginx.slice(0, nginx.indexOf('\n  # ====', 10));
+      expect(nginxBlock).not.toMatch(/^\s+- (uploads_data|erasure_records):/m);
     }
   });
 });

@@ -95,7 +95,7 @@ ENV HONO_HOST=0.0.0.0 \
     HONO_STORAGE_ROOT=/app/uploads
 
 # Create uploads directory with proper permissions
-RUN mkdir -p uploads && chown -R terrastories:nodejs uploads
+RUN mkdir -p uploads erasure-records && chown -R terrastories:nodejs uploads erasure-records && chmod 700 erasure-records
 
 # Copy built application and runtime migration assets from builder stage
 COPY --from=builder --chown=terrastories:nodejs /app/dist ./dist

@@ -15,12 +15,19 @@ services:
       - NODE_ENV=field-kit
       # V2 (Hono) runtime gate. field-kit mode requires https unless the
       # trusted-LAN plain-HTTP exception is opted into (SPEC-V2 Section 7).
+      # The bundled nginx serves plain HTTP on :80, so the exception defaults
+      # on and HONO_PUBLIC_ORIGIN must be the http:// address clients use (for
+      # example http://192.168.4.1). For TLS, terminate it in front of nginx,
+      # set an https:// origin and HONO_ALLOW_PLAIN_HTTP=false.
       - HONO_HOST=0.0.0.0
       - HONO_PORT=3001
       - HONO_STORAGE_ROOT=/app/uploads
+      # Erasure records: dedicated volume, never backed up or restored
+      # (src/services/ERASURE-OPERATIONS.md).
+      - ERASURE_RECORDS_ROOT=/app/erasure-records
       - HONO_PUBLIC_ORIGIN=${HONO_PUBLIC_ORIGIN:?HONO_PUBLIC_ORIGIN is required}
       - HONO_CORS_ORIGINS=${HONO_CORS_ORIGINS:-}
-      - HONO_ALLOW_PLAIN_HTTP=${HONO_ALLOW_PLAIN_HTTP:-false}
+      - HONO_ALLOW_PLAIN_HTTP=${HONO_ALLOW_PLAIN_HTTP:-true}
       - AUTH_SERVER_SECRET=${AUTH_SERVER_SECRET:?AUTH_SERVER_SECRET is required}
       - BOOTSTRAP_SECRET=${BOOTSTRAP_SECRET:?BOOTSTRAP_SECRET is required}
       # nginx overwrites X-Forwarded-For/X-Real-IP; trust it for per-IP throttles.
@@ -39,10 +46,13 @@ services:
       # Disable remote sync endpoint for offline
       - SYNC_ENDPOINT=
       # Use SQLite for simplicity in field deployment
-      - DATABASE_URL=/app/data/field-kit.sqlite
-    # Replace (not append to) the base 3000 mapping; V2 listens on 3001.
-    ports: !override
-      - '3001:3001'
+      # Same path as before the V2 switch, so an upgrade reopens the existing
+      # database instead of silently creating an empty one with bootstrap open.
+      - DATABASE_URL=./data/field-kit.db
+    # No host port: nginx (:80) is the only entry. TRUSTED_PROXY=true makes the
+    # API believe X-Real-IP, so a directly reachable API port would let LAN
+    # clients spoof it and bypass the per-IP throttles.
+    ports: !reset []
     # Resource constraints for low-power hardware
     deploy:
       resources:
@@ -57,6 +67,7 @@ services:
     volumes:
       - field_kit_data:/app/data
       - uploads_data:/app/uploads
+      - erasure_records:/app/erasure-records
     # Healthcheck with longer intervals for low-power devices
     healthcheck:
       test:
@@ -142,8 +153,8 @@ services:
     volumes:
       # Simplified Nginx configuration
       - ./config/nginx/nginx.field-kit.conf:/etc/nginx/nginx.conf:ro
-      # Static file serving
-      - uploads_data:/usr/share/nginx/html/uploads:ro
+      # No uploads/erasure volume here: V2 media is protected and is served only
+      # by the API (authenticated /v2/ routes), never directly by nginx.
     environment:
       - API_HOST=api
       - API_PORT=3001
@@ -221,6 +232,10 @@ volumes:
 
   # Upload files storage (inherited from base configuration)
   uploads_data:
+    driver: local
+
+  # Erasure records (SPEC-V2 Section 7): never included in any backup.
+  erasure_records:
     driver: local
 
   # Local backups with limited retention

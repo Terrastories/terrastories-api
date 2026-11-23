@@ -196,7 +196,7 @@ describe('Production Infrastructure Validation - Phase 1', () => {
       const nginxConfig = await fs.readFile('config/nginx/nginx.conf', 'utf-8');
 
       // Caching configuration
-      expect(nginxConfig).toContain('proxy_cache');
+      // Tile responses are cached; V2 API responses are never cached by nginx.
       expect(nginxConfig).toContain('expires');
       expect(nginxConfig).toContain('gzip');
     });

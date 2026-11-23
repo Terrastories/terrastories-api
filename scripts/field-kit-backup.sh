@@ -7,6 +7,8 @@
 set -e
 
 # Configuration for field deployment
+# The erasure-records volume (ERASURE_RECORDS_ROOT) is deliberately never mounted
+# here or backed up (src/services/ERASURE-OPERATIONS.md).
 BACKUP_DIR="/backups"
 DATA_DIR="/data"
 UPLOADS_DIR="/uploads"

@@ -99,6 +99,7 @@ function createConfigFromEnv(
     },
     database: {
       url: process.env.DATABASE_URL || './data.db',
+      sslMode: process.env.DATABASE_SSL?.trim().toLowerCase(),
     },
     auth: {
       jwtSecret: process.env.JWT_SECRET,

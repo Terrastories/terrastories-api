@@ -14,12 +14,16 @@ services:
     # Remove source code volume mount (security)
     volumes:
       - uploads_data:/app/uploads
+      - erasure_records:/app/erasure-records
     environment:
       - NODE_ENV=production
       # V2 (Hono) runtime gate: fails closed on a missing/placeholder value.
       - HONO_HOST=0.0.0.0
       - HONO_PORT=3001
       - HONO_STORAGE_ROOT=/app/uploads
+      # Erasure records: dedicated volume, never backed up or restored
+      # (src/services/ERASURE-OPERATIONS.md).
+      - ERASURE_RECORDS_ROOT=/app/erasure-records
       - HONO_PUBLIC_ORIGIN=${HONO_PUBLIC_ORIGIN:?HONO_PUBLIC_ORIGIN is required}
       - HONO_CORS_ORIGINS=${HONO_CORS_ORIGINS:-}
       - AUTH_SERVER_SECRET=${AUTH_SERVER_SECRET:?AUTH_SERVER_SECRET is required}
@@ -27,6 +31,9 @@ services:
       # nginx overwrites X-Forwarded-For/X-Real-IP; trust it for per-IP throttles.
       - TRUSTED_PROXY=true
       - TRUSTED_PROXY_HEADER=x-real-ip
+      # The in-network PostgreSQL service has no TLS, so TLS is off for it only.
+      # Set DATABASE_SSL=require|verify-full when DATABASE_URL_PROD is external.
+      - DATABASE_SSL=${DATABASE_SSL:-disable}
       # Shared legacy config loader (src/shared/config) still requires these.
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
       - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET is required}
@@ -118,8 +125,8 @@ services:
       - ./config/nginx/conf.d:/etc/nginx/conf.d:ro
       # SSL certificates
       - ./config/ssl:/etc/ssl:ro
-      # Static file serving
-      - uploads_data:/usr/share/nginx/html/uploads:ro
+      # No uploads/erasure volume here: V2 media is protected and is served only
+      # by the API (authenticated /v2/ routes), never directly by nginx.
       # Nginx cache
       - nginx_cache:/var/cache/nginx
       # Logs
@@ -225,6 +232,10 @@ services:
 # PRODUCTION-SPECIFIC VOLUMES
 # =============================================================================
 volumes:
+  # Erasure records (SPEC-V2 Section 7): never included in any backup.
+  erasure_records:
+    driver: local
+
   # Nginx cache for performance
   nginx_cache:
     driver: local

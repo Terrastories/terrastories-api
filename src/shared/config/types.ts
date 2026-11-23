@@ -48,6 +48,8 @@ export interface DatabaseConfig {
   maxConnections: number;
   /** Enable SSL connections */
   ssl: boolean;
+  /** Explicit PostgreSQL TLS mode (DATABASE_SSL); overrides `ssl` when set */
+  sslMode?: 'disable' | 'require' | 'verify-full';
   /** Enable spatial database extensions (PostGIS/SpatiaLite) */
   spatialSupport: boolean;
 }

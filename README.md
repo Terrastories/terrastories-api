@@ -50,6 +50,10 @@ The `production` image target and the production and field-kit Compose profiles 
 - Listener: `HONO_PORT` (default `3001`), bound to `HONO_HOST` (`0.0.0.0` in the image; `127.0.0.1` when unset outside a container). Health: `GET /health` returns `{"status":"ok"}`; `GET /v2/bootstrap` returns JSON.
 - Startup: the image runs `node dist/db/migrate.js` (SQLite for a file path such as `/app/data/terrastories.sqlite`, PostgreSQL for a `postgresql://` URL) and then the server, so a fresh volume is migrated before it serves.
 - Required in `production`, `field-kit` and `offline` modes: `HONO_PUBLIC_ORIGIN`, `AUTH_SERVER_SECRET`, `BOOTSTRAP_SECRET` (see [OPERATIONS-GOVERNANCE](docs/OPERATIONS-GOVERNANCE.md)). `JWT_SECRET` and `SESSION_SECRET` are still required because the shared config loader validates them at startup. Media lives under `HONO_STORAGE_ROOT` (`/app/uploads`, a volume).
+- Field kit: the API port is not published; nginx on :80 is the only entry (the API trusts `X-Real-IP` from nginx). Set `HONO_PUBLIC_ORIGIN` to the `http://` address clients use; `HONO_ALLOW_PLAIN_HTTP` defaults to `true` for that trusted-LAN exception (use an `https://` origin and `false` when TLS is terminated in front). The database path stays `./data/field-kit.db` so an upgrade reopens the existing database.
+- nginx never mounts the media or erasure volumes: media is served only by the authenticated `/v2/` routes. `ERASURE_RECORDS_ROOT=/app/erasure-records` is a dedicated `erasure_records` volume that backups must never include or restore (`src/services/ERASURE-OPERATIONS.md`); the field-kit backup job does not mount it.
+- Run a single API replica: startup migrations take no cross-replica lock.
+- PostgreSQL TLS: production mode requires TLS by default. `DATABASE_SSL=disable|require|verify-full` overrides it for both the V2 and legacy entrypoints; `docker-compose.prod.yml` defaults it to `disable` because its bundled in-network database has no TLS. Use `require` or `verify-full` for an external database.
 - Smoke test of a local image:
 
 ```bash

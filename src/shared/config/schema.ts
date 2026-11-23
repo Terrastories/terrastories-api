@@ -64,6 +64,14 @@ export const DatabaseConfigSchema = z.object({
   poolSize: z.coerce.number().int().min(1).max(20).default(10),
   maxConnections: z.coerce.number().int().min(1).max(50).default(20),
   ssl: z.boolean().default(false),
+  /**
+   * Explicit PostgreSQL TLS mode (`DATABASE_SSL`). When unset, `ssl` decides:
+   * `require` if true (the production default), `disable` otherwise.
+   */
+  sslMode: z.preprocess(
+    (value) => (value === '' ? undefined : value),
+    z.enum(['disable', 'require', 'verify-full']).optional()
+  ),
   spatialSupport: z.boolean().default(true),
 });
 

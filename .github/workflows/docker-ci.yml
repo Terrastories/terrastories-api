@@ -164,6 +164,23 @@ jobs:
             done
           fi
 
+          if [ "${{ matrix.compose-file }}" = "docker-compose.prod.yml" ]; then
+            set -o pipefail
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml config --format json |
+            node --input-type=module -e '
+              import assert from "node:assert/strict";
+              import { readFileSync } from "node:fs";
+              const config = JSON.parse(readFileSync(0, "utf8"));
+              const env = config.services.api.environment;
+              assert.equal(env.ERASURE_RECORDS_ROOT, "/app/erasure-records");
+              assert.equal(env.DATABASE_SSL, "disable", "in-network PostgreSQL has no TLS");
+              assert.ok(!config.services.api.ports?.length, "API port is not published");
+              for (const v of config.services.nginx.volumes ?? []) {
+                assert.ok(!["uploads_data", "erasure_records"].includes(v.source), "nginx must not mount V2 media or erasure volumes");
+              }
+            '
+          fi
+
           if [ "${{ matrix.compose-file }}" = "docker-compose.field-kit.yml" ]; then
             # Include inactive profiles so a broken optional sync service cannot hide.
             # Keep unresolved placeholders out of logs/artifacts; pass JSON via stdin.
@@ -184,11 +201,16 @@ jobs:
                   }))
                 : rawEnv;
               assert.equal(env.OFFLINE_MODE, "true");
-              assert.equal(env.DATABASE_URL, "/app/data/field-kit.sqlite");
+              assert.equal(env.DATABASE_URL, "./data/field-kit.db", "upgrade keeps the existing database path");
+              assert.equal(env.ERASURE_RECORDS_ROOT, "/app/erasure-records");
+              assert.equal(env.HONO_ALLOW_PLAIN_HTTP, "${HONO_ALLOW_PLAIN_HTTP:-true}", "plain-HTTP LAN exception matches the HTTP nginx entry");
               assert.equal(env.HONO_PORT, "3001", "field-kit must run the V2 Hono server");
               assert.equal(env.HONO_STORAGE_ROOT, "/app/uploads");
               assert.ok(env.AUTH_SERVER_SECRET && env.BOOTSTRAP_SECRET, "V2 secrets are required");
-              assert.deepEqual(config.services.api.ports.map(p => String(p.published ?? p)), ["3001"], "only the V2 port is published");
+              assert.ok(!config.services.api.ports?.length, "API port is not published; nginx is the only entry (X-Real-IP is trusted)");
+              for (const v of config.services.nginx.volumes ?? []) {
+                assert.ok(!["uploads_data", "erasure_records"].includes(v.source), "nginx must not mount V2 media or erasure volumes");
+              }
               assert.equal(config.services["sync-service"], undefined, "sync design is deferred (#182)");
               assert.equal(config.volumes?.sync_queue, undefined, "no unused sync queue");
               for (const service of Object.values(config.services)) {

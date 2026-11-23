@@ -96,6 +96,7 @@ import {
   MediaMetadataResponseSchema,
   MediaUploadResponseSchema,
 } from '../../src/shared/schemas/media-v2.js';
+import { DirectUploadSessionResponseSchema } from '../../src/shared/schemas/media-uploads-v2.js';
 import { CreateCommunityExportResponseSchema } from '../../src/shared/schemas/community-export.js';
 import {
   BootstrapResponseSchema,
@@ -6134,6 +6135,78 @@ export async function createFixture(
           createHash('sha256').update(options.bytes).digest('hex'),
       },
     });
+    // Direct multipart upload (#286): a >100 MiB video sent in 16 MiB parts.
+    // The bytes are built lazily (sparse zeros plus an MP4 header) so journeys
+    // that never reach these steps do not allocate them.
+    const QA_DIRECT_PART = 16 * 1024 * 1024;
+    const qaDirect = (() => {
+      let cached:
+        | {
+            bytes: Uint8Array;
+            parts: Uint8Array[];
+            sha256: string;
+            partSha256: string[];
+          }
+        | undefined;
+      const sha = (b: Uint8Array) =>
+        createHash('sha256').update(b).digest('hex');
+      return () => {
+        if (!cached) {
+          const bytes = new Uint8Array(100 * 1024 * 1024 + 1);
+          bytes.set(
+            [
+              0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 0,
+              0, 2, 0, 0x69, 0x73, 0x6f, 0x6d, 0x6d, 0x70, 0x34, 0x31,
+            ],
+            0
+          );
+          const parts: Uint8Array[] = [];
+          for (let at = 0; at < bytes.byteLength; at += QA_DIRECT_PART)
+            parts.push(bytes.subarray(at, at + QA_DIRECT_PART));
+          cached = {
+            bytes,
+            parts,
+            sha256: sha(bytes),
+            partSha256: parts.map(sha),
+          };
+        }
+        return cached;
+      };
+    })();
+    const qaDirectCreateBody: Record<string, unknown> = {};
+    const qaDirectEtags: Array<{ partNumber: number; etag: string }> = [];
+    const qaDirectCompleteBody: {
+      parts: Array<{ partNumber: number; etag: string }>;
+    } = {
+      parts: [],
+    };
+    let qaDirectSize = 0;
+    const qaDirectPartSteps: Step[] = Array.from({ length: 7 }, (_, index) => ({
+      name: `send direct upload part ${index + 1} of 7`,
+      method: 'PUT',
+      path: `/v2/media/uploads/{qaDirectUpload}/parts/${index + 1}`,
+      expected: 200,
+      headers: {},
+      rawBody: new Uint8Array(0),
+      prepare() {
+        const part = qaDirect().parts[index]!;
+        this.rawBody = part;
+        this.headers = {
+          'x-amz-checksum-sha256': Buffer.from(
+            qaDirect().partSha256[index]!,
+            'hex'
+          ).toString('base64'),
+          'content-length': String(part.byteLength),
+        };
+      },
+      check: (body) => {
+        const data = (body as { data?: { partNumber?: number; etag?: string } })
+          .data;
+        if (data?.partNumber !== index + 1 || !data.etag) return false;
+        qaDirectEtags.push({ partNumber: data.partNumber, etag: data.etag });
+        return true;
+      },
+    }));
     const qaMultipart = (options: {
       filename: string;
       contentType: string;
@@ -9513,6 +9586,143 @@ export async function createFixture(
               delete raw.headers['x-content-sha256'];
               return raw;
             })(),
+          },
+          {
+            name: 'create a direct multipart upload for a video over 100 MiB',
+            method: 'POST',
+            path: '/v2/media/uploads',
+            expected: 201,
+            captureId: 'qaDirectUpload',
+            body: qaDirectCreateBody,
+            prepare() {
+              const direct = qaDirect();
+              qaDirectSize = direct.bytes.byteLength;
+              qaDirectEtags.length = 0;
+              Object.assign(qaDirectCreateBody, {
+                filename: 'qa-large-clip.mp4',
+                contentType: 'video/mp4',
+                size: direct.bytes.byteLength,
+                sha256: direct.sha256,
+                partSha256: direct.partSha256,
+              });
+            },
+            check: (body) => {
+              const parsed = DirectUploadSessionResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.partCount === 7 &&
+                parsed.data.data.parts.length === 7 &&
+                parsed.data.data.maxBytes === 512 * 1024 * 1024 &&
+                !JSON.stringify(body).includes('"storageKey"')
+              );
+            },
+          },
+          {
+            name: 'reject a direct upload declared above the video cap',
+            method: 'POST',
+            path: '/v2/media/uploads',
+            expected: 413,
+            body: {
+              filename: 'qa-too-big.mp4',
+              contentType: 'video/mp4',
+              size: 512 * 1024 * 1024 + 1,
+              sha256: 'ab'.repeat(32),
+              partSha256: Array.from({ length: 33 }, () => 'cd'.repeat(32)),
+            },
+          },
+          {
+            name: 'reject a direct upload whose part digests do not cover the size',
+            method: 'POST',
+            path: '/v2/media/uploads',
+            expected: 400,
+            body: {
+              filename: 'qa-short.mp4',
+              contentType: 'video/mp4',
+              size: 40 * 1024 * 1024,
+              sha256: 'ab'.repeat(32),
+              partSha256: ['cd'.repeat(32)],
+            },
+          },
+          ...qaDirectPartSteps,
+          {
+            name: 'reject completing a direct upload with a missing part',
+            method: 'POST',
+            path: '/v2/media/uploads/{qaDirectUpload}/complete',
+            expected: 400,
+            body: {
+              get parts() {
+                return qaDirectEtags.slice(0, 1);
+              },
+            },
+          },
+          {
+            name: 'complete the direct upload into a File row',
+            method: 'POST',
+            path: '/v2/media/uploads/{qaDirectUpload}/complete',
+            expected: 201,
+            captureId: 'qaDirectFile',
+            body: qaDirectCompleteBody,
+            prepare() {
+              qaDirectCompleteBody.parts = qaDirectEtags.map((p) => ({ ...p }));
+            },
+            check: (body) => {
+              const parsed = MediaUploadResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.byteSize === qaDirectSize &&
+                parsed.data.data.mimeType === 'video/mp4' &&
+                parsed.data.data.attachment === null &&
+                parsed.data.data.checksum === qaDirect().sha256
+              );
+            },
+          },
+          {
+            name: 'reject completing the same direct upload twice',
+            method: 'POST',
+            path: '/v2/media/uploads/{qaDirectUpload}/complete',
+            expected: 404,
+            body: qaDirectCompleteBody,
+          },
+          {
+            name: 'read the direct upload metadata like any other media',
+            method: 'GET',
+            path: '/v2/media/{qaDirectFile}/metadata',
+            expected: 200,
+            check: (body) =>
+              (body as { data?: { byteSize?: number } }).data?.byteSize ===
+              qaDirectSize,
+          },
+          {
+            name: 'delete the direct-uploaded media',
+            method: 'DELETE',
+            path: '/v2/media/{qaDirectFile}',
+            expected: 204,
+          },
+          {
+            name: 'create a second direct upload to abort',
+            method: 'POST',
+            path: '/v2/media/uploads',
+            expected: 201,
+            captureId: 'qaDirectAbort',
+            body: {
+              filename: 'qa-abort.mp4',
+              contentType: 'video/mp4',
+              size: 1024 * 1024,
+              sha256: 'ab'.repeat(32),
+              partSha256: ['cd'.repeat(32)],
+            },
+          },
+          {
+            name: 'abort the direct upload',
+            method: 'DELETE',
+            path: '/v2/media/uploads/{qaDirectAbort}',
+            expected: 204,
+          },
+          {
+            name: 'reject aborting an already aborted direct upload',
+            method: 'DELETE',
+            path: '/v2/media/uploads/{qaDirectAbort}',
+            expected: 404,
           },
           {
             name: 'preview CSV places import with staged media for discard',

@@ -20,6 +20,16 @@ export const MAX_VIDEO_UPLOAD_BYTES = 100 * 1024 * 1024; // 100 MiB
 export const MAX_DOCUMENT_UPLOAD_BYTES = 25 * 1024 * 1024; // 25 MiB
 /** TIFF/HEIC photos are larger than web-ready images; download-only. */
 export const MAX_DOWNLOAD_IMAGE_UPLOAD_BYTES = 25 * 1024 * 1024; // 25 MiB
+/**
+ * Direct-to-R2 multipart caps (#286). Only the presigned multipart route may
+ * exceed the 100 MiB single-request ceiling; `POST /v2/media` keeps its caps.
+ * Rails parity: production holds videos up to ~341 MiB.
+ */
+export const MAX_DIRECT_VIDEO_UPLOAD_BYTES = 512 * 1024 * 1024; // 512 MiB
+export const MAX_DIRECT_AUDIO_UPLOAD_BYTES = 200 * 1024 * 1024; // 200 MiB
+/** R2 needs uniform parts of at least 5 MiB; the API fixes 16-64 MiB. */
+export const DIRECT_UPLOAD_MIN_PART_BYTES = 16 * 1024 * 1024;
+export const DIRECT_UPLOAD_MAX_PART_BYTES = 64 * 1024 * 1024;
 export const MAGIC_SNIFF_BYTES = 8192;
 export const MAX_REORDER_ATTACHMENTS = 100;
 export const MAX_METADATA_JSON_LENGTH = 4096;
@@ -356,6 +366,38 @@ export function sanitizeUploadOriginalName(raw: string): string {
     return 'upload';
   }
   return stripped.replace(/^\.+/, '') || 'upload';
+}
+
+/** Per-type size cap of the direct multipart route (#286). */
+export function directUploadMaxBytes(rule: MediaMimeRule): number {
+  if (rule.category === 'video') return MAX_DIRECT_VIDEO_UPLOAD_BYTES;
+  if (rule.category === 'audio') return MAX_DIRECT_AUDIO_UPLOAD_BYTES;
+  return rule.maxBytes;
+}
+
+/**
+ * Type, extension and category decision from the declared Content-Type and
+ * filename alone, for routes that have no bytes yet (direct upload create).
+ * The signature sniff runs later on the stored bytes.
+ */
+export function validateDeclaredMediaType(input: {
+  declaredMime: string;
+  filename: string;
+}):
+  | { ok: true; mimeType: string; rule: MediaMimeRule; originalName: string }
+  | { ok: false; message: string } {
+  const mimeType = normalizeMediaMimeType(input.declaredMime);
+  const rule = MEDIA_MIME_RULES[mimeType];
+  if (!rule) return { ok: false, message: 'Unsupported media Content-Type' };
+  const originalName = sanitizeUploadOriginalName(input.filename);
+  const ext = extractFilenameExtension(originalName);
+  if (!ext || !rule.extensions.includes(ext)) {
+    return {
+      ok: false,
+      message: 'Filename extension does not match Content-Type',
+    };
+  }
+  return { ok: true, mimeType, rule, originalName };
 }
 
 export async function validateMediaHeaderBytes(input: {

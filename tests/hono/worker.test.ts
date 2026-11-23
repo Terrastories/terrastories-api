@@ -1125,3 +1125,207 @@ it('streams community export via R2 multipart upload, serves authenticated downl
     await mf.dispose();
   }
 });
+
+it('creates, completes and sweeps direct multipart uploads in workerd (#286)', async () => {
+  // R2 S3 credentials are per-run random values, never literals. Parts go to
+  // the (unreachable here) S3 host in production; this test plays R2's part
+  // endpoint through the binding, exactly what the presigned PUT would do.
+  const s3 = {
+    R2_ACCOUNT_ID: randomBytes(8).toString('hex'),
+    R2_ACCESS_KEY_ID: randomBytes(10).toString('hex'),
+    R2_SECRET_ACCESS_KEY: randomBytes(20).toString('hex'),
+    R2_BUCKET_NAME: 'media-test',
+  };
+  const mf = startWorkerRuntime(
+    await bundleWorkerModule(
+      `import worker from './src/worker.js'; export default worker;`
+    ),
+    { ENVIRONMENT: 'test', ...s3 },
+    { unsafeTriggerHandlers: true }
+  );
+  try {
+    const db = await mf.getD1Database('DB');
+    const bucket = await mf.getR2Bucket('MEDIA');
+    await applyD1Migrations(db);
+    const token = 'c'.repeat(64);
+    const key = randomBytes(32).toString('hex');
+    await db.batch([
+      db.prepare(
+        "INSERT INTO communities(id,name,slug,created_at,updated_at) VALUES(1,'Own','own',0,0)"
+      ),
+      db
+        .prepare(
+          "INSERT INTO users(id,email,password_hash,first_name,last_name,role,community_id,created_at,updated_at,password_algorithm,password_salt,password_params,password_verifier) VALUES(1,'editor@example.org','source-hash','Test','Editor','editor',1,0,0,'client-argon2id+sha256','salt','{}',?)"
+        )
+        .bind(createHash('sha256').update(key).digest('hex')),
+      db
+        .prepare(
+          'INSERT INTO sessions(id,token_hash,user_id,expires_at) VALUES(?,?,1,?)'
+        )
+        .bind(
+          '00000000-0000-4000-8000-000000000009',
+          createHash('sha256').update(token).digest('hex'),
+          Date.now() + 3_600_000
+        ),
+    ]);
+    const mib = 1024 * 1024;
+    const bytes = new Uint8Array(17 * mib);
+    bytes.set(
+      [
+        0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 0, 0, 2,
+        0, 0x69, 0x73, 0x6f, 0x6d, 0x6d, 0x70, 0x34, 0x31,
+      ],
+      0
+    );
+    const chunks = [bytes.subarray(0, 16 * mib), bytes.subarray(16 * mib)];
+    const sha = (b: Uint8Array) => createHash('sha256').update(b).digest('hex');
+    const createSession = async () =>
+      mf.dispatchFetch('https://worker.test/v2/media/uploads', {
+        method: 'POST',
+        headers: {
+          cookie: `ts_session=${token}`,
+          origin: 'https://worker.test',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          filename: 'clip.mp4',
+          contentType: 'video/mp4',
+          size: bytes.byteLength,
+          sha256: sha(bytes),
+          partSha256: chunks.map(sha),
+        }),
+      });
+    const created = await createSession();
+    expect(created.status).toBe(201);
+    const session = (
+      (await created.json()) as {
+        data: {
+          id: string;
+          mode: string;
+          parts: Array<{
+            partNumber: number;
+            url: string;
+            headers: Record<string, string>;
+          }>;
+        };
+      }
+    ).data;
+    expect(session.mode).toBe('presigned');
+    const first = new URL(session.parts[0]!.url);
+    expect(first.host).toBe(`${s3.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`);
+    expect(first.searchParams.get('X-Amz-Signature')).toMatch(/^[0-9a-f]{64}$/);
+    const objectKey = decodeURIComponent(first.pathname).replace(
+      '/media-test/',
+      ''
+    );
+    expect(objectKey).toMatch(/^communities\/1\/media\/[0-9a-f-]{36}$/);
+    const uploadId = first.searchParams.get('uploadId')!;
+    const upload = bucket.resumeMultipartUpload(objectKey, uploadId);
+    const etags = [];
+    for (const part of session.parts) {
+      const stored = await upload.uploadPart(
+        part.partNumber,
+        chunks[part.partNumber - 1]!
+      );
+      etags.push({ partNumber: stored.partNumber, etag: stored.etag });
+    }
+    const done = await mf.dispatchFetch(
+      `https://worker.test/v2/media/uploads/${session.id}/complete`,
+      {
+        method: 'POST',
+        headers: {
+          cookie: `ts_session=${token}`,
+          origin: 'https://worker.test',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ parts: etags }),
+      }
+    );
+    expect(done.status).toBe(201);
+    const file = (
+      (await done.json()) as { data: { id: string; byteSize: number } }
+    ).data;
+    expect(file.byteSize).toBe(bytes.byteLength);
+    expect((await bucket.head(objectKey))?.size).toBe(bytes.byteLength);
+    expect(
+      await bucket.head(`communities/1/.multipart/${session.id}.json`)
+    ).toBeNull();
+
+    // A second session is abandoned: the hourly orphan sweep deletes its
+    // journal, which aborts the incomplete multipart upload.
+    const abandoned = (
+      (await (await createSession()).json()) as {
+        data: { id: string; parts: Array<{ url: string }> };
+      }
+    ).data;
+    const abandonedUrl = new URL(abandoned.parts[0]!.url);
+    const abandonedKey = decodeURIComponent(abandonedUrl.pathname).replace(
+      '/media-test/',
+      ''
+    );
+    const abandonedUpload = bucket.resumeMultipartUpload(
+      abandonedKey,
+      abandonedUrl.searchParams.get('uploadId')!
+    );
+    await abandonedUpload.uploadPart(1, chunks[0]!);
+    expect(
+      await bucket.head(`communities/1/.multipart/${abandoned.id}.json`)
+    ).not.toBeNull();
+    const sweep = await mf.dispatchFetch(
+      `http://localhost/cdn-cgi/handler/scheduled?cron=0+*+*+*+*&time=${Date.now() + 48 * 3_600_000}`,
+      { method: 'POST' }
+    );
+    expect(sweep.status).toBe(200);
+    expect(
+      await bucket.head(`communities/1/.multipart/${abandoned.id}.json`)
+    ).toBeNull();
+    await expect(abandonedUpload.uploadPart(2, chunks[1]!)).rejects.toThrow();
+    // The completed, referenced object survives the sweep.
+    expect(await bucket.head(objectKey)).not.toBeNull();
+  } finally {
+    await mf.dispose();
+  }
+});
+
+it('answers 501 for direct uploads when R2 S3 credentials are not configured (#286)', async () => {
+  const mf = startWorkerRuntime(
+    await bundleWorkerModule(
+      `import worker from './src/worker.js'; export default worker;`
+    ),
+    { ENVIRONMENT: 'test' }
+  );
+  try {
+    const db = await mf.getD1Database('DB');
+    await applyD1Migrations(db);
+    const token = 'd'.repeat(64);
+    await db.batch([
+      db.prepare(
+        "INSERT INTO communities(id,name,slug,created_at,updated_at) VALUES(1,'Own','own',0,0)"
+      ),
+      db.prepare(
+        "INSERT INTO users(id,email,password_hash,first_name,last_name,role,community_id,created_at,updated_at,password_algorithm,password_salt,password_params,password_verifier) VALUES(1,'editor@example.org','source-hash','Test','Editor','editor',1,0,0,'client-argon2id+sha256','salt','{}','verifier')"
+      ),
+      db
+        .prepare(
+          'INSERT INTO sessions(id,token_hash,user_id,expires_at) VALUES(?,?,1,?)'
+        )
+        .bind(
+          '00000000-0000-4000-8000-00000000000a',
+          createHash('sha256').update(token).digest('hex'),
+          Date.now() + 3_600_000
+        ),
+    ]);
+    const res = await mf.dispatchFetch('https://worker.test/v2/media/uploads', {
+      method: 'POST',
+      headers: {
+        cookie: `ts_session=${token}`,
+        origin: 'https://worker.test',
+        'content-type': 'application/json',
+      },
+      body: '{}',
+    });
+    expect(res.status).toBe(501);
+  } finally {
+    await mf.dispose();
+  }
+});

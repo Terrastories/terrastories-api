@@ -3,6 +3,8 @@ import type {
   HonoFoundationRepository,
 } from '../repositories/hono-foundation.repository.js';
 
+import type { DirectUploadAdapter } from './direct-upload.types.js';
+
 const invalidParts = new Set(['', '.', '..']);
 const safeKey = (key: string) =>
   !key.includes('\\') && !key.split('/').some((part) => invalidParts.has(part));
@@ -127,6 +129,13 @@ export interface FoundationStorage {
    * and tees the body instead of wrapping it in a JS pass-through stream.
    */
   nativeStreamPut?: boolean;
+  /**
+   * Direct multipart media upload backend (#286). `undefined`: the route
+   * streams parts into this storage (`api` mode, Node local disk); `null`:
+   * the profile cannot offer it (Workers without R2 S3 credentials), so the
+   * routes answer 501; an adapter: presigned R2 multipart.
+   */
+  directUploads?: DirectUploadAdapter | null;
   read(
     key: string,
     range?: StorageReadRange

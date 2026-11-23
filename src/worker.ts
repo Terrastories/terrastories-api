@@ -38,6 +38,11 @@ import { CommunitySovereigntyRepository } from './repositories/community-soverei
 import { CommunityExportRepository } from './repositories/community-export.repository.js';
 import { CommunityExportService } from './services/community-export.service.js';
 import { runMaintenanceSweeps } from './services/maintenance-sweeps.js';
+import {
+  createR2DirectUploads,
+  r2DirectUploadConfigFrom,
+  type R2DirectUploadConfig,
+} from './services/direct-upload-r2.js';
 
 export interface WorkerBindings {
   DB: D1Database;
@@ -74,11 +79,29 @@ export interface WorkerBindings {
    * authenticated reads when a community configures no token of its own.
    */
   MAPBOX_ACCESS_TOKEN?: string;
+  /**
+   * R2 S3 API credentials for presigning direct multipart uploads (#286),
+   * scoped to the media bucket and supplied with `wrangler secret put` —
+   * never `vars`. `R2_BUCKET_NAME` is the bucket name var. All four unset
+   * (or any one missing) keeps the direct-upload routes answering 501.
+   */
+  R2_ACCOUNT_ID?: string;
+  R2_ACCESS_KEY_ID?: string;
+  R2_SECRET_ACCESS_KEY?: string;
+  R2_BUCKET_NAME?: string;
 }
 
 /** R2-backed storage adapter with object listing for the orphan sweeper. */
-export const createR2Storage = (bucket: R2Bucket): FoundationStorage => ({
+export const createR2Storage = (
+  bucket: R2Bucket,
+  directUploads: R2DirectUploadConfig | null = null
+): FoundationStorage => ({
   nativeStreamPut: true,
+  // null: this profile cannot stream parts through the Worker, so without S3
+  // credentials the direct-upload routes answer 501 instead of falling back.
+  directUploads: directUploads
+    ? createR2DirectUploads(bucket, directUploads)
+    : null,
   async read(key, range) {
     const object = range
       ? await bucket.get(key, {
@@ -457,7 +480,7 @@ export function createWorker() {
       corsOrigins: runtimeConfig.corsOrigins,
       // workerd sets `cf-connecting-ip` and a client cannot forge it (finding E).
       isWorkers: true,
-      storage: createR2Storage(env.MEDIA),
+      storage: createR2Storage(env.MEDIA, r2DirectUploadConfigFrom(env)),
       erasureStore: env.ERASURE_RECORDS
         ? createWorkerErasureRecordStore(env.ERASURE_RECORDS)
         : undefined,

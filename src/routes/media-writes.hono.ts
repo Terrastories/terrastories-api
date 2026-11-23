@@ -4,6 +4,7 @@
  * - GET /v2/media/:id
  * - POST /v2/media
  * - DELETE /v2/media/:id
+ * - /v2/media/uploads/* direct multipart uploads (media-uploads.hono.ts, #286)
  */
 
 import type { Context, Hono } from 'hono';
@@ -19,6 +20,8 @@ import {
   type MediaWriteResult,
 } from '../services/media-writes.service.js';
 import type { MediaCleanupCoordinator } from '../services/media-cleanup.service.js';
+import { DirectUploadService } from '../services/direct-upload.service.js';
+import { registerMediaUploadRoutes } from './media-uploads.hono.js';
 
 function respondMediaResult<T>(c: Context, result: MediaWriteResult<T>) {
   if (result.status === 204) {
@@ -46,6 +49,16 @@ export function registerMediaRoutes(
   );
   const originFor = (c: Context) =>
     options.publicOrigin ?? new URL(c.req.url).origin;
+
+  registerMediaUploadRoutes(app, {
+    service: new DirectUploadService(
+      options.repository,
+      options.storage,
+      options.cleanup,
+      service
+    ),
+    originFor,
+  });
 
   app.get('/v2/media/:id/metadata', async (c) => {
     const result = await service.getMetadata(

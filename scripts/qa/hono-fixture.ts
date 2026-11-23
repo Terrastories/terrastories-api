@@ -96,7 +96,10 @@ import {
   MediaMetadataResponseSchema,
   MediaUploadResponseSchema,
 } from '../../src/shared/schemas/media-v2.js';
-import { DirectUploadSessionResponseSchema } from '../../src/shared/schemas/media-uploads-v2.js';
+import {
+  DirectUploadSessionResponseSchema,
+  type DirectUploadPartTarget,
+} from '../../src/shared/schemas/media-uploads-v2.js';
 import { CreateCommunityExportResponseSchema } from '../../src/shared/schemas/community-export.js';
 import {
   BootstrapResponseSchema,
@@ -6173,7 +6176,9 @@ export async function createFixture(
         return cached;
       };
     })();
+    const expectedDirectUploadMode = isD1Backend ? 'presigned' : 'api';
     const qaDirectCreateBody: Record<string, unknown> = {};
+    let qaDirectTargets: DirectUploadPartTarget[] = [];
     const qaDirectEtags: Array<{ partNumber: number; etag: string }> = [];
     const qaDirectCompleteBody: {
       parts: Array<{ partNumber: number; etag: string }>;
@@ -6181,32 +6186,106 @@ export async function createFixture(
       parts: [],
     };
     let qaDirectSize = 0;
-    const qaDirectPartSteps: Step[] = Array.from({ length: 7 }, (_, index) => ({
-      name: `send direct upload part ${index + 1} of 7`,
-      method: 'PUT',
-      path: `/v2/media/uploads/{qaDirectUpload}/parts/${index + 1}`,
-      expected: 200,
-      headers: {},
-      rawBody: new Uint8Array(0),
-      prepare() {
-        const part = qaDirect().parts[index]!;
-        this.rawBody = part;
-        this.headers = {
-          'x-amz-checksum-sha256': Buffer.from(
-            qaDirect().partSha256[index]!,
-            'hex'
-          ).toString('base64'),
-          'content-length': String(part.byteLength),
-        };
-      },
-      check: (body) => {
-        const data = (body as { data?: { partNumber?: number; etag?: string } })
-          .data;
-        if (data?.partNumber !== index + 1 || !data.etag) return false;
-        qaDirectEtags.push({ partNumber: data.partNumber, etag: data.etag });
-        return true;
-      },
-    }));
+    const validateDirectUploadSession = (body: unknown): boolean => {
+      const parsed = DirectUploadSessionResponseSchema.safeParse(body);
+      if (
+        !parsed.success ||
+        parsed.data.data.mode !== expectedDirectUploadMode ||
+        parsed.data.data.partCount !== 7 ||
+        parsed.data.data.parts.length !== 7 ||
+        parsed.data.data.maxBytes !== 512 * 1024 * 1024 ||
+        JSON.stringify(body).includes('"storageKey"')
+      ) {
+        return false;
+      }
+      const parts = qaDirect().parts;
+      const partSha256 = qaDirect().partSha256;
+      for (let i = 0; i < 7; i++) {
+        const target = parsed.data.data.parts[i];
+        const part = parts[i];
+        const sha = partSha256[i];
+        if (
+          !target ||
+          !part ||
+          !sha ||
+          target.partNumber !== i + 1 ||
+          target.method !== 'PUT' ||
+          target.size !== part.byteLength
+        ) {
+          return false;
+        }
+        if (isD1Backend) {
+          if (
+            target.headers['x-amz-content-sha256'] !== sha ||
+            'x-amz-checksum-sha256' in target.headers
+          ) {
+            return false;
+          }
+        } else if (
+          target.headers['x-amz-checksum-sha256'] !==
+          Buffer.from(sha, 'hex').toString('base64')
+        ) {
+          return false;
+        }
+      }
+      qaDirectTargets = parsed.data.data.parts;
+      return true;
+    };
+    const qaDirectPartSteps: Step[] = Array.from({ length: 7 }, (_, index) => {
+      let stepEtag = '';
+      return {
+        name: `send direct upload part ${index + 1} of 7`,
+        method: 'PUT',
+        path: `/v2/media/uploads/{qaDirectUpload}/parts/${index + 1}`,
+        expected: 200,
+        headers: {},
+        rawBody: new Uint8Array(0),
+        prepare() {
+          stepEtag = '';
+          const target = qaDirectTargets[index];
+          if (!target || target.partNumber !== index + 1) {
+            throw new Error(
+              `Missing direct upload target for part ${index + 1}`
+            );
+          }
+          const part = qaDirect().parts[index]!;
+          this.method = target.method;
+          this.rawBody = part;
+          this.headers = {
+            ...target.headers,
+            'content-length': String(part.byteLength),
+          };
+          return target.url;
+        },
+        checkHeaders: (headers) => {
+          const etag = headers.get('etag')?.replace(/^"|"$/g, '') ?? '';
+          if (!etag) return false;
+          stepEtag = etag;
+          return true;
+        },
+        checkBytes: (bytes) => {
+          if (!stepEtag) return false;
+          if (isD1Backend) {
+            if (bytes.byteLength !== 0) return false;
+          } else {
+            try {
+              const data = (
+                JSON.parse(new TextDecoder().decode(bytes)) as {
+                  data?: { partNumber?: number; etag?: string };
+                }
+              ).data;
+              if (data?.partNumber !== index + 1 || data.etag !== stepEtag) {
+                return false;
+              }
+            } catch {
+              return false;
+            }
+          }
+          qaDirectEtags.push({ partNumber: index + 1, etag: stepEtag });
+          return true;
+        },
+      };
+    });
     const qaMultipart = (options: {
       filename: string;
       contentType: string;
@@ -9597,6 +9676,7 @@ export async function createFixture(
             prepare() {
               const direct = qaDirect();
               qaDirectSize = direct.bytes.byteLength;
+              qaDirectTargets = [];
               qaDirectEtags.length = 0;
               Object.assign(qaDirectCreateBody, {
                 filename: 'qa-large-clip.mp4',
@@ -9606,26 +9686,14 @@ export async function createFixture(
                 partSha256: direct.partSha256,
               });
             },
-            check: (body) => {
-              const parsed = DirectUploadSessionResponseSchema.safeParse(body);
-              return (
-                parsed.success &&
-                parsed.data.data.partCount === 7 &&
-                parsed.data.data.parts.length === 7 &&
-                parsed.data.data.maxBytes === 512 * 1024 * 1024 &&
-                !JSON.stringify(body).includes('"storageKey"')
-              );
-            },
+            check: validateDirectUploadSession,
           },
           {
             name: 're-issue the direct upload part targets',
             method: 'POST',
             path: '/v2/media/uploads/{qaDirectUpload}/parts/presign',
             expected: 200,
-            check: (body) => {
-              const parsed = DirectUploadSessionResponseSchema.safeParse(body);
-              return parsed.success && parsed.data.data.parts.length === 7;
-            },
+            check: validateDirectUploadSession,
           },
           {
             name: 'reject a direct upload declared above the video cap',
@@ -9653,6 +9721,77 @@ export async function createFixture(
               partSha256: ['cd'.repeat(32)],
             },
           },
+          {
+            name: 'reject a direct upload part with one tampered byte',
+            method: 'PUT',
+            path: '/v2/media/uploads/{qaDirectUpload}/parts/1',
+            expected: isD1Backend ? 400 : 422,
+            headers: {},
+            rawBody: new Uint8Array(0),
+            prepare() {
+              const target = qaDirectTargets[0];
+              if (!target) {
+                throw new Error('Missing direct upload target for part 1');
+              }
+              const tampered = Uint8Array.from(qaDirect().parts[0]!);
+              tampered[0]! ^= 1;
+              this.method = target.method;
+              this.rawBody = tampered;
+              this.headers = {
+                ...target.headers,
+                'content-length': String(tampered.byteLength),
+              };
+              return target.url;
+            },
+            ...(isD1Backend
+              ? {
+                  checkBytes: (bytes: Uint8Array) =>
+                    new TextDecoder()
+                      .decode(bytes)
+                      .includes('XAmzContentSHA256Mismatch'),
+                }
+              : {}),
+          },
+          ...(isD1Backend
+            ? [
+                {
+                  name: 'reject a presigned direct upload part carrying x-amz-checksum-sha256',
+                  method: 'PUT',
+                  path: '/v2/media/uploads/{qaDirectUpload}/parts/1',
+                  expected: 501,
+                  headers: {},
+                  rawBody: new Uint8Array(0),
+                  prepare() {
+                    const target = qaDirectTargets[0];
+                    if (!target) {
+                      throw new Error(
+                        'Missing direct upload target for part 1'
+                      );
+                    }
+                    const part = qaDirect().parts[0]!;
+                    this.method = target.method;
+                    this.rawBody = part;
+                    this.headers = {
+                      ...target.headers,
+                      'x-amz-checksum-sha256': Buffer.from(
+                        qaDirect().partSha256[0]!,
+                        'hex'
+                      ).toString('base64'),
+                      'content-length': String(part.byteLength),
+                    };
+                    return target.url;
+                  },
+                } satisfies Step,
+                {
+                  name: 'reject sending a presigned session part to the API part endpoint',
+                  method: 'PUT',
+                  path: '/v2/media/uploads/{qaDirectUpload}/parts/1',
+                  expected: 409,
+                  headers: { 'content-length': '1' },
+                  rawBody: new Uint8Array([0]),
+                } satisfies Step,
+              ]
+            : []),
           ...qaDirectPartSteps,
           {
             name: 'reject completing a direct upload with a missing part',

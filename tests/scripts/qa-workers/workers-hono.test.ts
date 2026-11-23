@@ -1,7 +1,11 @@
 import { writeFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import { createFixture } from '../../../scripts/qa/workers-fixture.js';
-import { runJourneys } from '../../../scripts/qa/runner.js';
+import {
+  runJourneys,
+  type Journey,
+  type Step,
+} from '../../../scripts/qa/runner.js';
 
 // Module scope: resolve before any hook could rewrite the environment, so
 // the wrapper always reports what the operator actually configured. Only the
@@ -51,6 +55,58 @@ describe(
             'canonical-v2': { passed: report.results.length, failed: 0 },
             'legacy-v1': { passed: 0, failed: 0 },
           });
+
+          // Negative proof (#293): tampering one byte of a presigned part
+          // upload in the Workers journey makes the journey fail closed
+          // against the signed x-amz-content-sha256 header (400).
+          const mediaEditor = fixture.journeys.find(
+            (journey) => journey.persona === 'media_editor'
+          );
+          expect(mediaEditor).toBeDefined();
+          const loginStep = mediaEditor!.steps.find(
+            (step) => step.name === 'login'
+          )!;
+          const createStep = mediaEditor!.steps.find(
+            (step) =>
+              step.name ===
+              'create a direct multipart upload for a video over 100 MiB'
+          )!;
+          const part1Step = mediaEditor!.steps.find(
+            (step) => step.name === 'send direct upload part 1 of 7'
+          )!;
+          const tamperedPart1: Step = {
+            ...part1Step,
+            async prepare() {
+              const targetUrl = await part1Step.prepare?.call(this);
+              const tampered = Uint8Array.from(this.rawBody as Uint8Array);
+              tampered[0]! ^= 1;
+              this.rawBody = tampered;
+              return targetUrl;
+            },
+          };
+          const tamperedJourneys: Journey[] = [
+            {
+              persona: 'media_editor',
+              steps: [{ ...loginStep }, { ...createStep }, tamperedPart1],
+            },
+          ];
+          const tamperedReport = await runJourneys({
+            ...fixture,
+            journeys: tamperedJourneys,
+          });
+          expect(tamperedReport.pass).toBe(false);
+          expect(
+            tamperedReport.results.filter((result) => !result.pass)
+          ).toEqual([
+            expect.objectContaining({
+              persona: 'media_editor',
+              step: 'send direct upload part 1 of 7',
+              expected: 200,
+              actual: 400,
+              pass: false,
+              failure: 'status-mismatch',
+            }),
+          ]);
         } finally {
           await fixture.close();
         }

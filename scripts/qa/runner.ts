@@ -182,6 +182,9 @@ export async function runJourneys(options: {
     const ids: Record<string, number | string> = {};
     for (const step of journey.steps) {
       let path = step.path;
+      // External requests (presigned R2 part targets) keep step.path as their
+      // report label but never count toward API route coverage.
+      let externalRequest = false;
       let actual = 0;
       let pass = false;
       let failure: Result['failure'];
@@ -212,22 +215,36 @@ export async function runJourneys(options: {
       };
       try {
         const work = (async () => {
+          const interpolate = (template: string) =>
+            template.replace(/\{(\w+)\}/g, (_, name: string) => {
+              if (!ids[name]) throw new Error(`Missing captured id: ${name}`);
+              return String(ids[name]);
+            });
           const prepared = await step.prepare?.();
           if (controller.signal.aborted)
             throw new Error('Request deadline elapsed');
-          path = (typeof prepared === 'string' ? prepared : step.path).replace(
-            /\{(\w+)\}/g,
-            (_, name: string) => {
-              if (!ids[name]) throw new Error(`Missing captured id: ${name}`);
-              return String(ids[name]);
-            }
+          const rawTarget = interpolate(
+            typeof prepared === 'string' ? prepared : step.path
           );
+          const isAbsoluteTarget = /^https?:\/\//.test(rawTarget);
+          const requestUrl = isAbsoluteTarget
+            ? rawTarget
+            : `http://qa.invalid${rawTarget}`;
+          const parsedRequestUrl = new URL(requestUrl);
+          const apiOrigin =
+            (journeyBaseUrl ?? baseUrl)?.origin ?? 'http://qa.invalid';
+          const isExternalTarget =
+            isAbsoluteTarget && parsedRequestUrl.origin !== apiOrigin;
+          externalRequest = isExternalTarget;
+          path = isExternalTarget
+            ? interpolate(step.path)
+            : parsedRequestUrl.pathname + parsedRequestUrl.search;
           const headers = new Headers(step.headers);
           if (step.useSavedCookie) {
             const saved = savedCookies[step.useSavedCookie];
             if (!saved) throw new Error('Saved session cookie is unavailable');
             headers.set('cookie', saved);
-          } else if (cookie && !headers.has('cookie'))
+          } else if (cookie && !isExternalTarget && !headers.has('cookie'))
             headers.set('cookie', cookie);
           if (step.saveCookieAs) {
             const outgoingCookie = headers.get('cookie');
@@ -268,7 +285,7 @@ export async function runJourneys(options: {
             headers.set('content-type', 'application/json');
           stage = 'Sending request';
           response = await journeyHandler(
-            new Request(`http://qa.invalid${path}`, {
+            new Request(requestUrl, {
               method: step.method,
               headers,
               signal: controller.signal,
@@ -389,7 +406,9 @@ export async function runJourneys(options: {
               a.path.split('/').filter((p) => p.startsWith(':')).length -
               b.path.split('/').filter((p) => p.startsWith(':')).length
           );
-          if (candidates[0]) reached.add(key(candidates[0]));
+          if (externalRequest) {
+            // Not an API request: nothing to mark reached.
+          } else if (candidates[0]) reached.add(key(candidates[0]));
           else {
             pass = false;
             failure = 'unmatched-route';

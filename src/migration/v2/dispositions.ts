@@ -176,34 +176,34 @@ export const COLUMN_DISPOSITIONS: Record<string, TableDispositions> = {
     updated_at: 'ARCHIVE',
   },
   media: {
-    id: 'PENDING_MEDIA_SLICE',
-    story_id: 'PENDING_MEDIA_SLICE',
-    created_at: 'PENDING_MEDIA_SLICE',
-    updated_at: 'PENDING_MEDIA_SLICE',
+    id: 'TRANSFORM>attachments.ordinal',
+    story_id: 'TRANSFORM>attachments.owner_id',
+    created_at: 'ARCHIVE',
+    updated_at: 'ARCHIVE',
   },
   active_storage_blobs: {
-    id: 'PENDING_MEDIA_SLICE',
-    key: 'PENDING_MEDIA_SLICE',
-    filename: 'PENDING_MEDIA_SLICE',
-    content_type: 'PENDING_MEDIA_SLICE',
-    metadata: 'PENDING_MEDIA_SLICE',
-    byte_size: 'PENDING_MEDIA_SLICE',
-    checksum: 'PENDING_MEDIA_SLICE',
-    created_at: 'PENDING_MEDIA_SLICE',
-    service_name: 'PENDING_MEDIA_SLICE',
+    id: 'PRESERVE>manifest.media.blobs',
+    key: 'ARCHIVE',
+    filename: 'TRANSFORM>files.original_name',
+    content_type: 'TRANSFORM>files.mime_type',
+    metadata: 'TRANSFORM>files.metadata',
+    byte_size: 'TRANSFORM>files.size,files.byte_size',
+    checksum: 'TRANSFORM+ARCHIVE>files.checksum',
+    created_at: 'TRANSFORM>files.created_at,files.updated_at',
+    service_name: 'ARCHIVE',
   },
   active_storage_attachments: {
-    id: 'PENDING_MEDIA_SLICE',
-    name: 'PENDING_MEDIA_SLICE',
-    record_type: 'PENDING_MEDIA_SLICE',
-    record_id: 'PENDING_MEDIA_SLICE',
-    blob_id: 'PENDING_MEDIA_SLICE',
-    created_at: 'PENDING_MEDIA_SLICE',
+    id: 'PRESERVE>attachments.id',
+    name: 'TRANSFORM>attachments.role',
+    record_type: 'TRANSFORM>attachments.owner_type',
+    record_id: 'TRANSFORM>attachments.owner_id',
+    blob_id: 'TRANSFORM>attachments.file_id',
+    created_at: 'TRANSFORM>attachments.created_at',
   },
   active_storage_variant_records: {
-    id: 'PENDING_MEDIA_SLICE',
-    blob_id: 'PENDING_MEDIA_SLICE',
-    variation_digest: 'PENDING_MEDIA_SLICE',
+    id: 'ARCHIVE',
+    blob_id: 'ARCHIVE',
+    variation_digest: 'ARCHIVE',
   },
 };
 
@@ -217,7 +217,7 @@ export const ARCHIVE_ONLY_TABLES: readonly string[] = [
   'ar_internal_metadata',
 ];
 
-/** Tables handled by the (next) media slice; recorded as pending only. */
+/** Tables handled by the media stage (files, attachments, payload ledger). */
 export const PENDING_MEDIA_TABLES: readonly string[] = [
   'media',
   'active_storage_blobs',
@@ -267,4 +267,73 @@ export function findUnregisteredColumns(
     }
   }
   return missing.sort();
+}
+
+export type AttachmentClassification =
+  | {
+      kind: 'canonical';
+      ownerType:
+        | 'story'
+        | 'place'
+        | 'speaker'
+        | 'user'
+        | 'community'
+        | 'map_config';
+      role:
+        | 'story_media'
+        | 'place_photo'
+        | 'place_name_audio'
+        | 'speaker_photo'
+        | 'user_photo'
+        | 'community_display_image'
+        | 'community_background_image'
+        | 'sponsor_logo'
+        | 'static_map';
+    }
+  | { kind: 'derived'; derived: 'variant' | 'preview' };
+
+const ATTACHMENT_ROLES: Record<string, AttachmentClassification> = {
+  'Community:display_image': {
+    kind: 'canonical',
+    ownerType: 'community',
+    role: 'community_display_image',
+  },
+  'Community:background_img': {
+    kind: 'canonical',
+    ownerType: 'community',
+    role: 'community_background_image',
+  },
+  'Community:sponsor_logos': {
+    kind: 'canonical',
+    ownerType: 'community',
+    role: 'sponsor_logo',
+  },
+  'User:photo': { kind: 'canonical', ownerType: 'user', role: 'user_photo' },
+  'Place:photo': { kind: 'canonical', ownerType: 'place', role: 'place_photo' },
+  'Place:name_audio': {
+    kind: 'canonical',
+    ownerType: 'place',
+    role: 'place_name_audio',
+  },
+  'Speaker:photo': {
+    kind: 'canonical',
+    ownerType: 'speaker',
+    role: 'speaker_photo',
+  },
+  'Media:media': { kind: 'canonical', ownerType: 'story', role: 'story_media' },
+  'Theme:static_map': {
+    kind: 'canonical',
+    ownerType: 'map_config',
+    role: 'static_map',
+  },
+  'ActiveStorage::VariantRecord:image': { kind: 'derived', derived: 'variant' },
+  'ActiveStorage::Blob:preview_image': { kind: 'derived', derived: 'preview' },
+};
+
+/** Rails (record_type, name) -> V2 owner/role, or null when unknown (MANUAL). */
+export function classifyAttachment(
+  recordType: string,
+  name: string
+): AttachmentClassification | null {
+  return ATTACHMENT_ROLES[recordType + ':' + name] ?? null;
 }

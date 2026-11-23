@@ -2,7 +2,7 @@
  * Chapter: Elena, an editor, authors places, speakers and stories, attaches
  * media and external links, and imports CSVs.
  */
-import { PNG_BYTES, multipart, wavBytes } from '../client.js';
+import { PNG_BYTES, multipart, wavBytes, type Reply } from '../client.js';
 import {
   activate,
   attach,
@@ -819,6 +819,8 @@ async function importChapter(
       media
     );
 
+  if (ctx.cfg.d1) return importChapterD1(ctx, form);
+
   const preview = await w.step({
     who: elena,
     say: 'picks a places CSV with differently named columns; the page shows the column-mapping table and she maps "Place name" and "Area"',
@@ -1021,4 +1023,225 @@ async function importChapter(
   void placeId;
   void speakerId;
   void str;
+}
+
+type ImportForm = (
+  kind: string,
+  rows: string,
+  extra?: Record<string, string>,
+  media?: Array<{
+    field: string;
+    name: string;
+    type: string;
+    bytes: Uint8Array;
+  }>
+) => ReturnType<typeof multipart>;
+
+const D1_LIMIT_CODE = 'd1_daily_import_limit';
+const refusedByD1Limit = (r: Reply): string | undefined =>
+  dig(r, 'code') === D1_LIMIT_CODE
+    ? undefined
+    : `expected code ${D1_LIMIT_CODE}, got ${String(dig(r, 'code'))}`;
+
+/**
+ * The same import interactions on a D1 target. Product rule (SPEC-V2 §4, see
+ * ImportsRepository.hasCommittedImportInWindow): one committed import per UTC
+ * day per D1 database, shared by every community, so the lab cannot host a
+ * second commit. Every preview is therefore made first (the daily check also
+ * guards preview), exactly one import is committed, and the refusal of the
+ * second commit and of a new preview is asserted as covered negative steps.
+ * The committed import is the stories one, so later chapters still see the
+ * imported stories; the places import is walked up to its commit and refused.
+ */
+async function importChapterD1(ctx: Ctx, form: ImportForm): Promise<void> {
+  const { w, s } = ctx;
+  const elena = s.actors.elena!;
+  w.narrate(
+    'This target is Cloudflare D1: one committed import is allowed per UTC day for the whole database. Elena previews everything first, commits the stories import, and the platform refuses a second commit and any new preview until the next UTC day.'
+  );
+  const places = await w.step({
+    who: elena,
+    say: 'picks a places CSV with differently named columns; the page shows the column-mapping table and she maps "Place name" and "Area"',
+    method: 'POST',
+    path: '/v2/imports/preview',
+    form: form(
+      'places',
+      `Place name,Area,photo\n${w.runId} Import landing,East,${w.runId}-imp.png\n${w.runId} Import bend,West,\n`,
+      {
+        mappings: JSON.stringify({
+          name: 'Place name',
+          region: 'Area',
+          photo: 'photo',
+        }),
+      },
+      [
+        {
+          field: 'media',
+          name: `${w.runId}-imp.png`,
+          type: 'image/png',
+          bytes: PNG_BYTES,
+        },
+      ]
+    ),
+    bodyNote: 'multipart: kind=places, mappings, one CSV, one staged image',
+    expect: 201,
+    covers: ['C30'],
+    show: (r) => [
+      field('status', val(r, 'data', 'status')),
+      field('rows', val(r, 'data', 'rowCount')),
+      field('staged media', val(r, 'data', 'stagedMediaCount')),
+      field('can commit', val(r, 'data', 'canCommit')),
+    ],
+  });
+  const placesManifest = num(places, 'data', 'id');
+  s.imports.push(placesManifest);
+  await w.step({
+    who: elena,
+    say: 'reads the preview again (the review page)',
+    method: 'GET',
+    path: `/v2/imports/${placesManifest}`,
+    expect: 200,
+    covers: ['C32'],
+    show: (r) => [
+      field('status', val(r, 'data', 'status')),
+      field(
+        'row errors',
+        ((val(r, 'data', 'rowErrors') as unknown[]) ?? []).length
+      ),
+    ],
+  });
+  const stories = await w.step({
+    who: elena,
+    say: 'prepares a stories CSV whose audience column holds "Everyone" and "Members"; she maps them to Anonymous and Member in the audience-mapping step',
+    method: 'POST',
+    path: '/v2/imports/preview',
+    form: form(
+      'stories',
+      `title,audience\n${w.runId} Imported open story,Everyone\n${w.runId} Imported members story,Members\n`,
+      {
+        audienceMapping: JSON.stringify({
+          Everyone: 'public',
+          Members: 'community',
+        }),
+      }
+    ),
+    bodyNote: 'multipart: kind=stories, audienceMapping, one CSV',
+    expect: 201,
+    covers: ['C30'],
+    show: (r) => [
+      field('rows', val(r, 'data', 'rowCount')),
+      field(
+        'audience counts',
+        JSON.stringify(dig(r, 'data', 'audienceCounts') ?? {})
+      ),
+    ],
+  });
+  const storiesManifest = num(stories, 'data', 'id');
+  s.imports.push(storiesManifest);
+  const bad = await w.step({
+    who: elena,
+    say: 'previews a speakers CSV with a bad birth date, to see the invalid-rows table',
+    method: 'POST',
+    path: '/v2/imports/preview',
+    form: form(
+      'speakers',
+      `name,birthDate\n${w.runId} Import speaker,not-a-date\n`
+    ),
+    expect: [201, 400, 422],
+    covers: ['C32'],
+    show: (r) => [
+      field('status', val(r, 'data', 'status')),
+      field('can commit', val(r, 'data', 'canCommit')),
+      'the invalid rows table lists row, field and reason, with "Download invalid rows as CSV"',
+    ],
+  });
+  const d = await w.step({
+    who: elena,
+    say: 'starts another places import and walks away; she discards it',
+    method: 'POST',
+    path: '/v2/imports/preview',
+    form: form('places', `name\n${w.runId} Discarded place\n`),
+    expect: 201,
+    covers: ['C30'],
+  });
+  await w.step({
+    who: elena,
+    say: 'discards that abandoned preview right away',
+    method: 'DELETE',
+    path: `/v2/imports/${num(d, 'data', 'id')}`,
+    expect: [200, 204],
+    covers: ['C32'],
+  });
+  await w.step({
+    who: elena,
+    say: 'submits the stories import; it is applied all-or-nothing (the one commit D1 allows today)',
+    method: 'POST',
+    path: `/v2/imports/${storiesManifest}/commit`,
+    expect: [200, 201],
+    covers: ['C31'],
+    show: (r) => [
+      field('status', val(r, 'data', 'status')),
+      field('result', JSON.stringify(val(r, 'data', 'resultSummary') ?? {})),
+    ],
+  });
+  await w.step({
+    who: elena,
+    say: 'opens the stories list to see the imported stories',
+    method: 'GET',
+    path: `/v2/stories?search=${encodeURIComponent(w.runId + ' Imported')}&limit=50`,
+    expect: 200,
+    covers: ['C31'],
+    check: (r) => {
+      const titles = (
+        (dig(r, 'data', 'stories') as Array<{ title: string }>) ?? []
+      ).map((x) => x.title);
+      return [
+        `${w.runId} Imported open story`,
+        `${w.runId} Imported members story`,
+      ].every((t) => titles.includes(t))
+        ? undefined
+        : 'the committed import did not create both stories';
+    },
+  });
+  await w.step({
+    who: elena,
+    say: 'submits the places import too; D1 refuses a second committed import on the same UTC day',
+    method: 'POST',
+    path: `/v2/imports/${placesManifest}/commit`,
+    expect: 429,
+    negative: true,
+    covers: ['C31'],
+    check: refusedByD1Limit,
+    show: 'the page says the daily D1 import limit is reached and lists the alternatives',
+  });
+  await w.step({
+    who: elena,
+    say: 'tries to start a new places import the same day',
+    method: 'POST',
+    path: '/v2/imports/preview',
+    form: form('places', `name\n${w.runId} Second-day place\n`),
+    expect: 429,
+    negative: true,
+    covers: ['C30'],
+    check: refusedByD1Limit,
+  });
+  await w.step({
+    who: elena,
+    say: 'opens the list of imports',
+    method: 'GET',
+    path: '/v2/imports',
+    expect: 200,
+    covers: ['C32'],
+    show: (r) => [
+      field(
+        'imports',
+        dig(r, 'meta', 'total') ?? ((val(r, 'data') as unknown[]) ?? []).length
+      ),
+    ],
+  });
+  const badId = val(bad, 'data', 'id');
+  if (typeof badId === 'number') s.imports.push(badId);
+  w.narrate(
+    'Elena leaves the places and speakers previews open; the cleanup chapter discards what is still open at the end of the day.'
+  );
 }

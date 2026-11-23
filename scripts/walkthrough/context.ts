@@ -27,6 +27,12 @@ export interface Config {
   allowDestructive: boolean;
   /** Explicitly log in as the real admin (a migrated bcrypt login upgrades the stored verifier to Argon2id). */
   loginRealAdmin?: boolean;
+  /**
+   * The target is a Cloudflare D1 database (a Worker deployment): one committed
+   * import per UTC day for the whole database. The import chapter then commits
+   * once and asserts the refusal of the second. Set by --d1 (or WT_D1=1).
+   */
+  d1?: boolean;
 }
 
 /** The disposable community every mutating chapter runs in. */

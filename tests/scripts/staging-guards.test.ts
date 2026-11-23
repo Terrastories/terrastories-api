@@ -102,6 +102,21 @@ describe('staging guards', () => {
     expect(() =>
       assertStagingUrl('https://s.example.org', 's.example.org')
     ).not.toThrow();
+    // --local: loopback http only
+    for (const ok of ['http://127.0.0.1:8787', 'http://localhost:8787'])
+      expect(() => assertStagingUrl(ok, undefined, true), ok).not.toThrow();
+    for (const bad of [
+      'https://127.0.0.1:8787',
+      'http://terrastories-staging-api.x.workers.dev',
+      'http://our.terrastories.app',
+      'http://192.168.1.5:8787',
+      'http://127.0.0.1.evil.example',
+    ])
+      expect(() => assertStagingUrl(bad, undefined, true), bad).toThrow(
+        GuardError
+      );
+    // without the flag, loopback http stays refused
+    expect(() => assertStagingUrl('http://127.0.0.1:8787')).toThrow(GuardError);
   });
 });
 

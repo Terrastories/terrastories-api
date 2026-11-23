@@ -3,10 +3,14 @@
 # the Worker CPU measurement procedure. Dry run by default.
 #
 #   STAGING_URL=https://terrastories-staging-api.<sub>.workers.dev \
-#     scripts/staging/smoke.sh [--apply] [--community SLUG] [--cpu-procedure]
+#     scripts/staging/smoke.sh [--apply] [--community SLUG] [--cpu-procedure] [--local]
 #
 # Refuses any STAGING_URL whose host is not a staging host (or a production
 # host); STAGING_ALLOW_HOST=<exact host> overrides for a custom staging domain.
+# --local: rehearsal against a local workerd (wrangler dev --local) at
+# STAGING_URL=http://127.0.0.1:<port> (loopback http only; any other host is
+# refused). The R2 S3 probe is skipped (no S3 endpoint locally). The
+# walkthrough always gets --d1: staging and workerd both run on D1.
 # --allow-destructive is passed to the walkthrough: it only creates and erases
 # a disposable community, but it is a write run, so it stays staging-only.
 # Env (names only, values never printed):
@@ -16,13 +20,14 @@ set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-COMMUNITY="barbara" CPU_ONLY=0
+COMMUNITY="barbara" CPU_ONLY=0 LOCAL=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --apply) APPLY=1 ;;
     --community) COMMUNITY="${2:?}"; shift ;;
     --cpu-procedure) CPU_ONLY=1 ;;
-    -h|--help) sed -n '2,14p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    --local) LOCAL=1 ;;
+    -h|--help) sed -n '2,19p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
   shift
@@ -54,7 +59,7 @@ EOF
 if [ "$CPU_ONLY" = 1 ]; then cpu_procedure; exit 0; fi
 
 need_env STAGING_URL
-guard url "$STAGING_URL"
+if [ "$LOCAL" = 1 ]; then guard url "$STAGING_URL" --local; else guard url "$STAGING_URL"; fi
 BASE="${STAGING_URL%/}"
 info "mode: $([ "$APPLY" = 1 ] && echo APPLY || echo DRY-RUN) target host checked"
 
@@ -71,9 +76,14 @@ else
 fi
 
 if [ "$APPLY" = 1 ]; then need_env WT_SUPER_IDENTIFIER WT_SUPER_PASSWORD; fi
-(cd "$REPO_ROOT" && run npm run walkthrough -- --base-url "$BASE" --community "$COMMUNITY" \
+(cd "$REPO_ROOT" && run npm run walkthrough -- --base-url "$BASE" --community "$COMMUNITY" --d1 \
   --super-credentials-env --allow-destructive --out "walkthrough-out/staging-$(date -u +%Y%m%dT%H%M%SZ)")
 info "go/no-go needs summary.md to show PASS with every interaction row covered (89/89)"
+
+if [ "$LOCAL" = 1 ]; then
+  info "--local: R2 part-checksum probe and CPU procedure skipped (no S3 endpoint or Free-plan CPU limit on local workerd)"
+  exit 0
+fi
 
 if [ "$APPLY" = 1 ]; then
   need_env R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET_NAME

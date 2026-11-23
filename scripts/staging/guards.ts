@@ -10,7 +10,7 @@
  *   tsx guards.ts crons <wrangler.jsonc> <env> cron triggers within the free limit
  *   tsx guards.ts d1-size <bytes>              D1 database within the free limit
  *   tsx guards.ts config <wrangler.jsonc>      env.staging matches the kit's fixed names
- *   tsx guards.ts url <staging-url>            URL is a staging origin
+ *   tsx guards.ts url <staging-url> [--local]  URL is a staging origin (--local: loopback http only)
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -211,12 +211,28 @@ export function assertD1Size(bytes: number): void {
   }
 }
 
-export function assertStagingUrl(raw: string, allowHost?: string): void {
+export function assertStagingUrl(
+  raw: string,
+  allowHost?: string,
+  local = false
+): void {
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
     throw new GuardError('refused: STAGING_URL is not a URL');
+  }
+  if (local) {
+    // Explicit rehearsal against a workerd (wrangler dev --local) on this
+    // machine: plain http, loopback host only, never a staging or production
+    // name, so the flag cannot point the kit at a remote plain-http target.
+    const loopback = ['127.0.0.1', 'localhost', '[::1]'];
+    if (url.protocol !== 'http:' || !loopback.includes(url.hostname)) {
+      throw new GuardError(
+        'refused: --local accepts only http://127.0.0.1, http://localhost or http://[::1]'
+      );
+    }
+    return;
   }
   if (url.protocol !== 'https:') {
     throw new GuardError('refused: STAGING_URL must be https');
@@ -259,6 +275,8 @@ export function main(argv: string[]): number {
       assertD1Size(Number(rest[0]));
     else if (cmd === 'url' && rest.length === 1)
       assertStagingUrl(rest[0] as string, process.env.STAGING_ALLOW_HOST);
+    else if (cmd === 'url' && rest.length === 2 && rest[1] === '--local')
+      assertStagingUrl(rest[0] as string, undefined, true);
     else {
       process.stderr.write(
         'usage: guards.ts name|account|crons|d1-size|url ...\n'

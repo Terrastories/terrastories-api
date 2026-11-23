@@ -220,7 +220,9 @@ export class Walk {
         else if (Array.isArray(shown)) record.ui = shown;
       }
     } catch (error) {
-      failure = `request failed: ${error instanceof Error ? error.message : String(error)}`;
+      const cause = (error as { cause?: { code?: string; message?: string } })
+        ?.cause;
+      failure = `request failed: ${error instanceof Error ? error.message : String(error)}${cause ? ` (${cause.code ?? cause.message})` : ''}`;
     }
     if (spec.authFailure) this.lastAuthFailure = Date.now();
     record.ms = Date.now() - started;

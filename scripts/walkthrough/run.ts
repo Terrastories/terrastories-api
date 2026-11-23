@@ -238,6 +238,7 @@ interface Parsed {
   allowDestructive: boolean;
   loginRealAdmin: boolean;
   local: boolean;
+  d1: boolean;
   help: boolean;
 }
 
@@ -250,6 +251,7 @@ export function parseArgs(argv: string[]): Parsed {
     allowDestructive: false,
     loginRealAdmin: false,
     local: false,
+    d1: false,
     help: false,
   };
   const optionalValue = (i: number): [string | undefined, number] => {
@@ -287,6 +289,7 @@ export function parseArgs(argv: string[]): Parsed {
     } else if (arg === '--allow-destructive') parsed.allowDestructive = true;
     else if (arg === '--login-real-admin') parsed.loginRealAdmin = true;
     else if (arg === '--local') parsed.local = true;
+    else if (arg === '--d1') parsed.d1 = true;
     else if (arg === '--help' || arg === '-h') parsed.help = true;
     else throw new Error(`Unknown argument ${arg}`);
   }
@@ -303,6 +306,7 @@ const USAGE = `Usage: npm run walkthrough -- --base-url <url> [options]
   --super-credentials-env [P]   read P_IDENTIFIER and P_PASSWORD (default WT_SUPER)
   --allow-destructive           also walk withdrawal and erasure, on a disposable community the script creates
 Everything that changes data runs in a disposable community made with the super admin credentials; --community is only read.
+  --d1                          the target is a Cloudflare D1 Worker (staging, production, workerd): one committed import per UTC day, so the import chapter commits once and asserts the 429 for the second (also WT_D1=1)
   --local                       start an in-process stand-in app instead of --base-url
 Bootstrap secret: WT_BOOTSTRAP_SECRET.`;
 
@@ -341,6 +345,7 @@ export async function main(
       setupFromBootstrap: args.setupFromBootstrap,
       allowDestructive: args.allowDestructive,
       loginRealAdmin: args.loginRealAdmin,
+      d1: args.d1 || env.WT_D1 === '1',
       // only --setup-from-bootstrap may ever send the secret
       bootstrapSecret: args.setupFromBootstrap
         ? env.WT_BOOTSTRAP_SECRET

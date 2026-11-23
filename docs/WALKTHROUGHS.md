@@ -26,19 +26,23 @@ npm run walkthrough -- ... --admin-credentials-env --login-real-admin
 
 # no server at hand: an in-process stand-in (SQLite, local files)
 npm run walkthrough -- --local --allow-destructive
+
+# a Cloudflare D1 Worker (staging, production, or a local workerd): add --d1
+npm run walkthrough -- --base-url https://... --super-credentials-env --allow-destructive --d1
 ```
 
-| Option                             | Meaning                                                                                                                                                                                                          |
-| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--base-url`                       | API origin. Required unless `--local`.                                                                                                                                                                           |
-| `--community`                      | Slug of the real community. Read-only. Default `barbara`.                                                                                                                                                        |
-| `--persona`                        | `anonymous`, `viewer`, `member`, `editor`, `admin`, `super`, `steward`, `fieldkit` or `all`. Coverage is enforced only for `all`.                                                                                |
-| `--super-credentials-env [PREFIX]` | Super admin (`PREFIX_IDENTIFIER`, `PREFIX_PASSWORD`, default `WT_SUPER`). Without it no play community can be made: the run says which personas did not run, lists the uncovered rows and fails.                 |
-| `--admin-credentials-env [PREFIX]` | Real admin credentials (default `WT_ADMIN`). Used only with `--login-real-admin`.                                                                                                                                |
-| `--login-real-admin`               | Explicitly sign in as the real admin in the read-only check. A successful login of a migrated bcrypt account upgrades the stored verifier to Argon2id: expected product behaviour, but a write, so it is opt-in. |
-| `--setup-from-bootstrap`           | Fresh install: the field-kit operator creates the community and its admin through `/v2/bootstrap` (reads `WT_BOOTSTRAP_SECRET`); that community is the play community. Only this flag ever sends the secret.     |
-| `--allow-destructive`              | Also walks steward notices, withdrawal and erasure (on the lab community). Without it those steps appear as "deferred".                                                                                          |
-| `--out`                            | Output folder.                                                                                                                                                                                                   |
+| Option                             | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--base-url`                       | API origin. Required unless `--local`.                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `--community`                      | Slug of the real community. Read-only. Default `barbara`.                                                                                                                                                                                                                                                                                                                                                                                          |
+| `--persona`                        | `anonymous`, `viewer`, `member`, `editor`, `admin`, `super`, `steward`, `fieldkit` or `all`. Coverage is enforced only for `all`.                                                                                                                                                                                                                                                                                                                  |
+| `--super-credentials-env [PREFIX]` | Super admin (`PREFIX_IDENTIFIER`, `PREFIX_PASSWORD`, default `WT_SUPER`). Without it no play community can be made: the run says which personas did not run, lists the uncovered rows and fails.                                                                                                                                                                                                                                                   |
+| `--admin-credentials-env [PREFIX]` | Real admin credentials (default `WT_ADMIN`). Used only with `--login-real-admin`.                                                                                                                                                                                                                                                                                                                                                                  |
+| `--login-real-admin`               | Explicitly sign in as the real admin in the read-only check. A successful login of a migrated bcrypt account upgrades the stored verifier to Argon2id: expected product behaviour, but a write, so it is opt-in.                                                                                                                                                                                                                                   |
+| `--setup-from-bootstrap`           | Fresh install: the field-kit operator creates the community and its admin through `/v2/bootstrap` (reads `WT_BOOTSTRAP_SECRET`); that community is the play community. Only this flag ever sends the secret.                                                                                                                                                                                                                                       |
+| `--d1`                             | The target runs on Cloudflare D1 (also `WT_D1=1`). D1 allows **one committed import per UTC day for the whole database** (SPEC-V2 §4, not per community), so the import chapter previews everything first, commits the stories import once, and asserts `429 d1_daily_import_limit` for the places commit and for a new preview as covered negative steps. Without it, the chapter commits twice and a D1 target fails at step 4.61 with that 429. |
+| `--allow-destructive`              | Also walks steward notices, withdrawal and erasure (on the lab community). Without it those steps appear as "deferred".                                                                                                                                                                                                                                                                                                                            |
+| `--out`                            | Output folder.                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
 Exit code is non-zero when any step fails, when `--persona all` leaves a
 non-dropped handoff row without a step, or when a requested persona could not
@@ -53,6 +57,38 @@ community record, the map-config renderer block and the readable counts. It
 never generates recovery codes, and never changes steward, visibility,
 settings, profile or password. Counts are written into the transcript
 (`migrated-community-check.md`).
+
+With `--login-real-admin` the check also streams up to three migrated files
+(distinct media types) through the authenticated `GET /v2/media/:id` (first
+bytes, `Range`), comparing the served content type with the file record. If
+the real admin has not saved recovery codes the API gates every read
+(`403 recovery_codes_required`). The run then reports **GATED** in the
+transcript (`admin_reads` and `admin_media` are `gated` in the counts line)
+and does not skip silently: a person signs in as that admin, saves the codes,
+and the check is run again. The script never generates codes for a real
+account.
+
+## Run it on Workers (workerd)
+
+`npm run walkthrough:workers` runs the whole walkthrough (89/89, `--d1`
+semantics, `--login-real-admin`) against `src/worker.ts` bundled and executing
+in workerd through Miniflare with D1 and R2 (`scripts/walkthrough/workers-app.ts`,
+`tests/scripts/walkthrough-workers/`). It is a dedicated gate, like
+`qa:personas:workers`: the test skips unless `WALKTHROUGH_WORKERS=1`. The
+stand-in community holds one migrated story with a PNG in D1 and R2.
+
+For a rehearsal against `wrangler dev --local` use
+`scripts/staging/smoke.sh --local` with `STAGING_URL=http://127.0.0.1:<port>`
+(loopback http only). Put local R2 objects with their type, because direct R2
+reads use it (the Worker itself serves the type from the D1 `files.mime_type`
+column):
+
+```sh
+npx wrangler r2 object put <bucket>/<key> --file ./photo.png --content-type image/png --local
+```
+
+`scripts/migrate-rails-load.ts --target r2` already sends `Content-Type` (from
+the file record) on every PUT and multipart create; a test asserts it.
 
 ## Follow it
 

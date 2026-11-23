@@ -300,13 +300,29 @@ async function loadNodeSqlite(
 
   await mkdir(storageRoot, { recursive: true, mode: 0o700 });
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
+  const touchedDirs = new Set<string>();
   for (const object of objects) {
     if (present.has(object.storageKey)) continue;
+    const destination = join(storageRoot, object.storageKey);
     await copyExclusive(
       join(dir, MEDIA_DIRECTORY, object.storageKey),
-      join(storageRoot, object.storageKey),
+      destination,
       { sha256: object.sha256, size: object.byteSize }
     );
+    // Remember every directory whose entries changed, up to the storage root.
+    for (
+      let folder = dirname(destination);
+      folder.length >= storageRoot.length;
+      folder = dirname(folder)
+    ) {
+      touchedDirs.add(folder);
+      if (folder === storageRoot) break;
+    }
+  }
+  // Make the new directory entries durable before the database is published,
+  // so a power loss cannot leave a database that references vanished media.
+  for (const folder of [...touchedDirs].sort().reverse()) {
+    await fsyncPath(folder);
   }
   // Database last: it never references a missing object.
   const source = join(dir, V2_DATABASE_FILENAME);

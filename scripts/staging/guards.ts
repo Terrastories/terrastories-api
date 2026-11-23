@@ -309,7 +309,8 @@ function tokens(value: string | string[] | undefined): string[] {
 
 /** STAGING_FRONTEND_ORIGIN: a bare http(s) origin, no path, query or fragment. */
 export function assertFrontendOrigin(raw: string): void {
-  const value = (raw ?? '').trim();
+  // Not trimmed: a padded value would be substituted verbatim into the CORS file.
+  const value = raw ?? '';
   let url: URL;
   try {
     url = new URL(value);
@@ -408,7 +409,22 @@ export function assertCorsPolicyAllowsUploads(
   origin: string
 ): void {
   const want = origin.trim().toLowerCase();
-  const allowed = parseLabelledBlocks(listText).some((rule) => {
+  const rules = parseLabelledBlocks(listText);
+  // Every rule that lets a browser PUT must be for exactly this origin: a
+  // second rule with a wildcard or another origin would widen the policy.
+  const widened = rules.some(
+    (rule) =>
+      tokens(rule.allowed_methods).includes('put') &&
+      tokens(rule.allowed_origins).some((o) => o !== want)
+  );
+  if (widened) {
+    throw new GuardError(
+      'refused: the R2 CORS policy lets another origin (or *) PUT; only ' +
+        origin +
+        ' may'
+    );
+  }
+  const allowed = rules.some((rule) => {
     const origins = tokens(rule.allowed_origins);
     return (
       origins.length === 1 &&
@@ -501,11 +517,16 @@ export function assertMediaBucket(config: unknown, bucket: string): void {
 
 /** stdin: the OPTIONS answer a browser sends before a direct part PUT. */
 export function assertCorsPreflight(origin: string, response: string): void {
-  const want = origin.trim().toLowerCase();
   // Header block only (up to the first blank line), and only a 2xx answer: a
   // body that merely looks like headers must not pass.
   const head = response.replace(/\r\n?/g, '\n').split(/\n[ \t]*\n/)[0] ?? '';
-  const statusOk = /^HTTP\/\S+\s+2\d\d\b/.test(head.trimStart());
+  // Browsers reject a repeated Access-Control-Allow-Origin, and the block
+  // parser would keep only the last one: require exactly one.
+  const allowOriginCount = (
+    head.match(/^access-control-allow-origin[ \t]*:/gim) ?? []
+  ).length;
+  const statusOk =
+    /^HTTP\/\S+\s+2\d\d\b/.test(head.trimStart()) && allowOriginCount === 1;
   const allowed =
     statusOk &&
     parseLabelledBlocks(head).some((block) => {
@@ -513,9 +534,9 @@ export function assertCorsPreflight(origin: string, response: string): void {
       for (const [name, value] of Object.entries(block))
         header[name.toLowerCase()] = value;
       const allowOrigin = (header['access-control-allow-origin'] ?? '').trim();
-      // A single exact value: a comma-separated list is not a valid answer.
-      const originsOk =
-        allowOrigin === '*' || allowOrigin.toLowerCase() === want;
+      // A single exact value (browsers compare case-sensitively): a
+      // comma-separated list or a differently cased origin is not valid.
+      const originsOk = allowOrigin === '*' || allowOrigin === origin;
       const methods = tokens(header['access-control-allow-methods']);
       const headers = tokens(header['access-control-allow-headers']);
       return (

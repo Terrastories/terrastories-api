@@ -103,6 +103,8 @@ describe('frontend origin guard', () => {
       'app.terrastories.test',
       'https://',
       'https://app.terrastories.test/',
+      ' https://app.terrastories.test',
+      'https://app.terrastories.test ',
       'https://APP.terrastories.test',
       'https://app.terrastories.test:443',
       'https://app.terrastories.test/admin',
@@ -234,6 +236,14 @@ describe('wrangler list read-back', () => {
     ).not.toThrow();
   });
 
+  it('refuses a policy where a second rule lets another origin or * PUT', () => {
+    const widened = CORS_LIST_OK + '\n\n' + CORS_LIST_OK.replace(ORIGIN, '*');
+    expect(widened).toContain('*');
+    expect(() => assertCorsPolicyAllowsUploads(widened, ORIGIN)).toThrow(
+      /another origin/
+    );
+  });
+
   it('refuses an abort rule scoped to a prefix or whose day count belongs to another action', () => {
     for (const list of [
       LIFECYCLE_LIST_OK.replace('(all prefixes)', 'uploads/'),
@@ -330,6 +340,21 @@ describe('the browser preflight answer', () => {
         GuardError
       );
     }
+  });
+
+  it('refuses a repeated or differently cased Access-Control-Allow-Origin', () => {
+    const duplicated = PREFLIGHT_OK.replace(
+      /^(HTTP[^\n]*\n)/,
+      (line) => line + 'access-control-allow-origin: https://evil.example\r\n'
+    );
+    expect(duplicated).not.toBe(PREFLIGHT_OK);
+    expect(() => assertCorsPreflight(ORIGIN, duplicated)).toThrow(GuardError);
+    const cased = PREFLIGHT_OK.replace(
+      `access-control-allow-origin: ${ORIGIN}`,
+      `access-control-allow-origin: ${ORIGIN.replace('app.', 'APP.')}`
+    );
+    expect(cased).not.toBe(PREFLIGHT_OK);
+    expect(() => assertCorsPreflight(ORIGIN, cased)).toThrow(GuardError);
   });
 
   it('reads the header block only, never the body', () => {

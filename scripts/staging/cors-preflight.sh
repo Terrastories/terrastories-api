@@ -46,10 +46,11 @@ fi
 [[ "$R2_ACCOUNT_ID" =~ ^[0-9a-fA-F]{32}$ ]] ||
   die "R2_ACCOUNT_ID must be the 32-hex Cloudflare account id"
 endpoint="https://$R2_ACCOUNT_ID$S3_HOST_SUFFIX/$R2_BUCKET_NAME"
-if ! answer="$(curl -sS -i -X OPTIONS "$endpoint" \
+# curl's own error text names the account-scoped host, so it is discarded.
+if ! answer="$(curl -s -i -X OPTIONS "$endpoint" \
     -H "Origin: $STAGING_FRONTEND_ORIGIN" \
     -H "Access-Control-Request-Method: PUT" \
-    -H "Access-Control-Request-Headers: $PART_UPLOAD_HEADER")"; then
+    -H "Access-Control-Request-Headers: $PART_UPLOAD_HEADER" 2>/dev/null)"; then
   die "CORS preflight request to bucket $R2_BUCKET_NAME failed"
 fi
 printf '%s' "$answer" | guard preflight "$STAGING_FRONTEND_ORIGIN"

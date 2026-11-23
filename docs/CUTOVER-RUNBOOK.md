@@ -79,6 +79,30 @@ Staging uses only `terrastories-staging-*` resources, a workers.dev URL, no DNS 
 5. **All communities in staging.** Only if the R2 budget allows (decision A below) or a paid plan is approved. Free R2 holds 10 GB, so 30 GB cannot be staged on Free. If not possible, rehearse the rest as D1-only (`--skip-r2` on `load-community.sh`), accept that media-dependent checks are covered by `barbara` only, and record that in the go/no-go sheet. Rehearse the real full capture timing at least once: its duration is the maintenance-window length.
 6. **Rollback rehearsal on staging**: restore from a Time Travel bookmark (section 9) at least once, with the orphan-sweep hold set first.
 
+### First real staging run (2026-11-23)
+
+Account `<account-id>`, worker URL `https://terrastories-staging-api.<subdomain>.workers.dev` (placeholders; real values stay out of the repo). Workers Free plan.
+
+| Item                    | Result                                                                                                                                                |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Load, `barbara`         | D1 via SQL dump: 12 files applied, `verify.sql` passed. R2: 7 objects uploaded with `wrangler r2 object put` (`--r2-via-wrangler`) and size-verified. |
+| Walkthrough             | PASS 89/89 (336 steps, 0 failed) on Workers Free                                                                                                      |
+| CPU `POST /v2/media`    | 90 MB raw upload: 9 ms CPU, 5.8 s wall (under the 10 ms Free budget)                                                                                  |
+| CPU auth                | login 6 to 7 ms, prelogin 3 to 5 ms                                                                                                                   |
+| CPU `DELETE /v2/media`  | 18 ms: over 10 ms but the outcome was ok (no 1102). **Track**: re-measure and decide before production.                                               |
+| R2 part-checksum probe  | NOT run: needs a bucket-scoped R2 API token (S3 credentials)                                                                                          |
+| 300 MB multipart upload | NOT run: same token requirement                                                                                                                       |
+
+Both open items stay unchecked in section 5 until the token exists and they are run.
+
+Operator notes from the run:
+
+- The shell may export a `CLOUDFLARE_API_TOKEN` that belongs to another account. Always run wrangler and the kit as `env -u CLOUDFLARE_API_TOKEN scripts/staging/<script>.sh ...` and confirm the account id in `npx wrangler whoami`. The kit's account guard refuses a mismatch, but unset the variable first.
+- Without S3 credentials use `scripts/staging/load-community.sh ... --apply --r2-via-wrangler` (objects over 300 MiB need the S3 path).
+- `wrangler tail <worker> --format json` takes no `--env` (the worker name already includes `staging`) and prints pretty-printed multi-line JSON. Parse it with `node scripts/staging/parse-tail.mjs`.
+- `POST /v2/media` with raw bytes accepts only `role=user_photo`; send no role for the CPU measurement.
+- D1 allows one committed import per UTC day, so a second walkthrough on the same UTC day fails. Use `smoke.sh --skip-walkthrough`, or rerun after 00:00 UTC (smoke prints "walkthrough already ran today").
+
 ## 4. Decisions to resolve before production
 
 ### A. R2 Free (10 GB) versus 30 GB media (must be resolved before production cutover)
@@ -172,4 +196,4 @@ After DNS switch, within the retention window:
 - **R2 part checksum** is not relied on; integrity of large uploads is part length, total size and the type sniff. `File.checksum` is null for multipart uploads on Workers.
 - **R2 Free 10 GB** versus 30 GB media (decision A).
 - **Time Travel on Free** keeps 7 days; the retention window is 30 days, so archive custody, not D1, is the long-term rollback source.
-- This runbook and the staging kit were authored offline and have only been exercised against fakes (guard tests). The first real run on staging is a rehearsal of the kit itself; expect to fix wrangler flag drift (`d1 execute` flags, `d1 list --json` shape).
+- The staging kit was authored offline; its first real run (2026-11-23, section 3) found and fixed the issues listed there. Expect further wrangler flag drift on later runs (`d1 execute` flags, `d1 list --json` shape).

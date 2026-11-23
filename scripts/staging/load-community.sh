@@ -3,6 +3,7 @@
 #
 #   scripts/staging/load-community.sh --transform-output DIR [--sql-out DIR]
 #       [--apply] [--wipe-and-retry] [--allow-over-budget] [--skip-r2]
+#       [--r2-via-wrangler]
 #
 # Flow (each step resumable; rerun the same command after a failure):
 #   1. migrate:rails:load --target d1 --dry-run   (row budget check)
@@ -11,7 +12,12 @@
 #   4. [apply] wrangler d1 migrations apply --remote
 #   5. [apply] execute SQL files in d1-import.json order, skipping files already
 #      in the _rails_migration_load ledger
-#   6. [apply] migrate:rails:load --target r2 (dry run, then real)
+#   6. [apply] migrate:rails:load --target r2 (dry run, then real); or, with
+#      --r2-via-wrangler (no R2_* S3 credentials), 'wrangler r2 object put
+#      --remote --content-type' per r2-upload-manifest.json entry, each object
+#      verified afterwards by 'wrangler r2 object get' size. Reruns skip
+#      objects already present with the right size. Objects over 300 MiB are
+#      refused (wrangler limit): use the S3 path for them.
 #   7. [apply] verify.sql
 # Prints counts and step status only. Wrangler output goes to a mode-600 log
 # under the --sql-out directory, never to the terminal.
@@ -20,13 +26,15 @@
 # Resume safety: the SQL dump directory records the SHA-256 of the transform
 # output's manifest.json (.transform-manifest.sha256); a directory made from a
 # different transform output is refused, never reused.
-# Env: CLOUDFLARE_ACCOUNT_ID (resource names are fixed); for r2:
+# Env: CLOUDFLARE_ACCOUNT_ID (resource names are fixed); for r2 (S3 path):
 #   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY (environment only).
+#   A CLOUDFLARE_API_TOKEN exported for another account breaks wrangler: run
+#   with 'env -u CLOUDFLARE_API_TOKEN' (the account guard checks whoami).
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-TRANSFORM="" SQL_OUT="" WIPE=0 OVER="" SKIP_R2=0
+TRANSFORM="" SQL_OUT="" WIPE=0 OVER="" SKIP_R2=0 R2_WRANGLER=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --apply) APPLY=1 ;;
@@ -35,7 +43,8 @@ while [ $# -gt 0 ]; do
     --wipe-and-retry) WIPE=1 ;;
     --allow-over-budget) OVER="--allow-over-budget" ;;
     --skip-r2) SKIP_R2=1 ;;
-    -h|--help) sed -n '2,22p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    --r2-via-wrangler) R2_WRANGLER=1 ;;
+    -h|--help) sed -n '2,32p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
   shift
@@ -57,9 +66,36 @@ load() { npm run --silent migrate:rails:load -- --transform-output "$TRANSFORM" 
 
 info "step 1: D1 budget dry run"
 load --target d1 --dry-run ${OVER:+"$OVER"}
+# wrangler-based R2 upload: put each manifest object, then verify its size.
+r2_via_wrangler() {
+  local manifest="$SQL_OUT/r2-upload-manifest.json" listing key size ct src tmp got n=0 up=0 present=0 total
+  [ -f "$manifest" ] || die "$manifest missing: run the D1 dump step first"
+  listing="$(node -e 'for (const o of JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).objects) console.log([o.key,o.size,o.contentType].join("\t"))' "$manifest")"
+  total="$(printf '%s\n' "$listing" | grep -c . || true)"
+  tmp="$(mktemp)"; chmod 600 "$tmp"
+  while IFS=$'\t' read -r key size ct; do
+    [ -n "$key" ] || continue
+    n=$((n+1))
+    src="$TRANSFORM/v2-media/$key"
+    [ -f "$src" ] || { rm -f "$tmp"; die "r2 object $n/$total: source file missing"; }
+    [ "$size" -le 314572800 ] || { rm -f "$tmp"; die "r2 object $n/$total is over 300 MiB: use the S3 path"; }
+    if wr r2 object get "$BUCKET/$key" --remote --file "$tmp" && [ "$(stat -c %s "$tmp")" = "$size" ]; then
+      present=$((present+1)); continue
+    fi
+    wr r2 object put "$BUCKET/$key" --remote --file "$src" --content-type "$ct" || { rm -f "$tmp"; die "r2 put $n/$total failed; see $LOG"; }
+    : > "$tmp"
+    wr r2 object get "$BUCKET/$key" --remote --file "$tmp" || { rm -f "$tmp"; die "r2 verify get $n/$total failed; see $LOG"; }
+    got="$(stat -c %s "$tmp")"
+    [ "$got" = "$size" ] || { rm -f "$tmp"; die "r2 verify $n/$total: size mismatch (expected $size, got $got)"; }
+    up=$((up+1))
+  done <<< "$listing"
+  rm -f "$tmp"
+  info "r2 via wrangler: objects=$total uploaded=$up already_present=$present (all size-verified)"
+}
+
 if [ "$APPLY" != 1 ]; then
   info "dry run only. Planned: d1 sql dump -> backup+bookmark -> migrations -> SQL files -> r2 upload -> verify.sql"
-  [ "$SKIP_R2" = 1 ] || { info "r2 dry run"; if [ -n "${R2_ACCESS_KEY_ID:-}" ]; then load --target r2 --bucket "$BUCKET" --dry-run; else info "R2_* not set: skipping r2 dry run"; fi; }
+  [ "$SKIP_R2" = 1 ] || { info "r2 dry run"; if [ "$R2_WRANGLER" = 1 ]; then info "--r2-via-wrangler: objects are put and size-verified with wrangler at apply time"; elif [ -n "${R2_ACCESS_KEY_ID:-}" ]; then load --target r2 --bucket "$BUCKET" --dry-run; else info "R2_* not set: skipping r2 dry run"; fi; }
   exit 0
 fi
 
@@ -118,8 +154,13 @@ info "step 5 done: files=$total already_applied=$skipped"
 
 if [ "$SKIP_R2" = 1 ]; then
   info "step 6 skipped (--skip-r2)"
+elif [ "$R2_WRANGLER" = 1 ]; then
+  info "step 6: R2 upload via wrangler (reruns skip size-verified objects)"
+  r2_via_wrangler
 else
-  need_env R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY
+  if [ -z "${R2_ACCESS_KEY_ID:-}" ] || [ -z "${R2_SECRET_ACCESS_KEY:-}" ] || [ -z "${R2_ACCOUNT_ID:-}" ]; then
+    die "R2_* S3 credentials are not set: export them, or rerun with --r2-via-wrangler"
+  fi
   info "step 6: R2 upload (reruns skip verified objects)"
   load --target r2 --bucket "$BUCKET" --dry-run
   load --target r2 --bucket "$BUCKET"

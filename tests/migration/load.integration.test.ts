@@ -124,6 +124,20 @@ describeWithPostgres('Rails -> V2 load (stage 3)', () => {
 
   afterAll(() => undefined);
 
+  describe('d1 dry run', () => {
+    it('does not require --sql-out and writes nothing', async () => {
+      const report = await loadTransformOutput({
+        transformDir: outDir,
+        target: 'd1',
+        dryRun: true,
+      });
+      expect(report).toMatchObject({ dryRun: true, target: 'd1' });
+      await expect(
+        loadTransformOutput({ transformDir: outDir, target: 'd1' })
+      ).rejects.toThrow(/--sql-out is required/);
+    });
+  });
+
   describe('node-sqlite', () => {
     it('dry run reports counts and writes nothing', async () => {
       const data = next('data');

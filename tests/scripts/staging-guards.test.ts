@@ -22,6 +22,11 @@ import {
   countCrons,
   parseJsonc,
 } from '../../scripts/staging/guards.js';
+// @ts-expect-error plain .mjs helper without types
+import {
+  splitJsonObjects,
+  tailRows,
+} from '../../scripts/staging/parse-tail.mjs';
 
 const ROOT = resolve(__dirname, '../..');
 const ACCOUNT = 'a'.repeat(32);
@@ -258,5 +263,160 @@ esac
     const r = run(bare);
     expect(r.status).not.toBe(0);
     expect(r.stderr).toMatch(/without a transform stamp/);
+  });
+});
+
+describe('load-community.sh --r2-via-wrangler (fake npx)', () => {
+  const work = mkdtempSync(join(tmpdir(), 'load-r2-'));
+  const bin = join(work, 'bin');
+  mkdirSync(bin);
+  const calls = join(work, 'calls.log');
+  const store = join(work, 'store');
+  mkdirSync(store);
+  // Fake wrangler: r2 object put copies to store; get copies back (or fails).
+  writeFileSync(
+    join(bin, 'npx'),
+    `#!/usr/bin/env bash
+case "$*" in
+  *whoami*) echo "Account ${ACCOUNT}" ; exit 0 ;;
+  *tsx*) shift; shift; exec "${ROOT}/node_modules/.bin/tsx" "$@" ;;
+esac
+echo "$*" >> "${calls}"
+args=("$@")
+if [ "\${args[1]}" = r2 ] && [ "\${args[2]}" = object ]; then
+  op="\${args[3]}"; key="\${args[4]//\\//_}"
+  for i in "\${!args[@]}"; do [ "\${args[$i]}" = --file ] && f="\${args[$((i+1))]}"; done
+  if [ "$op" = put ]; then cp "$f" "${store}/$key"; fi
+  if [ "$op" = get ]; then [ -f "${store}/$key" ] || exit 1; cp "${store}/$key" "$f"; fi
+fi
+exit 0
+`
+  );
+  writeFileSync(join(bin, 'npm'), '#!/usr/bin/env bash\nexit 0\n');
+  chmodSync(join(bin, 'npx'), 0o755);
+  chmodSync(join(bin, 'npm'), 0o755);
+  const transform = join(work, 'transform');
+  mkdirSync(join(transform, 'v2-media'), { recursive: true });
+  writeFileSync(join(transform, 'manifest.json'), '{"a":1}');
+  writeFileSync(join(transform, 'v2-media', 'k1'), 'hello');
+  const sqlOut = join(work, 'sql');
+  mkdirSync(sqlOut);
+  writeFileSync(join(sqlOut, 'd1-import.json'), '{"files":[]}');
+  writeFileSync(join(sqlOut, '.backup-done'), '');
+  writeFileSync(
+    join(sqlOut, 'r2-upload-manifest.json'),
+    JSON.stringify({
+      formatVersion: 1,
+      objects: [{ key: 'k1', size: 5, sha256: 'x', contentType: 'video/mp4' }],
+    })
+  );
+  const stamp = spawnSync('bash', [
+    '-c',
+    `printf '%s' "$(sha256sum "${transform}/manifest.json" | cut -d' ' -f1)" > "${sqlOut}/.transform-manifest.sha256"`,
+  ]);
+  expect(stamp.status).toBe(0);
+  const env = {
+    ...process.env,
+    PATH: `${bin}:${process.env.PATH}`,
+    CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
+    R2_ACCESS_KEY_ID: '',
+    R2_SECRET_ACCESS_KEY: '',
+    R2_ACCOUNT_ID: '',
+  };
+  const run = (extra: string[]) =>
+    spawnSync(
+      'bash',
+      [
+        'scripts/staging/load-community.sh',
+        '--transform-output',
+        transform,
+        '--sql-out',
+        sqlOut,
+        '--apply',
+        ...extra,
+      ],
+      { cwd: ROOT, encoding: 'utf8', env }
+    );
+
+  it('refuses the S3 path without credentials', () => {
+    const r = run([]);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/--r2-via-wrangler/);
+  });
+
+  it('puts with content-type, verifies, and skips on rerun', () => {
+    const r = run(['--r2-via-wrangler']);
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(r.stdout).toMatch(/uploaded=1 already_present=0/);
+    const log = readFileSync(calls, 'utf8');
+    expect(log).toMatch(
+      /r2 object put terrastories-staging-media\/k1 --remote --file .*--content-type video\/mp4/
+    );
+    const again = run(['--r2-via-wrangler']);
+    expect(again.stdout).toMatch(/uploaded=0 already_present=1/);
+  });
+});
+
+describe('parse-tail.mjs', () => {
+  it('reads pretty-printed concatenated JSON', () => {
+    const ev = (cpu: number) =>
+      JSON.stringify(
+        {
+          outcome: 'ok',
+          cpuTime: cpu,
+          wallTime: 9,
+          event: {
+            request: { method: 'POST', url: 'https://x/v2/media?a={b}' },
+          },
+          logs: [{ message: ['brace } in "string"'] }],
+        },
+        null,
+        2
+      );
+    const text = ev(9) + '\n' + ev(18) + '\n';
+    expect(splitJsonObjects(text)).toHaveLength(2);
+    expect(tailRows(text)).toEqual([
+      ['POST', 'https://x/v2/media', 'ok', 9, 9],
+      ['POST', 'https://x/v2/media', 'ok', 18, 9],
+    ]);
+  });
+});
+
+describe('smoke.sh walkthrough gating (fake npm)', () => {
+  const work = mkdtempSync(join(tmpdir(), 'smoke-'));
+  const bin = join(work, 'bin');
+  mkdirSync(bin);
+  writeFileSync(
+    join(bin, 'npm'),
+    '#!/usr/bin/env bash\necho "npm $*" >> "${NPM_LOG}"\nexit "${NPM_RC:-0}"\n'
+  );
+  chmodSync(join(bin, 'npm'), 0o755);
+  const run = (args: string[]) =>
+    spawnSync('bash', ['scripts/staging/smoke.sh', '--local', ...args], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        STAGING_URL: 'http://127.0.0.1:9',
+        NPM_LOG: join(work, 'npm.log'),
+      },
+    });
+
+  it('skips the walkthrough with --skip-walkthrough', () => {
+    const r = run(['--skip-walkthrough']);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toMatch(/walkthrough skipped/);
+    expect(r.stdout).not.toMatch(/npm run walkthrough/);
+  });
+
+  it('cpu procedure has no --env on tail and no role on upload', () => {
+    const r = run(['--cpu-procedure']);
+    expect(r.stdout).toMatch(
+      /wrangler tail terrastories-staging-api --format json/
+    );
+    expect(r.stdout).not.toMatch(/tail .*--env/);
+    expect(r.stdout).not.toMatch(/role=story_media/);
+    expect(r.stdout).toMatch(/parse-tail\.mjs/);
   });
 });

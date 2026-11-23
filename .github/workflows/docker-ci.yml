@@ -144,6 +144,7 @@ jobs:
           AUTH_SERVER_SECRET: ci-fixture-auth-server-secret-at-least-32-characters
           BOOTSTRAP_SECRET: ci-fixture-bootstrap-secret-at-least-24-characters
           HONO_PUBLIC_ORIGIN: https://stories.terrastories-host.org
+          DATABASE_SSL: disable
         run: |
           echo "Testing ${{ matrix.compose-file }} configuration..."
 
@@ -156,7 +157,7 @@ jobs:
           fi
 
           if [ "${{ matrix.compose-file }}" = "docker-compose.prod.yml" ]; then
-            for missing in JWT_SECRET SESSION_SECRET AUTH_SERVER_SECRET BOOTSTRAP_SECRET HONO_PUBLIC_ORIGIN; do
+            for missing in JWT_SECRET SESSION_SECRET AUTH_SERVER_SECRET BOOTSTRAP_SECRET HONO_PUBLIC_ORIGIN DATABASE_SSL; do
               if env -u "$missing" docker compose --env-file /dev/null -f docker-compose.yml -f docker-compose.prod.yml config --quiet; then
                 echo "Production Compose accepted missing $missing"
                 exit 1
@@ -173,7 +174,8 @@ jobs:
               const config = JSON.parse(readFileSync(0, "utf8"));
               const env = config.services.api.environment;
               assert.equal(env.ERASURE_RECORDS_ROOT, "/app/erasure-records");
-              assert.equal(env.DATABASE_SSL, "disable", "in-network PostgreSQL has no TLS");
+              assert.equal(env.DATABASE_SSL, "disable", "value comes from the operator, never a default");
+              assert.ok(!readFileSync("docker-compose.prod.yml", "utf8").match(/DATABASE_SSL:-/), "no insecure TLS default");
               assert.ok(!config.services.api.ports?.length, "API port is not published");
               for (const v of config.services.nginx.volumes ?? []) {
                 assert.ok(!["uploads_data", "erasure_records"].includes(v.source), "nginx must not mount V2 media or erasure volumes");

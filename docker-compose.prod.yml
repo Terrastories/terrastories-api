@@ -31,9 +31,10 @@ services:
       # nginx overwrites X-Forwarded-For/X-Real-IP; trust it for per-IP throttles.
       - TRUSTED_PROXY=true
       - TRUSTED_PROXY_HEADER=x-real-ip
-      # The in-network PostgreSQL service has no TLS, so TLS is off for it only.
-      # Set DATABASE_SSL=require|verify-full when DATABASE_URL_PROD is external.
-      - DATABASE_SSL=${DATABASE_SSL:-disable}
+      # No default on purpose: set disable only for the bundled in-network
+      # postgres (it has no TLS); use require or verify-full for an external
+      # DATABASE_URL_PROD so TLS is never silently dropped.
+      - DATABASE_SSL=${DATABASE_SSL:?set DATABASE_SSL: disable only for the bundled in-network postgres, require or verify-full for an external database}
       # Shared legacy config loader (src/shared/config) still requires these.
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
       - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET is required}

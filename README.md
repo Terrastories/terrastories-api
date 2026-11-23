@@ -53,7 +53,7 @@ The `production` image target and the production and field-kit Compose profiles 
 - Field kit: the API port is not published; nginx on :80 is the only entry (the API trusts `X-Real-IP` from nginx). Set `HONO_PUBLIC_ORIGIN` to the `http://` address clients use; `HONO_ALLOW_PLAIN_HTTP` defaults to `true` for that trusted-LAN exception (use an `https://` origin and `false` when TLS is terminated in front). The database path stays `./data/field-kit.db` so an upgrade reopens the existing database.
 - nginx never mounts the media or erasure volumes: media is served only by the authenticated `/v2/` routes. `ERASURE_RECORDS_ROOT=/app/erasure-records` is a dedicated `erasure_records` volume that backups must never include or restore (`src/services/ERASURE-OPERATIONS.md`); the field-kit backup job does not mount it.
 - Run a single API replica: startup migrations take no cross-replica lock.
-- PostgreSQL TLS: production mode requires TLS by default. `DATABASE_SSL=disable|require|verify-full` overrides it for both the V2 and legacy entrypoints; `docker-compose.prod.yml` defaults it to `disable` because its bundled in-network database has no TLS. Use `require` or `verify-full` for an external database.
+- PostgreSQL TLS: production mode requires TLS by default. `DATABASE_SSL=disable|require|verify-full` overrides it for both the V2 and legacy entrypoints; `docker-compose.prod.yml` has no default and refuses to start without it: set `disable` only for its bundled in-network database (no TLS), and `require` or `verify-full` for an external `DATABASE_URL_PROD`.
 - Smoke test of a local image:
 
 ```bash

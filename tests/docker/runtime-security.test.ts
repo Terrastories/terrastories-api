@@ -50,6 +50,15 @@ describe('production container security', () => {
     }
   });
 
+  it('requires an explicit DATABASE_SSL in production Compose', () => {
+    const prod = readFileSync(
+      join(process.cwd(), 'docker-compose.prod.yml'),
+      'utf8'
+    );
+    expect(prod).toContain('DATABASE_SSL=${DATABASE_SSL:?');
+    expect(prod).not.toContain('DATABASE_SSL:-');
+  });
+
   it('runs V2 in the production and field-kit Compose profiles', () => {
     for (const file of [
       'docker-compose.prod.yml',

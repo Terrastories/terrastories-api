@@ -1,6 +1,7 @@
 /**
  * Direct multipart media upload routes (#286, SPEC-V2 §6.7):
  * - POST   /v2/media/uploads
+ * - POST   /v2/media/uploads/:id/parts/presign       (re-issue part targets)
  * - PUT    /v2/media/uploads/:id/parts/:partNumber   (api mode only)
  * - POST   /v2/media/uploads/:id/complete
  * - DELETE /v2/media/uploads/:id
@@ -37,6 +38,13 @@ export function registerMediaUploadRoutes(
       await service.createUpload(actorOf(c), parsed.body, originFor(c))
     );
   });
+
+  app.post('/v2/media/uploads/:id/parts/presign', async (c) =>
+    respond(
+      c,
+      await service.reissueParts(actorOf(c), c.req.param('id'), originFor(c))
+    )
+  );
 
   app.put('/v2/media/uploads/:id/parts/:partNumber', async (c) => {
     const result = await service.putPart({

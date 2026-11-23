@@ -48,6 +48,8 @@ import {
 import { createStorageDirectUploads } from './direct-upload-storage.js';
 import {
   DirectUploadError,
+  DIRECT_UPLOAD_COMPLETE_GRACE_SECONDS,
+  DIRECT_UPLOAD_MAX_LIFETIME_SECONDS,
   directUploadPartSize,
   hexToBase64,
   type DirectUploadAdapter,
@@ -290,7 +292,10 @@ export class DirectUploadService {
   > {
     const { actor } = input;
     const session = await this.resolveSession(actor, input.sessionId);
-    if (!session) return { status: 404, body: NOT_FOUND_BODY };
+    // Only the uploader sends parts (an admin may abort, never write).
+    if (!session || session.actorId !== actor.id) {
+      return { status: 404, body: NOT_FOUND_BODY };
+    }
     if (session.mode !== 'api' || !this.adapter?.putPart) {
       // Presigned sessions take their parts at the R2 URLs, never here.
       return { status: 409, body: CONFLICT_BODY };
@@ -379,6 +384,68 @@ export class DirectUploadService {
     }
   }
 
+  /**
+   * Re-issue part targets (and extend the session) up to the absolute session
+   * lifetime, so a slow upload can outlive the first 2 h URLs.
+   */
+  async reissueParts(
+    actor: FoundationUser,
+    rawId: string,
+    origin: string
+  ): Promise<
+    DirectUploadResult<z.infer<typeof DirectUploadSessionResponseSchema>>
+  > {
+    const adapter = this.adapter;
+    if (!adapter) return { status: 501, body: NOT_CONFIGURED_BODY };
+    const session = await this.resolveSession(actor, rawId);
+    if (!session || session.actorId !== actor.id) {
+      return { status: 404, body: NOT_FOUND_BODY };
+    }
+    const gate = await this.media.uploadGate(actor);
+    if (gate) return gate;
+    const now = this.now();
+    const hardStop =
+      session.createdAt + DIRECT_UPLOAD_MAX_LIFETIME_SECONDS * 1000;
+    if (hardStop <= now.getTime()) return { status: 410, body: EXPIRED_BODY };
+    try {
+      session.expiresAt = Math.min(
+        now.getTime() + DIRECT_UPLOAD_TTL_SECONDS * 1000,
+        hardStop
+      );
+      await adapter.update(session);
+      const parts = await adapter.partTargets(session, {
+        origin,
+        now,
+        ttlSeconds: Math.max(
+          1,
+          Math.floor((session.expiresAt - now.getTime()) / 1000)
+        ),
+      });
+      const partCount = Math.ceil(session.byteSize / session.partSize);
+      const type = validateDeclaredMediaType({
+        declaredMime: session.mimeType,
+        filename: session.originalName,
+      });
+      const body = DirectUploadSessionResponseSchema.safeParse({
+        data: {
+          id: session.id,
+          mode: session.mode,
+          expiresAt: new Date(session.expiresAt).toISOString(),
+          partSize: session.partSize,
+          partCount,
+          maxBytes: type.ok
+            ? directUploadMaxBytes(type.rule)
+            : session.byteSize,
+          parts,
+        },
+      });
+      if (!body.success) return { status: 500, body: INTERNAL_ERROR_BODY };
+      return { status: 200, body: body.data };
+    } catch {
+      return { status: 500, body: INTERNAL_ERROR_BODY };
+    }
+  }
+
   async completeUpload(
     actor: FoundationUser,
     rawId: string,
@@ -393,8 +460,11 @@ export class DirectUploadService {
     }
     const gate = await this.media.uploadGate(actor);
     if (gate) return gate;
-    if (session.expiresAt <= this.now().getTime()) {
-      await this.discardStaged(actor, session, true);
+    if (
+      session.expiresAt + DIRECT_UPLOAD_COMPLETE_GRACE_SECONDS * 1000 <=
+      this.now().getTime()
+    ) {
+      await this.discardStaged(actor, session, false);
       return { status: 410, body: EXPIRED_BODY };
     }
     const parsed = CompleteDirectUploadRequestSchema.safeParse(rawBody);
@@ -418,14 +488,16 @@ export class DirectUploadService {
       if (binding.status === 403) {
         await this.audit(actor, 'media.upload', String(actor.id), 'denied');
       }
-      await this.discardStaged(actor, session, true);
+      await this.discardStaged(actor, session, false);
       return { status: binding.status, body: binding.body };
     }
 
+    let completed = false;
     try {
       let size: number;
       try {
         ({ size } = await adapter.complete(session, parsed.data.parts));
+        completed = true;
       } catch (error) {
         if (error instanceof DirectUploadError) {
           if (error.kind === 'invalid_parts') {
@@ -441,7 +513,7 @@ export class DirectUploadService {
             };
           }
           if (error.kind === 'checksum') {
-            await this.discardStaged(actor, session, true);
+            await this.discardStaged(actor, session, false);
             return {
               status: 422,
               body: makeValidationErrorBody([
@@ -511,7 +583,7 @@ export class DirectUploadService {
         originalName: headerCheck.originalName,
         mimeType: headerCheck.mimeType,
         byteSize: size,
-        checksum: session.sha256,
+        checksum: adapter.verifiesWholeFile ? session.sha256 : null,
         binding,
         origin,
       });
@@ -522,7 +594,7 @@ export class DirectUploadService {
       }
       return result;
     } catch (error) {
-      await this.discardStaged(actor, session, true);
+      await this.discardStaged(actor, session, completed);
       if (error instanceof ReusedMediaRejectionError) {
         await this.audit(actor, 'media.upload', String(actor.id), 'denied');
         return { status: 404, body: NOT_FOUND_BODY };
@@ -544,7 +616,7 @@ export class DirectUploadService {
       return { status: 404, body: NOT_FOUND_BODY };
     }
     try {
-      await this.discardStaged(actor, session, true);
+      await this.discardStaged(actor, session, false);
       await this.audit(actor, 'media.upload.abort', session.id, 'success');
       return { status: 204 };
     } catch {
@@ -553,8 +625,9 @@ export class DirectUploadService {
   }
 
   /**
-   * Abort the backend upload and drop journal and staged bytes. Bytes are
-   * removed only while no `files` row owns them.
+   * Abort the backend upload and drop the journal. The object is deleted only
+   * when `removeBytes` (the caller's own completion produced it) and no
+   * `files` row owns it; an abort or retried completion never deletes bytes.
    */
   private async discardStaged(
     actor: FoundationUser,

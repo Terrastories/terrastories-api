@@ -4,7 +4,8 @@
  *
  * The fake endpoint verifies the SigV4 signature with an independent
  * node:crypto derivation and enforces the signed Content-Length and
- * x-amz-checksum-sha256 exactly as R2 is expected to.
+ * R2 checks no checksum header: the API deliberately signs none (R2 answers
+ * 501 for x-amz-checksum-sha256 on UploadPart).
  */
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 import http from 'node:http';
@@ -231,12 +232,6 @@ export async function startFakeS3(
     if (
       !signedHeaderNames.includes('content-length') ||
       String(body.length) !== req.headers['content-length']
-    ) {
-      return finish(400);
-    }
-    if (
-      createHash('sha256').update(body).digest('base64') !==
-      req.headers['x-amz-checksum-sha256']
     ) {
       return finish(400);
     }

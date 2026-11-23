@@ -798,7 +798,7 @@ export class MediaWritesService {
     originalName: string;
     mimeType: string;
     byteSize: number;
-    checksum: string;
+    checksum: string | null;
     binding: {
       userPhotoTargetUserId: number | null;
       metadata: Record<string, unknown> | null;

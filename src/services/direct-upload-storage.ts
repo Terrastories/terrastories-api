@@ -11,6 +11,7 @@
 
 import {
   StorageChecksumMismatchError,
+  validStorageKey,
   type FoundationStorage,
 } from './hono-foundation.service.js';
 import {
@@ -69,6 +70,13 @@ export function createStorageDirectUploads(
 
   return {
     mode: 'api',
+    verifiesWholeFile: true,
+    async update(session) {
+      await put(
+        directUploadJournalKey(tenantOf(session), session.id),
+        new TextEncoder().encode(JSON.stringify(session))
+      );
+    },
     async create(input) {
       const session: DirectUploadSession = {
         ...input,
@@ -87,9 +95,19 @@ export function createStorageDirectUploads(
       );
       if (!stored) return null;
       try {
-        return parseDirectUploadSession(
+        const session = parseDirectUploadSession(
           JSON.parse(new TextDecoder().decode(await readAll(stored.body)))
         );
+        if (
+          !session ||
+          session.id !== id ||
+          session.mode !== 'api' ||
+          tenantOf(session) !== tenantPrefix ||
+          !validStorageKey(session.key)
+        ) {
+          return null;
+        }
+        return session;
       } catch {
         return null;
       }

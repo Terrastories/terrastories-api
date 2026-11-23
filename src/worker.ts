@@ -91,6 +91,8 @@ export interface WorkerBindings {
   R2_BUCKET_NAME?: string;
 }
 
+const MAX_JOURNAL_ABORT_ATTEMPTS = 5;
+
 /** R2-backed storage adapter with object listing for the orphan sweeper. */
 export const createR2Storage = (
   bucket: R2Bucket,
@@ -380,8 +382,22 @@ export const createR2Storage = (
             !/no\s*such\s*upload|not\s*found|does\s*not\s*exist|already\s*(completed|aborted)|10024/i.test(
               message
             )
-          )
-            throw error;
+          ) {
+            // Bounded retries: after MAX_JOURNAL_ABORT_ATTEMPTS failed aborts
+            // the journal is treated as gone so one stuck upload cannot pin
+            // the sweeper forever (R2 lifecycle expires the parts).
+            const attempts =
+              (data as { abortAttempts?: number }).abortAttempts ?? 0;
+            if (attempts + 1 < MAX_JOURNAL_ABORT_ATTEMPTS) {
+              await bucket
+                .put(
+                  key,
+                  JSON.stringify({ ...data, abortAttempts: attempts + 1 })
+                )
+                .catch(() => {});
+              throw error;
+            }
+          }
         }
       }
     }

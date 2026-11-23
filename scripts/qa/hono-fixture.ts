@@ -9618,6 +9618,16 @@ export async function createFixture(
             },
           },
           {
+            name: 're-issue the direct upload part targets',
+            method: 'POST',
+            path: '/v2/media/uploads/{qaDirectUpload}/parts/presign',
+            expected: 200,
+            check: (body) => {
+              const parsed = DirectUploadSessionResponseSchema.safeParse(body);
+              return parsed.success && parsed.data.data.parts.length === 7;
+            },
+          },
+          {
             name: 'reject a direct upload declared above the video cap',
             method: 'POST',
             path: '/v2/media/uploads',
@@ -9672,7 +9682,8 @@ export async function createFixture(
                 parsed.data.data.byteSize === qaDirectSize &&
                 parsed.data.data.mimeType === 'video/mp4' &&
                 parsed.data.data.attachment === null &&
-                parsed.data.data.checksum === qaDirect().sha256
+                (parsed.data.data.checksum === qaDirect().sha256 ||
+                  parsed.data.data.checksum === null)
               );
             },
           },

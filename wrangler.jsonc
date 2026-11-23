@@ -21,7 +21,7 @@
     // R2_SECRET_ACCESS_KEY (an R2 API token scoped to this bucket) with
     // `wrangler secret put`; without all four /v2/media/uploads answers 501.
     // The bucket needs CORS for the frontend origin: PUT, header
-    // x-amz-checksum-sha256, exposed header ETag (SPEC-V2 section 6.7).
+    // exposed header ETag (SPEC-V2 section 6.7).
     "R2_BUCKET_NAME": "replace-with-your-bucket",
   },
   // Secrets are never `vars`. Set the prelogin HMAC key with:

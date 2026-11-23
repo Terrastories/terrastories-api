@@ -22,7 +22,6 @@ import {
   DirectUploadError,
   directUploadJournalKey,
   directUploadPartSize,
-  hexToBase64,
   parseDirectUploadSession,
   type DirectUploadAdapter,
   type DirectUploadSession,
@@ -87,6 +86,13 @@ export function createR2DirectUploads(
 
   return {
     mode: 'presigned',
+    verifiesWholeFile: false,
+    async update(session) {
+      await bucket.put(
+        directUploadJournalKey(tenantOf(session), session.id),
+        JSON.stringify(session)
+      );
+    },
     async create(input) {
       if (!validStorageKey(input.key)) throw new Error('Invalid storage key');
       await assertWritable(input.key);
@@ -149,14 +155,13 @@ export function createR2DirectUploads(
       );
       const host = `${config.accountId}.r2.cloudflarestorage.com`;
       return Promise.all(
-        session.partSha256.map(async (sha256, index) => {
+        session.partSha256.map(async (_sha256, index) => {
           const partNumber = index + 1;
           const size = directUploadPartSize(
             session.byteSize,
             session.partSize,
             partNumber
           );
-          const checksum = hexToBase64(sha256);
           const url = await presigner.presign({
             method: 'PUT',
             host,
@@ -167,7 +172,6 @@ export function createR2DirectUploads(
             },
             signedHeaders: {
               'content-length': String(size),
-              'x-amz-checksum-sha256': checksum,
             },
             expiresSeconds: context.ttlSeconds,
             now: context.now,
@@ -176,7 +180,7 @@ export function createR2DirectUploads(
             partNumber,
             method: 'PUT' as const,
             url,
-            headers: { 'x-amz-checksum-sha256': checksum },
+            headers: {},
             size,
           };
         })
@@ -201,13 +205,10 @@ export function createR2DirectUploads(
               .sort((a, b) => a.partNumber - b.partNumber)
               .map((p) => ({ partNumber: p.partNumber, etag: p.etag }))
           );
-      } catch (error) {
-        const message = error instanceof Error ? error.message : '';
-        // A retry after a crash between complete and the row insert finds the
-        // upload already completed; the object check below decides.
-        if (!ALREADY_GONE.test(message)) {
-          throw new DirectUploadError('invalid_parts');
-        }
+      } catch {
+        // Aborted, already completed (a racing or repeated completion) or
+        // bad parts: never touch the object; the completion that won owns it.
+        throw new DirectUploadError('invalid_parts');
       }
       const head = await bucket.head(session.key);
       if (!head) throw new DirectUploadError('invalid_parts');

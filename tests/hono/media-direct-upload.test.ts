@@ -356,6 +356,17 @@ describe('direct multipart media upload (#286)', () => {
           )
         ).status
       ).toBe(422);
+      // An admin may abort a session but never write parts into it.
+      const adminPut = await apiApp.request(first.url, {
+        method: 'PUT',
+        headers: {
+          ...first.headers,
+          cookie: cookies.admin!,
+          'content-length': String(chunk.byteLength),
+        },
+        body: chunk,
+      });
+      expect(adminPut.status).toBe(404);
       // Another editor cannot use the session, and a missing part fails completion.
       const foreign = await apiApp.request(first.url, {
         method: 'PUT',
@@ -578,7 +589,7 @@ describe('direct multipart media upload (#286)', () => {
       const session = JSON.parse(
         new TextDecoder().decode(apiStore.store.get(journalKey))
       );
-      session.expiresAt = Date.now() - 1000;
+      session.expiresAt = Date.now() - 60 * 60 * 1000; // past the 15 min completion grace
       apiStore.store.set(
         journalKey,
         new TextEncoder().encode(JSON.stringify(session))
@@ -659,6 +670,8 @@ describe('direct multipart media upload (#286)', () => {
       expect(done.status).toBe(201);
       const file = MediaUploadResponseSchema.parse(await done.json()).data;
       expect(file.byteSize).toBe(bytes.byteLength);
+      // Not server-verified on Workers, so never stored as a checksum.
+      expect(file.checksum).toBeNull();
       const object = await bucket.head(
         `communities/${ids.own}/media/${file.id}`
       );
@@ -689,12 +702,11 @@ describe('direct multipart media upload (#286)', () => {
         url: target.url.replace('partNumber=1', 'partNumber=2'),
       };
       expect((await fakeS3.putPart(tampered, chunk)).status).toBe(403);
-      const corrupted = chunk.slice();
-      corrupted[9] = 9;
-      expect((await fakeS3.putPart(target, corrupted)).status).toBe(400);
-      expect(
-        (await fakeS3.putPart({ ...target, headers: {} }, chunk)).status
-      ).toBe(403);
+      // The signed Content-Length binds the part size.
+      expect((await fakeS3.putPart(target, chunk.subarray(1))).status).toBe(
+        403
+      );
+      expect(target.headers).toEqual({});
       // Completion with a part never uploaded fails and keeps the session retryable.
       const incomplete = await post(
         r2App,
@@ -758,6 +770,117 @@ describe('direct multipart media upload (#286)', () => {
       expect(
         [...bucket.objects.keys()].filter((k) => k.includes('/media/'))
       ).toHaveLength(1);
+    });
+
+    const uploadAllParts = async (
+      app: typeof apiApp,
+      bytes: Uint8Array,
+      overrides: Record<string, unknown> = {}
+    ) => {
+      const { json } = await createSession(
+        app,
+        cookies.editor!,
+        bytes,
+        overrides
+      );
+      const session = DirectUploadSessionResponseSchema.parse(json).data;
+      const chunks = partsOf(bytes, session.partSize);
+      const etags: Array<{ partNumber: number; etag: string }> = [];
+      for (const target of session.parts) {
+        const put = await fakeS3.putPart(
+          target,
+          chunks[target.partNumber - 1]!
+        );
+        expect(put.status).toBe(200);
+        etags.push({ partNumber: target.partNumber, etag: put.etag! });
+      }
+      const first = new URL(session.parts[0]!.url);
+      return {
+        session,
+        etags,
+        key: decodeURIComponent(first.pathname).replace('/media-test/', ''),
+        uploadId: first.searchParams.get('uploadId')!,
+      };
+    };
+
+    it('stores a null checksum for a false client digest so exports can never fail on it', async () => {
+      const bytes = sparseMp4(17 * MIB);
+      const { session, etags } = await uploadAllParts(r2App, bytes, {
+        sha256: 'ab'.repeat(32),
+      });
+      const done = await post(
+        r2App,
+        `/v2/media/uploads/${session.id}/complete`,
+        cookies.editor!,
+        { parts: etags }
+      );
+      expect(done.status).toBe(201);
+      const file = MediaUploadResponseSchema.parse(await done.json()).data;
+      expect(file.checksum).toBeNull();
+      // Export streams the bytes and records the digest it computes itself;
+      // a null expected checksum skips the claim comparison.
+      const [row] = await db
+        .select({ checksum: tables.files.checksum })
+        .from(tables.files)
+        .where(eq(tables.files.id, file.id));
+      expect(row?.checksum).toBeNull();
+    });
+
+    it('a retried complete or an abort racing a finished completion never deletes the object', async () => {
+      const bytes = sparseMp4(17 * MIB);
+      const { session, etags, key, uploadId } = await uploadAllParts(
+        r2App,
+        bytes
+      );
+      // The winning completion has finished in R2 but has not created its row.
+      await bucket.resumeMultipartUpload(key, uploadId).complete(etags);
+      expect(bucket.objects.has(key)).toBe(true);
+      const retried = await post(
+        r2App,
+        `/v2/media/uploads/${session.id}/complete`,
+        cookies.editor!,
+        { parts: etags }
+      );
+      expect(retried.status).toBe(400);
+      expect(bucket.objects.has(key)).toBe(true);
+      const aborted = await r2App.request(
+        `${API}/v2/media/uploads/${session.id}`,
+        { method: 'DELETE', headers: { cookie: cookies.editor! } }
+      );
+      expect(aborted.status).toBe(204);
+      expect(bucket.objects.has(key)).toBe(true);
+    });
+
+    it('re-issues part targets within the session lifetime and refuses other users', async () => {
+      const bytes = sparseMp4(17 * MIB);
+      const { json } = await createSession(r2App, cookies.editor!, bytes);
+      const session = DirectUploadSessionResponseSchema.parse(json).data;
+      const again = await post(
+        r2App,
+        `/v2/media/uploads/${session.id}/parts/presign`,
+        cookies.editor!
+      );
+      expect(again.status).toBe(200);
+      const reissued = DirectUploadSessionResponseSchema.parse(
+        await again.json()
+      ).data;
+      expect(reissued.parts).toHaveLength(session.parts.length);
+      expect(Date.parse(reissued.expiresAt)).toBeGreaterThanOrEqual(
+        Date.parse(session.expiresAt)
+      );
+      expect(
+        (
+          await post(
+            r2App,
+            `/v2/media/uploads/${session.id}/parts/presign`,
+            cookies.editor2!
+          )
+        ).status
+      ).toBe(404);
+      await r2App.request(`${API}/v2/media/uploads/${session.id}`, {
+        method: 'DELETE',
+        headers: { cookie: cookies.editor! },
+      });
     });
 
     it('answers 501 when R2 S3 credentials are not configured', async () => {

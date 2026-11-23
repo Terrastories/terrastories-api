@@ -68,6 +68,13 @@ export class DirectUploadError extends Error {
 
 export interface DirectUploadAdapter {
   readonly mode: 'presigned' | 'api';
+  /**
+   * True when completion hashes the assembled bytes against the declared
+   * whole-file SHA-256 (Node). False on Workers, where the digest cannot be
+   * recomputed within the Free CPU budget, so it must not be stored as a
+   * verified `File.checksum`.
+   */
+  readonly verifiesWholeFile: boolean;
   /** Persist the session journal and create the backend upload. */
   create(session: NewDirectUploadSession): Promise<DirectUploadSession>;
   load(tenantPrefix: string, id: string): Promise<DirectUploadSession | null>;
@@ -87,11 +94,23 @@ export interface DirectUploadAdapter {
     session: DirectUploadSession,
     parts: ReadonlyArray<{ partNumber: number; etag: string }>
   ): Promise<{ size: number }>;
+  /** Rewrite the journal (extended expiry after re-issuing part targets). */
+  update(session: DirectUploadSession): Promise<void>;
   /** Drop the journal (and any staged parts) after a finished session. */
   discard(session: DirectUploadSession): Promise<void>;
-  /** Abort the backend upload and drop the journal. */
+  /**
+   * Abort the backend upload and drop the journal. Never deletes the final
+   * object: an upload that already completed is left to the orphan sweeper,
+   * which checks for a `files` row (an abort racing a completion must not
+   * remove committed bytes).
+   */
   abort(session: DirectUploadSession): Promise<void>;
 }
+
+/** Absolute ceiling on a session, however often part URLs are re-issued. */
+export const DIRECT_UPLOAD_MAX_LIFETIME_SECONDS = 12 * 60 * 60;
+/** Completion still succeeds this long after `expiresAt`. */
+export const DIRECT_UPLOAD_COMPLETE_GRACE_SECONDS = 15 * 60;
 
 export const directUploadJournalKey = (tenantPrefix: string, id: string) =>
   `${tenantPrefix}/.multipart/${id}.json`;

@@ -72,7 +72,7 @@ class EarlyUploadRejectionError extends Error {
  * this actor may not re-publish (§6.7 reuse rule). The partial bytes are
  * cleaned up like any rejected upload; the caller maps this to 404.
  */
-class ReusedMediaRejectionError extends Error {
+export class ReusedMediaRejectionError extends Error {
   constructor() {
     super('Media bytes are not reusable by this actor');
     this.name = 'ReusedMediaRejectionError';
@@ -122,7 +122,7 @@ export class MediaWritesService {
     private readonly cleanup: MediaCleanupCoordinator
   ) {}
 
-  private async auditDecision(input: {
+  async auditDecision(input: {
     communityId: number | null;
     actorId: number;
     action: string;
@@ -239,7 +239,7 @@ export class MediaWritesService {
     return { status: 200, body: checked.data };
   }
 
-  private parseUploadBindingFields(
+  parseUploadBindingFields(
     actor: FoundationUser,
     fields: ReadonlyMap<string, string>
   ):
@@ -399,6 +399,30 @@ export class MediaWritesService {
       userPhotoTargetUserId: targetUserId,
       metadata: parsedMetadata,
     };
+  }
+
+  /**
+   * Account/community gate shared by `POST /v2/media` and the direct upload
+   * routes: an active community, or a null-community super_admin.
+   */
+  async uploadGate(
+    actor: FoundationUser
+  ): Promise<{ status: 403; body: typeof FORBIDDEN_BODY } | null> {
+    if (actor.communityId !== null) {
+      if (!(await this.repository.isCommunityActive(actor.communityId))) {
+        await this.auditDecision({
+          communityId: actor.communityId,
+          actorId: actor.id,
+          action: 'media.upload',
+          resourceIds: [actor.id],
+          outcome: 'denied',
+        });
+        return { status: 403, body: FORBIDDEN_BODY };
+      }
+    } else if (actor.role !== 'super_admin') {
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+    return null;
   }
 
   async uploadMedia(input: {
@@ -691,74 +715,18 @@ export class MediaWritesService {
         );
       }
 
-      // §6.7 reuse rule: a direct upload binds brand-new bytes to the target
-      // account. Re-uploading bytes that already carry relations is only
-      // allowed when this actor may re-publish every affected owner; the
-      // repository's attach reuse check is the single source of that rule.
-      const reuse = await this.repository.authorizeAttachReuse({
+      return await this.registerStagedUpload({
         actor,
-        communityId: actor.communityId,
-        file: { id: fileId, uploadedBy: actor.id },
-      });
-      if (!reuse.ok) {
-        throw new ReusedMediaRejectionError();
-      }
-
-      const dbOutcome = await this.repository.createUploadedMedia({
         fileId,
-        actor,
         storageKey,
         originalName: headerCheck.originalName,
         mimeType: headerCheck.mimeType,
         byteSize: stored.size,
         // Verified by storage against the client digest before the row exists.
         checksum: expectedSha256,
-        metadata: binding.metadata,
-        userPhotoTargetUserId: binding.userPhotoTargetUserId,
+        binding,
+        origin: input.origin,
       });
-
-      if (dbOutcome.status === 'forbidden') {
-        await cleanupPartialStorage(storageKey);
-        await this.auditDecision({
-          communityId: actor.communityId,
-          actorId: actor.id,
-          action: 'media.upload',
-          resourceIds: [fileId],
-          outcome: 'denied',
-        });
-        return { status: 403, body: FORBIDDEN_BODY };
-      }
-
-      if (dbOutcome.status === 'invalid_target') {
-        await cleanupPartialStorage(storageKey);
-        return { status: 404, body: NOT_FOUND_BODY };
-      }
-
-      const { file, attachment } = dbOutcome.record;
-      const responsePayload = MediaUploadResponseSchema.safeParse({
-        data: {
-          ...serializeMetadataRecord(file, input.origin),
-          attachment: attachment
-            ? {
-                id: attachment.id,
-                fileId: attachment.fileId,
-                ownerType: attachment.ownerType,
-                ownerId: attachment.ownerId,
-                role: attachment.role,
-                ordinal: attachment.ordinal,
-                url: authenticatedMediaUrl(input.origin, attachment.fileId),
-                mimeType: attachment.mimeType,
-                byteSize: attachment.byteSize,
-                originalName: attachment.originalName,
-                createdAt: attachment.createdAt.toISOString(),
-              }
-            : null,
-        },
-      });
-      if (!responsePayload.success) {
-        return { status: 500, body: INTERNAL_ERROR_BODY };
-      }
-      return { status: 201, body: responsePayload.data };
     } catch (error) {
       await streamReader.cancel().catch(() => {});
       await uploadBranch?.cancel().catch(() => {});
@@ -815,6 +783,100 @@ export class MediaWritesService {
       }
       return { status: 500, body: INTERNAL_ERROR_BODY };
     }
+  }
+
+  /**
+   * Shared tail of every upload path (§6.7): bytes are already staged at
+   * `storageKey`; apply the reuse rule and create the `File` row (and
+   * `user_photo` binding) atomically. Throws `ReusedMediaRejectionError`;
+   * callers own staged-byte cleanup on every non-201 outcome.
+   */
+  async registerStagedUpload(input: {
+    actor: FoundationUser;
+    fileId: string;
+    storageKey: string;
+    originalName: string;
+    mimeType: string;
+    byteSize: number;
+    checksum: string | null;
+    binding: {
+      userPhotoTargetUserId: number | null;
+      metadata: Record<string, unknown> | null;
+    };
+    origin: string;
+  }): Promise<MediaWriteResult<z.infer<typeof MediaUploadResponseSchema>>> {
+    const { actor, fileId, storageKey, binding } = input;
+    const cleanupPartialStorage = async (key: string | null) => {
+      if (!key) return;
+      await this.cleanup.deleteStorageBestEffort(key, 'upload_rollback');
+    };
+    // §6.7 reuse rule: a direct upload binds brand-new bytes to the target
+    // account. Re-uploading bytes that already carry relations is only
+    // allowed when this actor may re-publish every affected owner; the
+    // repository's attach reuse check is the single source of that rule.
+    const reuse = await this.repository.authorizeAttachReuse({
+      actor,
+      communityId: actor.communityId,
+      file: { id: fileId, uploadedBy: actor.id },
+    });
+    if (!reuse.ok) {
+      throw new ReusedMediaRejectionError();
+    }
+
+    const dbOutcome = await this.repository.createUploadedMedia({
+      fileId,
+      actor,
+      storageKey,
+      originalName: input.originalName,
+      mimeType: input.mimeType,
+      byteSize: input.byteSize,
+      checksum: input.checksum,
+      metadata: binding.metadata,
+      userPhotoTargetUserId: binding.userPhotoTargetUserId,
+    });
+
+    if (dbOutcome.status === 'forbidden') {
+      await cleanupPartialStorage(storageKey);
+      await this.auditDecision({
+        communityId: actor.communityId,
+        actorId: actor.id,
+        action: 'media.upload',
+        resourceIds: [fileId],
+        outcome: 'denied',
+      });
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+
+    if (dbOutcome.status === 'invalid_target') {
+      await cleanupPartialStorage(storageKey);
+      return { status: 404, body: NOT_FOUND_BODY };
+    }
+
+    const { file, attachment } = dbOutcome.record;
+    const responsePayload = MediaUploadResponseSchema.safeParse({
+      data: {
+        ...serializeMetadataRecord(file, input.origin),
+        attachment: attachment
+          ? {
+              id: attachment.id,
+              fileId: attachment.fileId,
+              ownerType: attachment.ownerType,
+              ownerId: attachment.ownerId,
+              role: attachment.role,
+              ordinal: attachment.ordinal,
+              url: authenticatedMediaUrl(input.origin, attachment.fileId),
+              mimeType: attachment.mimeType,
+              byteSize: attachment.byteSize,
+              originalName: attachment.originalName,
+              createdAt: attachment.createdAt.toISOString(),
+            }
+          : null,
+      },
+    });
+    if (!responsePayload.success) {
+      return { status: 500, body: INTERNAL_ERROR_BODY };
+    }
+    return { status: 201, body: responsePayload.data };
   }
 
   async deleteFile(

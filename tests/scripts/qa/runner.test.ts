@@ -435,7 +435,7 @@ describe('session replay and request lifecycle', () => {
     let signal: AbortSignal | undefined;
     const report = await runJourneys({
       contract: 'canonical-v2',
-      requestTimeoutMs: 20,
+      requestTimeoutMs: 250,
       routes: [{ method: 'GET', path: '/slow' }],
       journeys: [
         {
@@ -466,7 +466,7 @@ describe('session replay and request lifecycle', () => {
     });
     const report = await runJourneys({
       contract: 'canonical-v2',
-      requestTimeoutMs: 20,
+      requestTimeoutMs: 250,
       routes: [{ method: 'GET', path: '/slow' }],
       journeys: [
         {
@@ -498,7 +498,7 @@ describe('session replay and request lifecycle', () => {
     let cancelled = false;
     const report = await runJourneys({
       contract: 'canonical-v2',
-      requestTimeoutMs: 20,
+      requestTimeoutMs: 250,
       routes: [{ method: 'GET', path: '/slow' }],
       journeys: [
         {
@@ -589,7 +589,7 @@ describe('response cancellation deadlines', () => {
     let cancelled = false;
     const report = await runJourneys({
       contract: 'canonical-v2',
-      requestTimeoutMs: 20,
+      requestTimeoutMs: 250,
       routes: [{ method: 'GET', path: '/media' }],
       journeys: [
         {

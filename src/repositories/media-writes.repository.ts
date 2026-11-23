@@ -264,7 +264,8 @@ export class MediaWritesRepository {
     originalName: string;
     mimeType: string;
     byteSize: number;
-    checksum: string;
+    /** Null when the bytes were not hashed server-side (Workers direct upload). */
+    checksum: string | null;
     metadata: Record<string, unknown> | null;
     userPhotoTargetUserId: number | null;
     now?: Date;

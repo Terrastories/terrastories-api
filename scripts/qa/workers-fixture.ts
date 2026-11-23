@@ -40,6 +40,61 @@ export const WORKER_GATEWAY = `import worker from './src/worker.js';
 export default worker;
 `;
 
+type MediaBucket = Awaited<
+  ReturnType<ReturnType<typeof startWorkerRuntime>['getR2Bucket']>
+>;
+
+/**
+ * Persona journeys send direct-upload parts to `PUT /v2/media/uploads/:id/
+ * parts/:n`. On Node that route stores the part; on Workers the presigned
+ * part URL points at R2's S3 endpoint, which Miniflare does not serve. This
+ * wrapper plays that endpoint: it finds the session journal in R2, enforces
+ * the signed Content-Length and x-amz-checksum-sha256 the way R2 does, stores
+ * the part through the binding and answers with the part's ETag. Everything
+ * else (create, complete, abort and the whole Worker) is the real bundle.
+ */
+function withR2PartEndpoint(handler: Handler, bucket: MediaBucket): Handler {
+  const partRoute = /^\/v2\/media\/uploads\/([0-9a-f-]{36})\/parts\/(\d+)$/;
+  return async (request) => {
+    const match =
+      request.method === 'PUT'
+        ? partRoute.exec(new URL(request.url).pathname)
+        : null;
+    if (!match) return handler(request);
+    const bytes = new Uint8Array(await request.arrayBuffer());
+    const sum = Buffer.from(
+      await crypto.subtle.digest('SHA-256', bytes)
+    ).toString('base64');
+    if (
+      request.headers.get('x-amz-checksum-sha256') !== sum ||
+      request.headers.get('content-length') !== String(bytes.byteLength)
+    ) {
+      return new Response(null, { status: 400 });
+    }
+    let cursor: string | undefined;
+    do {
+      const page = await bucket.list({ prefix: 'communities/', cursor });
+      const journal = page.objects.find((o) =>
+        o.key.endsWith(`/.multipart/${match[1]}.json`)
+      );
+      if (journal) {
+        const session = (await (await bucket.get(journal.key))!.json()) as {
+          key: string;
+          uploadId: string;
+        };
+        const part = await bucket
+          .resumeMultipartUpload(session.key, session.uploadId)
+          .uploadPart(Number(match[2]), bytes);
+        return Response.json({
+          data: { partNumber: part.partNumber, etag: part.etag },
+        });
+      }
+      cursor = page.truncated ? page.cursor : undefined;
+    } while (cursor);
+    return new Response(null, { status: 404 });
+  };
+}
+
 export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
   if (baseUrl)
     throw new Error(
@@ -54,11 +109,21 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
     crypto.getRandomValues(new Uint8Array(24))
   );
   const workerScript = await bundleWorkerModule(WORKER_GATEWAY);
+  // R2 S3 credentials for direct-upload presigning (#286): per-run random
+  // values, never literals. The presigned host is unreachable from the test,
+  // so `withR2PartEndpoint` below plays R2's UploadPart endpoint.
+  const r2S3 = {
+    R2_ACCOUNT_ID: toHex(crypto.getRandomValues(new Uint8Array(8))),
+    R2_ACCESS_KEY_ID: toHex(crypto.getRandomValues(new Uint8Array(10))),
+    R2_SECRET_ACCESS_KEY: toHex(crypto.getRandomValues(new Uint8Array(20))),
+    R2_BUCKET_NAME: 'media-qa',
+  };
   const mf = startWorkerRuntime(
     workerScript,
     {
       ENVIRONMENT: 'test',
       AUTH_SERVER_SECRET: serverSecret,
+      ...r2S3,
     },
     { unsafeTriggerHandlers: true }
   );
@@ -125,7 +190,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       putMedia: (key, bytes) => bucket.put(key, bytes),
       hasMedia: async (key) => (await bucket.head(key)) !== null,
       handler: (observeResponseCookies) =>
-        dispatchTo(mf, observeResponseCookies),
+        withR2PartEndpoint(dispatchTo(mf, observeResponseCookies), bucket),
       freshBootstrap: {
         bootstrapSecret: freshBootstrapSecret,
         handler: (observeResponseCookies) =>

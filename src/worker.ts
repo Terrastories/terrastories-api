@@ -38,6 +38,11 @@ import { CommunitySovereigntyRepository } from './repositories/community-soverei
 import { CommunityExportRepository } from './repositories/community-export.repository.js';
 import { CommunityExportService } from './services/community-export.service.js';
 import { runMaintenanceSweeps } from './services/maintenance-sweeps.js';
+import {
+  createR2DirectUploads,
+  r2DirectUploadConfigFrom,
+  type R2DirectUploadConfig,
+} from './services/direct-upload-r2.js';
 
 export interface WorkerBindings {
   DB: D1Database;
@@ -74,11 +79,31 @@ export interface WorkerBindings {
    * authenticated reads when a community configures no token of its own.
    */
   MAPBOX_ACCESS_TOKEN?: string;
+  /**
+   * R2 S3 API credentials for presigning direct multipart uploads (#286),
+   * scoped to the media bucket and supplied with `wrangler secret put` —
+   * never `vars`. `R2_BUCKET_NAME` is the bucket name var. All four unset
+   * (or any one missing) keeps the direct-upload routes answering 501.
+   */
+  R2_ACCOUNT_ID?: string;
+  R2_ACCESS_KEY_ID?: string;
+  R2_SECRET_ACCESS_KEY?: string;
+  R2_BUCKET_NAME?: string;
 }
 
+const MAX_JOURNAL_ABORT_ATTEMPTS = 5;
+
 /** R2-backed storage adapter with object listing for the orphan sweeper. */
-export const createR2Storage = (bucket: R2Bucket): FoundationStorage => ({
+export const createR2Storage = (
+  bucket: R2Bucket,
+  directUploads: R2DirectUploadConfig | null = null
+): FoundationStorage => ({
   nativeStreamPut: true,
+  // null: this profile cannot stream parts through the Worker, so without S3
+  // credentials the direct-upload routes answer 501 instead of falling back.
+  directUploads: directUploads
+    ? createR2DirectUploads(bucket, directUploads)
+    : null,
   async read(key, range) {
     const object = range
       ? await bucket.get(key, {
@@ -357,8 +382,32 @@ export const createR2Storage = (bucket: R2Bucket): FoundationStorage => ({
             !/no\s*such\s*upload|not\s*found|does\s*not\s*exist|already\s*(completed|aborted)|10024/i.test(
               message
             )
-          )
+          ) {
+            // Never forget a journal whose abort keeps failing: R2 may still
+            // hold parts that no listing shows. Count the failure, mark the
+            // journal abandoned after MAX_JOURNAL_ABORT_ATTEMPTS, and rewrite
+            // it (a put refreshes its upload time, so the 24 h sweep grace
+            // restarts: a daily retry cap). The bucket lifecycle rule that
+            // aborts incomplete multipart uploads is the backstop. The
+            // content-free warning and the sweeper's failed count are the
+            // operator signal.
+            const attempts =
+              ((data as { abortAttempts?: number }).abortAttempts ?? 0) + 1;
+            const abandoned = attempts >= MAX_JOURNAL_ABORT_ATTEMPTS;
+            await bucket
+              .put(
+                key,
+                JSON.stringify({ ...data, abortAttempts: attempts, abandoned })
+              )
+              .catch(() => {});
+            // eslint-disable-next-line no-console -- content-free operator channel
+            console.warn(
+              abandoned
+                ? 'media cleanup: multipart abort abandoned; lifecycle rule is the backstop'
+                : 'media cleanup: multipart abort failed; will retry'
+            );
             throw error;
+          }
         }
       }
     }
@@ -457,7 +506,7 @@ export function createWorker() {
       corsOrigins: runtimeConfig.corsOrigins,
       // workerd sets `cf-connecting-ip` and a client cannot forge it (finding E).
       isWorkers: true,
-      storage: createR2Storage(env.MEDIA),
+      storage: createR2Storage(env.MEDIA, r2DirectUploadConfigFrom(env)),
       erasureStore: env.ERASURE_RECORDS
         ? createWorkerErasureRecordStore(env.ERASURE_RECORDS)
         : undefined,

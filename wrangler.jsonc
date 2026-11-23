@@ -13,7 +13,17 @@
   "r2_buckets": [
     { "binding": "MEDIA", "bucket_name": "replace-with-your-bucket" },
   ],
-  "vars": { "PUBLIC_ORIGIN": "https://example.org", "CORS_ORIGINS": "" },
+  "vars": {
+    "PUBLIC_ORIGIN": "https://example.org",
+    "CORS_ORIGINS": "",
+    // Direct multipart upload (#286): the media bucket's name (not a secret).
+    // Also set the secrets R2_ACCOUNT_ID, R2_ACCESS_KEY_ID and
+    // R2_SECRET_ACCESS_KEY (an R2 API token scoped to this bucket) with
+    // `wrangler secret put`; without all four /v2/media/uploads answers 501.
+    // The bucket needs CORS for the frontend origin: PUT, header
+    // exposed header ETag (SPEC-V2 section 6.7).
+    "R2_BUCKET_NAME": "replace-with-your-bucket",
+  },
   // Secrets are never `vars`. Set the prelogin HMAC key with:
   //   npx wrangler secret put AUTH_SERVER_SECRET --env staging
   // The runtime gate refuses production serves without it.

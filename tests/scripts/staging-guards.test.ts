@@ -988,6 +988,18 @@ esac
     expect(runWithResults({})).toBeNull();
     expect(runWithResults([null])).toBeNull();
     expect(runWithRaw('[]')).toBeNull();
+    // An array entry or a non-string path never counts as a commit step.
+    const commit = {
+      outcome: 'pass',
+      method: 'POST',
+      path: '/v2/imports/7/commit',
+      status: 200,
+      serverAt: '2026-01-03T10:00:00.000Z',
+    };
+    expect(runWithResults([[], commit])).toBeNull();
+    expect(
+      runWithResults([{ ...commit, path: ['/v2/imports/7/commit'] }])
+    ).toBeNull();
   });
 
   it('falls back to the START day when results.json is not valid JSON', () => {
@@ -997,6 +1009,22 @@ esac
   it('resolves a relative STAGING_MARKER_DIR against the caller cwd', () => {
     const cwd = mkdtempSync(join(work, 'cwd-'));
     writeFileSync(join(work, 'date.state'), '0');
+    const relFixture = join(work, 'rel-results.json');
+    writeFileSync(
+      relFixture,
+      JSON.stringify({
+        runId: 'wt-rel',
+        steps: [
+          {
+            outcome: 'pass',
+            method: 'POST',
+            path: '/v2/imports/7/commit',
+            status: 200,
+            serverAt: '2026-01-05T12:00:00.000Z',
+          },
+        ],
+      })
+    );
     const r = spawnSync(
       'bash',
       [join(ROOT, 'scripts/staging/smoke.sh'), '--apply', '--local'],
@@ -1010,6 +1038,9 @@ esac
           NPM_LOG: join(work, 'npm.log'),
           DATE_STATE: join(work, 'date.state'),
           STAGING_MARKER_DIR: 'rel-out',
+          // A real commit day (not the start-day fallback) proves smoke read
+          // the results.json the walkthrough wrote under the resolved dir.
+          WT_RESULTS_FIXTURE: relFixture,
           WT_SUPER_IDENTIFIER: 'test-super',
           WT_SUPER_PASSWORD: 'test-password',
         },
@@ -1021,7 +1052,7 @@ esac
         join(cwd, 'rel-out', '.staging-import-utc-day-' + hash),
         'utf8'
       ).trim()
-    ).toBe('2026-01-01');
+    ).toBe('2026-01-05');
     expect(existsSync(join(ROOT, 'rel-out'))).toBe(false);
   });
 

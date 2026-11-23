@@ -156,12 +156,13 @@ import_commit_day() {
     try { r = JSON.parse(text); } catch { process.exit(0); }
     try {
       if (r === null || typeof r !== "object" || !Array.isArray(r.steps) ||
-          r.steps.some((s) => s === null || typeof s !== "object")) {
+          r.steps.some((s) => s === null || typeof s !== "object" || Array.isArray(s))) {
         console.log("NONE"); process.exit(0);
       }
       const commits = r.steps.filter((s) =>
         s.outcome === "pass" && s.method === "POST" &&
-        /^\/v2\/imports\/[^/]+\/commit$/.test(s.path ?? "") &&
+        typeof s.path === "string" &&
+        /^\/v2\/imports\/[^/]+\/commit$/.test(s.path) &&
         (s.status === 200 || s.status === 201));
       const days = commits.map((s) => {
         for (const v of [s.serverAt, s.at]) {
@@ -205,9 +206,10 @@ else
     # The marker records the UTC day the import COMMITTED, never the end time:
     # a walkthrough that crosses midnight must not move the marker to the new
     # day when the commit happened before midnight. Prefer the commit step's
-    # timestamp (server's, else the client's) from results.json. A readable
-    # results.json with no passing commit writes NO marker; the start day is
-    # the fallback only when results.json is missing or unreadable.
+    # timestamp (server's, else the client's) from results.json. A parsed
+    # results.json with the wrong shape or no passing commit writes NO marker;
+    # the start day is the fallback only when results.json is missing,
+    # unreadable or not valid JSON.
     if [ "$APPLY" = 1 ]; then
       mkdir -p "$MARK_DIR"
       IMPORT_DAY="$(import_commit_day "$WT_OUT/results.json")"

@@ -943,6 +943,13 @@ export async function main(
       );
       return 2;
     }
+    if (dryRun) {
+      // Never mutate under --dry-run: say what would happen and stop.
+      log(
+        `dry run: would sign in as the super admin and disable community ${disableSlug} (exact slug); no network call`
+      );
+      return 0;
+    }
     const session = await superSession(env, local, log);
     if (typeof session === 'number') return session;
     try {

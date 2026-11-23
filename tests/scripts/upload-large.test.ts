@@ -1236,6 +1236,21 @@ describe('--disable-community and the manual-disable line', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it('--dry-run with --disable-community makes no network call and disables nothing', async () => {
+    const out: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation((c) => {
+      out.push(String(c));
+      return true;
+    });
+    const fetchSpy = vi.fn(() => {
+      throw new Error('must not fetch');
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    expect(await main(['--disable-community', SLUG, '--dry-run'], ENV)).toBe(0);
+    expect(out.join('')).toMatch(/dry run: would .*disable community/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it('finds the community on a later page by exact slug and verifies the 200 body', async () => {
     const { calls, impl } = listWorld({ at: 230 });
     expect(await disableCommunityBySlug(impl, BASE, SUPER, SLUG)).toBe(

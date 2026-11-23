@@ -270,7 +270,7 @@ Mapbox styles (`mapboxStyleUrl`, public `pk.*` `mapboxAccessToken`, `exposeMapbo
 
 - Session cookie is `ts_session`: `HttpOnly`, `SameSite=Strict`, `Secure` (not on dev or the field-kit plain-HTTP opt-in), path `/`. Script cannot read it. Call the API with credentials included.
 - Every non-GET, HEAD or OPTIONS request is checked. The `Origin` header must match `PUBLIC_ORIGIN` or be in `CORS_ORIGINS`. A `Sec-Fetch-Site: cross-site` request needs an allowed Origin. Failure returns `403 { "error": "Forbidden" }`.
-- Deploy the UI on an origin listed in `PUBLIC_ORIGIN` or `CORS_ORIGINS`. Because the cookie is `SameSite=Strict`, host the UI on the same site as the API (inferred; confirm in spike S2). CORS allows only the `Content-Type` request header.
+- Deploy the UI on an origin listed in `PUBLIC_ORIGIN` or `CORS_ORIGINS`. Because the cookie is `SameSite=Strict`, host the UI on the same site as the API (inferred; confirm in spike S2). API CORS allows request headers `Content-Type`, `x-content-sha256`, `x-amz-checksum-sha256` and `x-amz-content-sha256`, and exposes `ETag` (`src/hono-app.ts`).
 - Every response sends `Cache-Control: no-store`, `nosniff` and `Content-Security-Policy: default-src 'none'; sandbox`. Media adds `Content-Disposition: attachment`. See spike S3.
 - Sessions renew on use. A session can be a standard session (12-hour idle window) or a device session (login option `deviceSession`, fixed absolute lifetime). Show the "remember this device" choice and the sessions panel (V11).
 
@@ -282,7 +282,7 @@ Mapbox styles (`mapboxStyleUrl`, public `pk.*` `mapboxAccessToken`, `exposeMapbo
 - Failures are uniform and non-enumerating (401 or 400). Throttled accounts are refused even with the right key. Show one generic "try again later" message.
 - Legacy Rails bcrypt accounts (prelogin `algorithm` is `client-bcrypt-rails+sha256`): the client recomputes the bcrypt hash string from the password with the prelogin `salt` and cost (bcrypt reads at most 72 bytes of the password, so truncate to 72 bytes) and sends it as `derivedKey`. The same request must carry `upgrade: { algorithm, salt, params, derivedKey }` with fresh Argon2id material: `algorithm` `client-argon2id+sha256`, a new 16-byte base64 `salt`, the canonical policy `params`, and the 64-hex Argon2id key derived with them. Without a valid `upgrade` the login is rejected (401). On success the server stores the Argon2id verifier. Cover this path in the login spike.
 - Argon2id is also needed for password change (`POST /v2/auth/password`), admin-set passwords, bootstrap, claim, recovery redeem, and step-up.
-- The registry notes that login on `main` may still use a transitional body (`{ email, password, communityId? }`). Confirm the live contract before building.
+- `src/hono-app.ts` enforces the strict `{ identifier, communitySlug?, derivedKey, upgrade?, deviceSession? }` body on `POST /v2/auth/login` (no transitional plaintext password body).
 
 ### 7.3 Step-up
 
@@ -317,3 +317,133 @@ Mapbox styles (`mapboxStyleUrl`, public `pk.*` `mapboxAccessToken`, `exposeMapbo
 | S7  | i18n completeness                 | Which of the 11 locales are complete? Is `hi` needed?                                                                                                                     | Per-locale key coverage report                         |
 | S8  | Rich-text and sanitiser           | Which tags survive the server sanitiser?                                                                                                                                  | Editor choice                                          |
 | S9  | Import flow                       | Column mapping, audience mapping, preview, commit and discard, with 429 and D1-limit states                                                                               | Import screen prototype                                |
+
+## 9. Staging
+
+- **API base:** `https://terrastories-staging-api.luandro.workers.dev` (Cloudflare Workers Free, work non-production account).
+- **Allowed browser origin:** `https://terrastories-staging.luandro.workers.dev` is the **only** allowed browser origin (deploy the UI as a Worker with static assets named `terrastories-staging`). The Worker `CORS_ORIGINS` var and the R2 media bucket CORS policy both pin it (no wildcards). The committed `wrangler.jsonc` keeps placeholders: the operator sets `CORS_ORIGINS` and `PUBLIC_ORIGIN` in the `env.staging.vars` block of a local, uncommitted copy of `wrangler.jsonc`, and every deploy overwrites dashboard-set vars with those values. To change the origin, edit that local `CORS_ORIGINS`, then run `env -u CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID=<work account> STAGING_FRONTEND_ORIGIN=<origin> scripts/staging/provision.sh --apply` (the account guard requires `CLOUDFLARE_ACCOUNT_ID`). It renders `scripts/staging/r2-cors.json` into the gitignored `.r2-cors.json`, applies and verifies the bucket CORS, and deploys the Worker once the real D1 id is in place. The origin must share the API's registrable site (`luandro.workers.dev`; `workers.dev` and `pages.dev` are public suffixes): the `ts_session` cookie is `SameSite=Strict`, so a `*.pages.dev` UI would never receive it.
+- **Auth flow:** two-step client-stretched login (`POST /v2/auth/prelogin` -> client-side Argon2id stretching -> `POST /v2/auth/login`); see section 7.2 for parameters, legacy bcrypt upgrades, and failure behavior.
+- **Sample community:** `barbara` (private; small dataset: 4 stories, 4 places, 1 speaker). Because it is private, unauthenticated `/v2/public/communities/barbara` calls return `404` and readers must sign in first.
+- **Test accounts:** ask the API team for staging credentials. Never commit credentials to the repository, config files, or tests.
+
+## 10. Direct media upload
+
+Single-request `POST /v2/media` is capped at 100 MiB by the API, but Workers Free rejects request bodies over 100 MB (about 95.4 MiB) at the edge with `413`, so on Workers switch to direct upload below 100 MB (the staging smoke uses 90 MB) (per-type caps: images 10 MiB, TIFF/HEIC/PDF/DOCX 25 MiB, audio 50 MiB, video 100 MiB). Larger media (video up to 512 MiB, audio up to 200 MiB; other types keep their `POST /v2/media` cap) use the direct multipart routes (`src/routes/media-uploads.hono.ts`, `src/services/direct-upload.service.ts`).
+
+### 10.1 Create session (`POST /v2/media/uploads`)
+
+Send `Content-Type: application/json` with session credentials (`CreateDirectUploadRequestSchema`, `src/shared/schemas/media-uploads-v2.ts`):
+
+| Field         | Required | Rules                                                                                                                                                                                                                                                                                                                |
+| ------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `filename`    | yes      | 1–255 chars; extension must match `contentType`                                                                                                                                                                                                                                                                      |
+| `contentType` | yes      | 1–127 chars; supported media MIME type                                                                                                                                                                                                                                                                               |
+| `size`        | yes      | Positive integer byte size, within per-type cap                                                                                                                                                                                                                                                                      |
+| `sha256`      | yes      | 64-char hex SHA-256 of the whole file                                                                                                                                                                                                                                                                                |
+| `partSha256`  | yes      | Array of 64-char hex SHA-256 digests, one per part (`Math.ceil(size / partSize)` entries, 1–10,000 parts)                                                                                                                                                                                                            |
+| `partSize`    | no       | Integer bytes; default 16 MiB, allowed 16 MiB–64 MiB                                                                                                                                                                                                                                                                 |
+| `role`        | no       | Omit for an unbound file (attach later with `POST /v2/attachments`); only editors and admins may omit it. Viewers, members and super admins (including a super admin with no community) must send `user_photo` (else `403`); any other user without a community gets `403`. Inline binding only accepts `user_photo` |
+| `ownerType`   | no       | With `role: "user_photo"`, must be `"user"`                                                                                                                                                                                                                                                                          |
+| `ownerId`     | no       | Positive integer (or numeric string) target user ID for `user_photo`                                                                                                                                                                                                                                                 |
+| `metadata`    | no       | Flat object, at most 16 keys (1–64 chars, not `__proto__`); values are strings up to 500 chars, finite numbers, booleans or `null`; JSON <= 4096 chars                                                                                                                                                               |
+
+Returns `201` with `{ data: { id, mode, expiresAt, partSize, partCount, maxBytes, parts } }`, where `mode` is `"presigned"` (Workers) or `"api"` (Node), and each `parts[]` target is `{ partNumber, method: "PUT", url, headers, size }`. Returns `501` if Workers R2 S3 credentials are not configured.
+
+### 10.2 Upload parts (`PUT target.url`)
+
+Slice the file into `partSize` chunks (the last part may be smaller; each slice length must equal `target.size`).
+
+**Rule:** `PUT` each slice to `target.url` sending **EXACTLY `target.headers`** — do not add, drop, or rename headers.
+
+- **Workers (`mode: "presigned"`):**
+  - `target.url` is a credential-free presigned R2 S3 URL; call `fetch` with `credentials: "omit"` (never send `ts_session`).
+  - `content-length` is signed in the SigV4 URL and set automatically by the browser from the `PUT` body (do not set it manually).
+  - `target.headers` carries `{ "x-amz-content-sha256": "<part hex sha256>" }`.
+  - **Do not add `x-amz-checksum-sha256` on Workers** (R2 returns `501` for it on `UploadPart`, and the presigned URL does not sign it).
+  - R2 verifies the part bytes against the signed `x-amz-content-sha256` and returns `400` `XAmzContentSHA256Mismatch` if bytes are corrupted or mismatched (`scripts/staging/verify-r2-part-checksum.ts`).
+  - Read the `ETag` response header for each part (exposed by the R2 bucket CORS policy in `scripts/staging/r2-cors.json`: `PUT`, headers `x-amz-content-sha256` and `content-type`, exposed header `ETag`, `maxAgeSeconds: 3600`).
+- **Node profiles (`mode: "api"`):**
+  - `target.url` points back to the API at `PUT /v2/media/uploads/:id/parts/:partNumber`, so call `fetch` with `credentials: "include"`.
+  - `target.headers` carries `{ "x-amz-checksum-sha256": "<part base64 sha256>" }`; the API verifies the part digest on stream (`422` on mismatch) and returns the ETag in both the `ETag` header (exposed by API CORS) and `{ data: { partNumber, etag } }`.
+
+### 10.3 Complete, re-presign, and abort
+
+- **Complete:** `POST /v2/media/uploads/:id/complete` (with credentials and `Content-Type: application/json`) sending `{ parts: [{ partNumber, etag }] }`. Returns `201` with the same `MediaUploadResponse` shape as `POST /v2/media` (`data.id`, `data.url`, `data.attachment`, etc.). On Workers (`mode: "presigned"`), completion checks total stored size and sniffs the first 8 KiB, and `data.checksum` is `null`; on Node (`mode: "api"`), completion verifies the assembled whole-file `sha256` (`422` on mismatch) and stores `data.checksum`. A `400` `validation_error` whose `details.fields[0].path` is `"parts"` leaves the session open, so missing or failed parts can be re-sent and completion retried. A `422` with `path: "size"` (stored size differs from the session) or a `400` with `path: "file"` (missing object, content sniff failure, or a non-image `user_photo`) discards the session and its staged bytes; start a new upload.
+- **Re-presign and session cap:** Sessions and part URLs expire after **2 hours** (`expiresAt`; completion allows a 15-minute grace window). Call `POST /v2/media/uploads/:id/parts/presign` (with credentials) to get fresh part targets and extend `expiresAt` (`200`, same response shape as create), up to a **12-hour absolute session cap** from creation (`410` after 12 h).
+- **Abort:** `DELETE /v2/media/uploads/:id` (with credentials) aborts an unfinished session and returns `204`.
+
+### 10.4 Client upload flow (`fetch` pseudocode)
+
+```ts
+const PART_SIZE = 16 * 1024 * 1024; // 16 MiB default (16–64 MiB allowed)
+
+async function sha256Hex(buf: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', buf);
+  return Array.from(new Uint8Array(digest), (b) =>
+    b.toString(16).padStart(2, '0')
+  ).join('');
+}
+
+async function directUpload(apiBase: string, file: File) {
+  const partSha256: string[] = [];
+  for (let offset = 0; offset < file.size; offset += PART_SIZE) {
+    const slice = file.slice(offset, Math.min(offset + PART_SIZE, file.size));
+    partSha256.push(await sha256Hex(await slice.arrayBuffer()));
+  }
+  // Sketch only: hashing the whole file at once holds it in memory (512 MiB
+  // video). Production code should hash incrementally (for example a
+  // streaming SHA-256 library in a Web Worker).
+  const sha256 = await sha256Hex(await file.arrayBuffer());
+
+  const createRes = await fetch(`${apiBase}/v2/media/uploads`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      filename: file.name,
+      contentType: file.type || contentTypeFromExtension(file.name), // file.type is '' for unknown types; the API needs a non-empty MIME type
+      size: file.size,
+      sha256,
+      partSize: PART_SIZE,
+      partSha256,
+      // Editors and admins only; other roles must send role: 'user_photo'.
+    }),
+  });
+  if (!createRes.ok) throw new Error(`create failed: ${createRes.status}`);
+  const { data: session } = await createRes.json();
+
+  const completedParts: Array<{ partNumber: number; etag: string }> = [];
+  for (const target of session.parts) {
+    const start = (target.partNumber - 1) * session.partSize;
+    const blob = file.slice(start, start + target.size);
+    // Send EXACTLY target.headers; browser sets Content-Length from blob.
+    // On Workers (presigned), never send cookies or x-amz-checksum-sha256.
+    const putRes = await fetch(target.url, {
+      method: target.method,
+      credentials: session.mode === 'api' ? 'include' : 'omit',
+      headers: target.headers,
+      body: blob,
+    });
+    if (!putRes.ok) {
+      // If URLs expired (< 12 h cap), POST .../parts/presign to re-issue.
+      throw new Error(`part ${target.partNumber} failed: ${putRes.status}`);
+    }
+    const etag = (putRes.headers.get('ETag') ?? '').replace(/^"|"$/g, '');
+    if (!etag) throw new Error(`part ${target.partNumber}: no ETag (CORS?)`);
+    completedParts.push({ partNumber: target.partNumber, etag });
+  }
+
+  const completeRes = await fetch(
+    `${apiBase}/v2/media/uploads/${session.id}/complete`,
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ parts: completedParts }),
+    }
+  );
+  if (!completeRes.ok)
+    throw new Error(`complete failed: ${completeRes.status}`);
+  return (await completeRes.json()).data; // { id, url, checksum, ... }
+}
+```

@@ -686,6 +686,13 @@ describe('uploadViaThrowawayCommunity (fake fetch)', () => {
       claimStatus?: number;
       createSlug?: string;
       listed?: boolean;
+      /** Create misbehaviour; the server row exists for all but 'reject'. */
+      create?: 'reject' | 'throw' | 'badjson' | 'error5xx';
+      createStatus?: number;
+      /** Row sits on this list offset (total 250 rows, filler elsewhere). */
+      listedOffset?: number;
+      /** Holds the create response until released. */
+      gate?: Promise<void>;
     } = {}
   ) {
     let slug = '';
@@ -693,10 +700,45 @@ describe('uploadViaThrowawayCommunity (fake fetch)', () => {
       const u = call.url.replace(BASE, '');
       if (call.method === 'POST' && u === '/v2/admin/communities') {
         slug = JSON.parse(String(call.body)).slug;
+        if (opts.create === 'reject')
+          return new Response(null, { status: opts.createStatus ?? 409 });
+        if (opts.create === 'throw') throw new Error('socket hang up');
+        if (opts.create === 'badjson')
+          return new Response('<html>', { status: 201 });
+        if (opts.create === 'error5xx')
+          return new Response(null, { status: 502 });
+        if (opts.gate)
+          return opts.gate.then(() =>
+            Response.json({ data: { id: 42, slug } }, { status: 201 })
+          );
         return Response.json(
           { data: { id: 42, slug: opts.createSlug ?? slug } },
           { status: 201 }
         );
+      }
+      if (
+        call.method === 'GET' &&
+        u.split('?')[0] === '/v2/admin/communities' &&
+        opts.listedOffset !== undefined
+      ) {
+        const offset = Number(new URL(call.url).searchParams.get('offset'));
+        const filler = (n: number) =>
+          Array.from({ length: n }, (_, i) => ({
+            id: 1000 + offset + i,
+            slug: `other-${offset + i}`,
+            status: 'active',
+            claimStatus: 'unclaimed',
+          }));
+        return Response.json({
+          data:
+            offset === opts.listedOffset
+              ? [
+                  ...filler(10),
+                  { id: 77, slug, status: 'active', claimStatus: 'unclaimed' },
+                ]
+              : filler(offset === 200 ? 50 : 100),
+          meta: { total: 250, limit: 100, offset },
+        });
       }
       if (call.method === 'GET' && u.split('?')[0] === '/v2/admin/communities')
         return Response.json({
@@ -899,6 +941,128 @@ describe('uploadViaThrowawayCommunity (fake fetch)', () => {
     expect(patch.url).toBe(`${BASE}/v2/admin/communities/77/status`);
     expect(res.communityDisabled).toBe(true);
     expect(calls.some((c) => c.url.includes('claim-tokens'))).toBe(false);
+  });
+
+  const noRetry = { attempts: 1, delayMs: 0 };
+  const patches = (calls: Call[]) => calls.filter((c) => c.method === 'PATCH');
+  const lists = (calls: Call[]) =>
+    calls.filter(
+      (c) => c.method === 'GET' && c.url.includes('/admin/communities')
+    );
+
+  it('a definitive create rejection (409, 400, 401, 403) makes no list call and no PATCH', async () => {
+    for (const createStatus of [409, 400, 401, 403]) {
+      const { calls, impl } = world({ create: 'reject', createStatus });
+      const res = await uploadViaThrowawayCommunity(
+        { ...input, lookupRetry: noRetry },
+        { fetch: impl }
+      );
+      expect(res.error, String(createStatus)).toMatch(
+        new RegExp(`answered ${createStatus}`)
+      );
+      expect(lists(calls)).toHaveLength(0);
+      expect(patches(calls)).toHaveLength(0);
+      expect(res.communityDisabled).toBe(false);
+    }
+  });
+
+  it('lost response (a): fetch rejects after the server created the row -> found by slug and disabled', async () => {
+    const { calls, impl } = world({ create: 'throw', listed: true });
+    const res = await uploadViaThrowawayCommunity(
+      { ...input, lookupRetry: noRetry },
+      { fetch: impl }
+    );
+    expect(patches(calls)[0]!.url).toBe(
+      `${BASE}/v2/admin/communities/77/status`
+    );
+    expect(res.communityDisabled).toBe(true);
+    expect(calls.some((c) => c.url.includes('claim-tokens'))).toBe(false);
+  });
+
+  it('lost response (a2): a 502 is ambiguous too', async () => {
+    const { calls, impl } = world({ create: 'error5xx', listed: true });
+    const res = await uploadViaThrowawayCommunity(
+      { ...input, lookupRetry: noRetry },
+      { fetch: impl }
+    );
+    expect(patches(calls)).toHaveLength(1);
+    expect(res.communityDisabled).toBe(true);
+  });
+
+  it('lost response (b): 201 with unreadable JSON -> found by slug and disabled', async () => {
+    const { calls, impl } = world({ create: 'badjson', listed: true });
+    const res = await uploadViaThrowawayCommunity(
+      { ...input, lookupRetry: noRetry },
+      { fetch: impl }
+    );
+    expect(patches(calls)[0]!.url).toBe(
+      `${BASE}/v2/admin/communities/77/status`
+    );
+    expect(res.communityDisabled).toBe(true);
+  });
+
+  it('lost response (c): row on a later list page (not page 0) -> disabled', async () => {
+    const { calls, impl } = world({ create: 'throw', listedOffset: 100 });
+    const res = await uploadViaThrowawayCommunity(
+      { ...input, lookupRetry: noRetry },
+      { fetch: impl }
+    );
+    expect(lists(calls).some((c) => c.url.includes('offset=100'))).toBe(true);
+    expect(patches(calls)[0]!.url).toBe(
+      `${BASE}/v2/admin/communities/77/status`
+    );
+    expect(res.communityDisabled).toBe(true);
+  });
+
+  it('a signal during the in-flight create: no claim token, no upload; awaits the create, then disables the confirmed community', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { calls, impl } = world({ gate });
+    let cleanup!: () => Promise<void>;
+    const run = uploadViaThrowawayCommunity(
+      { ...input, onCleanupReady: (fn) => (cleanup = fn) },
+      { fetch: impl }
+    );
+    await vi.waitFor(() =>
+      expect(calls.some((c) => c.method === 'POST')).toBe(true)
+    );
+    const stopped = cleanup();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(patches(calls)).toHaveLength(0);
+    release();
+    await stopped;
+    const res = await run;
+    expect(calls.some((c) => c.url.includes('claim-tokens'))).toBe(false);
+    expect(calls.some((c) => c.url.includes('/media/uploads'))).toBe(false);
+    expect(patches(calls)[0]!.url).toBe(
+      `${BASE}/v2/admin/communities/42/status`
+    );
+    expect(res.communityDisabled).toBe(true);
+  });
+
+  it('a signal then an ambiguous create: retries the slug lookup, then reports the REAL slug when giving up', async () => {
+    const { calls, impl } = world({ create: 'throw' });
+    let cleanup!: () => Promise<void>;
+    let status!: () => { slug?: string; disabled: boolean };
+    const logs: string[] = [];
+    const run = uploadViaThrowawayCommunity(
+      {
+        ...input,
+        lookupRetry: { attempts: 3, delayMs: 5 },
+        onCleanupReady: (fn, st) => {
+          cleanup = fn;
+          status = st;
+        },
+      },
+      { fetch: impl, log: (l) => logs.push(l) }
+    );
+    await cleanup();
+    await run;
+    expect(lists(calls).length).toBeGreaterThanOrEqual(3);
+    expect(patches(calls)).toHaveLength(0);
+    const st = status();
+    expect(st.disabled).toBe(false);
+    expect(st.slug).toMatch(/^stg-upload-[0-9a-f]{8}$/);
   });
 
   it('refuses a non-staging URL itself, before any call', async () => {

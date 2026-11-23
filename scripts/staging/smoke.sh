@@ -91,8 +91,12 @@ Worker CPU measurement (manual; Workers Free budget is about 10 ms per invocatio
     signs in as the super admin only to create a throwaway community
     "stg-upload-<random>" and a throwaway community admin (random password, memory
     only), uploads as that admin, deletes the media, and disables the community
-    again (always on normal exit and on SIGINT/SIGTERM; a SIGKILL leaves it
-    active: disable stg-upload-<slug> by hand; it cannot be deleted once claimed):
+    again (it cannot be deleted once claimed). The slug is printed before the
+    create call. If the disable is not confirmed the helper exits non-zero and
+    prints the command to run; Ctrl-C or kill may leave the community active, so
+    run that command with the slug printed at the start:
+      STAGING_URL=... npx tsx scripts/staging/upload-large.ts --disable-community <slug>
+    Upload:
       STAGING_URL=... WT_SUPER_IDENTIFIER=... WT_SUPER_PASSWORD=... \
         npx tsx scripts/staging/upload-large.ts --file sample300.mp4
     (--dry-run prints the plan with no network call and no credentials needed.

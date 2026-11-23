@@ -14,6 +14,7 @@ import {
   DEFAULT_PART_SIZE,
   buildCreateBody,
   cleanEtag,
+  disableCommunityBySlug,
   loginSuper,
   main,
   planParts,
@@ -687,14 +688,9 @@ describe('uploadViaThrowawayCommunity (fake fetch)', () => {
       disableBody?: 'empty' | 'mismatch';
       claimStatus?: number;
       createSlug?: string;
-      listed?: boolean;
       /** Create misbehaviour; the server row exists for all but 'reject'. */
       create?: 'reject' | 'throw' | 'badjson' | 'error5xx';
       createStatus?: number;
-      /** Row sits on this list offset (total 250 rows, filler elsewhere). */
-      listedOffset?: number;
-      /** Holds the create response until released. */
-      gate?: Promise<void>;
     } = {}
   ) {
     let slug = '';
@@ -709,46 +705,11 @@ describe('uploadViaThrowawayCommunity (fake fetch)', () => {
           return new Response('<html>', { status: 201 });
         if (opts.create === 'error5xx')
           return new Response(null, { status: 502 });
-        if (opts.gate)
-          return opts.gate.then(() =>
-            Response.json({ data: { id: 42, slug } }, { status: 201 })
-          );
         return Response.json(
           { data: { id: 42, slug: opts.createSlug ?? slug } },
           { status: 201 }
         );
       }
-      if (
-        call.method === 'GET' &&
-        u.split('?')[0] === '/v2/admin/communities' &&
-        opts.listedOffset !== undefined
-      ) {
-        const offset = Number(new URL(call.url).searchParams.get('offset'));
-        const filler = (n: number) =>
-          Array.from({ length: n }, (_, i) => ({
-            id: 1000 + offset + i,
-            slug: `other-${offset + i}`,
-            status: 'active',
-            claimStatus: 'unclaimed',
-          }));
-        return Response.json({
-          data:
-            offset === opts.listedOffset
-              ? [
-                  ...filler(10),
-                  { id: 77, slug, status: 'active', claimStatus: 'unclaimed' },
-                ]
-              : filler(offset === 200 ? 50 : 100),
-          meta: { total: 250, limit: 100, offset },
-        });
-      }
-      if (call.method === 'GET' && u.split('?')[0] === '/v2/admin/communities')
-        return Response.json({
-          data: opts.listed
-            ? [{ id: 77, slug, status: 'active', claimStatus: 'unclaimed' }]
-            : [],
-          meta: { total: opts.listed ? 1 : 0, limit: 100, offset: 0 },
-        });
       if (u === '/v2/admin/communities/42/claim-tokens')
         return Response.json(
           { data: { token: 'claim-token-secret' } },
@@ -936,205 +897,53 @@ describe('uploadViaThrowawayCommunity (fake fetch)', () => {
     expect(res.communityDisabled).toBe(false);
   });
 
-  it('after a lost create response, finds the community by exact slug and disables it', async () => {
-    const { calls, impl } = world({ createSlug: 'someone-else', listed: true });
-    const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
-    const patch = calls.find((c) => c.method === 'PATCH')!;
-    expect(patch.url).toBe(`${BASE}/v2/admin/communities/77/status`);
-    expect(res.communityDisabled).toBe(true);
-    expect(calls.some((c) => c.url.includes('claim-tokens'))).toBe(false);
-  });
-
-  const noRetry = { attempts: 1, delayMs: 0 };
   const patches = (calls: Call[]) => calls.filter((c) => c.method === 'PATCH');
   const lists = (calls: Call[]) =>
     calls.filter(
       (c) => c.method === 'GET' && c.url.includes('/admin/communities')
     );
 
-  it('a definitive create rejection (409, 400, 401, 403) makes no list call and no PATCH', async () => {
+  it('a definitive create rejection (409, 400, 401, 403) makes no list call, no PATCH and no manual-disable slug', async () => {
     for (const createStatus of [409, 400, 401, 403]) {
       const { calls, impl } = world({ create: 'reject', createStatus });
-      const res = await uploadViaThrowawayCommunity(
-        { ...input, lookupRetry: noRetry },
-        { fetch: impl }
-      );
+      const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
       expect(res.error, String(createStatus)).toMatch(
         new RegExp(`answered ${createStatus}`)
       );
       expect(lists(calls)).toHaveLength(0);
       expect(patches(calls)).toHaveLength(0);
       expect(res.communityDisabled).toBe(false);
+      expect(res.communityMayExist).toBe(false);
+      expect(res.manualDisableSlug).toBeUndefined();
     }
   });
 
-  it('lost response (a): fetch rejects after the server created the row -> found by slug and disabled', async () => {
-    const { calls, impl } = world({ create: 'throw', listed: true });
-    const res = await uploadViaThrowawayCommunity(
-      { ...input, lookupRetry: noRetry },
-      { fetch: impl }
-    );
-    expect(patches(calls)[0]!.url).toBe(
-      `${BASE}/v2/admin/communities/77/status`
-    );
-    expect(res.communityDisabled).toBe(true);
-    expect(calls.some((c) => c.url.includes('claim-tokens'))).toBe(false);
+  it('an ambiguous create (lost response, 502, unreadable 201) makes no lookup and reports the REAL slug to disable', async () => {
+    for (const create of ['throw', 'error5xx', 'badjson'] as const) {
+      const { calls, impl } = world({ create });
+      const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
+      expect(lists(calls), create).toHaveLength(0);
+      expect(patches(calls)).toHaveLength(0);
+      expect(calls.some((c) => c.url.includes('claim-tokens'))).toBe(false);
+      expect(res.communityDisabled).toBe(false);
+      expect(res.communityMayExist).toBe(true);
+      expect(res.manualDisableSlug).toBe(
+        JSON.parse(String(calls[0]!.body)).slug
+      );
+      expect(res.manualDisableSlug).toMatch(/^stg-upload-[0-9a-f]{8}$/);
+    }
   });
 
-  it('lost response (a2): a 502 is ambiguous too', async () => {
-    const { calls, impl } = world({ create: 'error5xx', listed: true });
-    const res = await uploadViaThrowawayCommunity(
-      { ...input, lookupRetry: noRetry },
-      { fetch: impl }
-    );
-    expect(patches(calls)).toHaveLength(1);
-    expect(res.communityDisabled).toBe(true);
+  it('a confirmed create whose disable fails reports the slug to disable by hand', async () => {
+    const { impl } = world({ disableStatus: 500 });
+    const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
+    expect(res.manualDisableSlug).toBe(res.community!.slug);
   });
 
-  it('lost response (b): 201 with unreadable JSON -> found by slug and disabled', async () => {
-    const { calls, impl } = world({ create: 'badjson', listed: true });
-    const res = await uploadViaThrowawayCommunity(
-      { ...input, lookupRetry: noRetry },
-      { fetch: impl }
-    );
-    expect(patches(calls)[0]!.url).toBe(
-      `${BASE}/v2/admin/communities/77/status`
-    );
-    expect(res.communityDisabled).toBe(true);
-  });
-
-  it('lost response (c): row on a later list page (not page 0) -> disabled', async () => {
-    const { calls, impl } = world({ create: 'throw', listedOffset: 100 });
-    const res = await uploadViaThrowawayCommunity(
-      { ...input, lookupRetry: noRetry },
-      { fetch: impl }
-    );
-    expect(lists(calls).some((c) => c.url.includes('offset=100'))).toBe(true);
-    expect(patches(calls)[0]!.url).toBe(
-      `${BASE}/v2/admin/communities/77/status`
-    );
-    expect(res.communityDisabled).toBe(true);
-  });
-
-  it('a signal during the in-flight create: no claim token, no upload; awaits the create, then disables the confirmed community', async () => {
-    let release!: () => void;
-    const gate = new Promise<void>((r) => (release = r));
-    const { calls, impl } = world({ gate });
-    let cleanup!: () => Promise<void>;
-    const run = uploadViaThrowawayCommunity(
-      { ...input, onCleanupReady: (fn) => (cleanup = fn) },
-      { fetch: impl }
-    );
-    await vi.waitFor(() =>
-      expect(calls.some((c) => c.method === 'POST')).toBe(true)
-    );
-    const stopped = cleanup();
-    await new Promise((r) => setTimeout(r, 20));
-    expect(patches(calls)).toHaveLength(0);
-    release();
-    await stopped;
-    const res = await run;
-    expect(calls.some((c) => c.url.includes('claim-tokens'))).toBe(false);
-    expect(calls.some((c) => c.url.includes('/media/uploads'))).toBe(false);
-    expect(patches(calls)[0]!.url).toBe(
-      `${BASE}/v2/admin/communities/42/status`
-    );
-    expect(res.communityDisabled).toBe(true);
-  });
-
-  it('a signal then an ambiguous create: retries the slug lookup, then reports the REAL slug when giving up', async () => {
-    const { calls, impl } = world({ create: 'throw' });
-    let cleanup!: () => Promise<void>;
-    let status!: () => { slug?: string; disabled: boolean };
-    const logs: string[] = [];
-    const run = uploadViaThrowawayCommunity(
-      {
-        ...input,
-        lookupRetry: { attempts: 3, delayMs: 5 },
-        onCleanupReady: (fn, st) => {
-          cleanup = fn;
-          status = st;
-        },
-      },
-      { fetch: impl, log: (l) => logs.push(l) }
-    );
-    await cleanup();
-    await run;
-    expect(lists(calls).length).toBeGreaterThanOrEqual(3);
-    expect(patches(calls)).toHaveLength(0);
-    const st = status();
-    expect(st.disabled).toBe(false);
-    expect(st.slug).toMatch(/^stg-upload-[0-9a-f]{8}$/);
-  });
-
-  it('a signal during the password derivation: no bootstrap claim call', async () => {
-    const { calls, impl } = world();
-    let cleanup!: () => Promise<void>;
-    const inner = impl;
-    const wrapped: FetchLike = async (url, init) => {
-      const res = await inner(url, init);
-      // the argon derivation that follows takes far longer than this timer
-      if (url.endsWith('/claim-tokens')) setTimeout(() => void cleanup(), 5);
-      return res;
-    };
-    const res = await uploadViaThrowawayCommunity(
-      { ...input, onCleanupReady: (fn) => (cleanup = fn) },
-      { fetch: wrapped }
-    );
-    expect(res.error).toMatch(/stopped by signal/);
-    expect(calls.some((c) => c.url.endsWith('/bootstrap/claim'))).toBe(false);
-    expect(patches(calls)).toHaveLength(1);
-  });
-
-  it('a signal after a definitive 409: no manual-disable claim; status says no row may exist', async () => {
-    const { calls, impl } = world({ create: 'reject', createStatus: 409 });
-    let cleanup!: () => Promise<void>;
-    let status!: () => { slug?: string; disabled: boolean; mayExist?: boolean };
-    const res = await uploadViaThrowawayCommunity(
-      {
-        ...input,
-        onCleanupReady: (fn, st) => {
-          cleanup = fn;
-          status = st;
-        },
-      },
-      { fetch: impl }
-    );
-    await cleanup();
-    expect(res.communityMayExist).toBe(false);
-    expect(status().mayExist).toBe(false);
-    expect(patches(calls)).toHaveLength(0);
-  });
-
-  it('a stalled slug-lookup request is aborted and the disable still runs', async () => {
-    const calls: string[] = [];
-    const base = world({ create: 'throw', listed: true });
-    const impl: FetchLike = (url, init) => {
-      if (init?.method === 'GET' && url.includes('/admin/communities')) {
-        calls.push('GET');
-        return new Promise<Response>((_, reject) =>
-          init.signal?.addEventListener('abort', () =>
-            reject(new Error('aborted'))
-          )
-        );
-      }
-      return base.impl(url, init);
-    };
-    const res = await uploadViaThrowawayCommunity(
-      {
-        ...input,
-        lookupRetry: {
-          attempts: 2,
-          delayMs: 1,
-          requestTimeoutMs: 30,
-          budgetMs: 200,
-        },
-      },
-      { fetch: impl }
-    );
-    expect(calls.length).toBeGreaterThanOrEqual(1);
-    expect(res.communityMayExist).toBe(true);
-    expect(res.communityDisabled).toBe(false);
+  it('a confirmed disable reports no manual-disable slug', async () => {
+    const { impl } = world();
+    const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
+    expect(res.manualDisableSlug).toBeUndefined();
   });
 
   it('refuses a non-staging URL itself, before any call', async () => {
@@ -1223,6 +1032,242 @@ describe('uploadViaThrowawayCommunity (fake fetch)', () => {
         expect(text).not.toContain(secret);
       }
       expect(text).toMatch(/community: stg-upload-/);
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('--disable-community and the manual-disable line', () => {
+  const SLUG = 'stg-upload-0a1b2c3d';
+  const SUPER = 'ts_session=super-cookie-value';
+  const salt = Buffer.from('0123456789abcdef').toString('base64');
+  const argonAnswer = {
+    algorithm: 'client-argon2id+sha256',
+    salt,
+    params: { memoryKiB: 19 * 1024, iterations: 2, parallelism: 1 },
+  };
+  const ENV = {
+    STAGING_URL: BASE,
+    WT_SUPER_IDENTIFIER: 'super',
+    WT_SUPER_PASSWORD: 'super-password-secret',
+  };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  /** 250 rows over 3 pages; the target sits at row index `at`. */
+  function listWorld(
+    opts: {
+      at?: number;
+      status?: string;
+      patchBody?: 'ok' | 'mismatch';
+      patchStatus?: number;
+      listStatus?: number;
+    } = {}
+  ) {
+    return fakeFetch((call) => {
+      const u = call.url.replace(BASE, '');
+      if (u === '/v2/auth/prelogin') return Response.json(argonAnswer);
+      if (u === '/v2/auth/login') {
+        const res = Response.json({ user: { id: 1 } });
+        res.headers.append(
+          'set-cookie',
+          'ts_session=super-cookie-value; Path=/'
+        );
+        return res;
+      }
+      if (call.method === 'GET' && u.startsWith('/v2/admin/communities?')) {
+        if (opts.listStatus)
+          return new Response(null, { status: opts.listStatus });
+        const offset = Number(new URL(call.url).searchParams.get('offset'));
+        const n = Math.min(100, 250 - offset);
+        const data = Array.from({ length: n }, (_, i) => {
+          const idx = offset + i;
+          return idx === opts.at
+            ? { id: 77, slug: SLUG, status: opts.status ?? 'active' }
+            : { id: 1000 + idx, slug: `other-${idx}`, status: 'active' };
+        });
+        return Response.json({
+          data,
+          meta: { total: 250, limit: 100, offset },
+        });
+      }
+      if (call.method === 'PATCH' && u === '/v2/admin/communities/77/status') {
+        const status = opts.patchStatus ?? 200;
+        if (opts.patchBody === 'mismatch')
+          return Response.json(
+            { data: { id: 77, slug: 'x', status: 'disabled' } },
+            { status }
+          );
+        return Response.json(
+          { data: { id: 77, slug: SLUG, status: 'disabled' } },
+          { status }
+        );
+      }
+      return undefined;
+    });
+  }
+  const listCalls = (calls: Call[]) => calls.filter((c) => c.method === 'GET');
+
+  it('refuses any slug that is not stg-upload-<8 hex>, with no network call', async () => {
+    const { calls, impl } = listWorld({ at: 0 });
+    for (const bad of [
+      'prod',
+      'stg-upload-xyz',
+      'stg-upload-0a1b2c3d9',
+      'stg-upload-0A1B2C3D',
+      'x-stg-upload-0a1b2c3d',
+    ])
+      await expect(
+        disableCommunityBySlug(impl, BASE, SUPER, bad)
+      ).rejects.toThrow(/refusing slug/);
+    expect(calls).toHaveLength(0);
+    const err: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((c) => {
+      err.push(String(c));
+      return true;
+    });
+    const fetchSpy = vi.fn(() => {
+      throw new Error('must not fetch');
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    expect(await main(['--disable-community', 'prod'], ENV)).toBe(2);
+    expect(err.join('')).toMatch(/refusing slug prod/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('finds the community on a later page by exact slug and verifies the 200 body', async () => {
+    const { calls, impl } = listWorld({ at: 230 });
+    expect(await disableCommunityBySlug(impl, BASE, SUPER, SLUG)).toBe(
+      'disabled'
+    );
+    expect(
+      listCalls(calls).map((c) => new URL(c.url).searchParams.get('offset'))
+    ).toEqual(['0', '100', '200']);
+    expect(calls.at(-1)!.url).toBe(`${BASE}/v2/admin/communities/77/status`);
+    expect(JSON.parse(String(calls.at(-1)!.body))).toEqual({
+      status: 'disabled',
+    });
+    expect(calls.every((c) => c.redirect === 'error')).toBe(true);
+  });
+
+  it('stops paging at the first exact match', async () => {
+    const { calls, impl } = listWorld({ at: 5 });
+    await disableCommunityBySlug(impl, BASE, SUPER, SLUG);
+    expect(listCalls(calls)).toHaveLength(1);
+  });
+
+  it('a PATCH answering a mismatched body or non-200 is NOT confirmed', async () => {
+    for (const o of [
+      { patchBody: 'mismatch' as const },
+      { patchStatus: 500 },
+    ]) {
+      const { impl } = listWorld({ at: 3, ...o });
+      expect(await disableCommunityBySlug(impl, BASE, SUPER, SLUG)).toBe(
+        'failed'
+      );
+    }
+  });
+
+  it('reports not found, already disabled (no PATCH), and a failing list call', async () => {
+    const nf = listWorld();
+    expect(await disableCommunityBySlug(nf.impl, BASE, SUPER, SLUG)).toBe(
+      'not-found'
+    );
+    expect(listCalls(nf.calls)).toHaveLength(3);
+    const done = listWorld({ at: 3, status: 'disabled' });
+    expect(await disableCommunityBySlug(done.impl, BASE, SUPER, SLUG)).toBe(
+      'already-disabled'
+    );
+    expect(done.calls.some((c) => c.method === 'PATCH')).toBe(false);
+    const bad = listWorld({ listStatus: 500 });
+    await expect(
+      disableCommunityBySlug(bad.impl, BASE, SUPER, SLUG)
+    ).rejects.toThrow(/answered 500/);
+  });
+
+  it('CLI exit codes: disabled 0, already disabled 0, not found 1', async () => {
+    const out: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation((c) => {
+      out.push(String(c));
+      return true;
+    });
+    for (const [o, code, text] of [
+      [{ at: 9 }, 0, /disabled/],
+      [{ at: 9, status: 'disabled' }, 0, /already disabled/],
+      [{}, 1, /not found/],
+    ] as const) {
+      out.length = 0;
+      vi.stubGlobal('fetch', listWorld(o).impl);
+      expect(await main(['--disable-community', SLUG], ENV)).toBe(code);
+      expect(out.join('')).toMatch(text);
+      expect(out.join('')).not.toContain('super-cookie-value');
+    }
+  });
+
+  it('prints exactly one disable command with the real slug when the disable is not confirmed, none after a 4xx', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'upload-large-'));
+    const path = join(dir, 'sample.mp4');
+    writeFileSync(path, PNG_BYTES);
+    const cases: Array<[string, (url: string) => Response | undefined]> = [
+      [
+        'ambiguous',
+        (u) =>
+          u === '/v2/admin/communities'
+            ? new Response(null, { status: 502 })
+            : undefined,
+      ],
+      [
+        'rejected',
+        (u) =>
+          u === '/v2/admin/communities'
+            ? new Response(null, { status: 409 })
+            : undefined,
+      ],
+    ];
+    for (const [name, answer] of cases) {
+      const base = fakeFetch((call) => {
+        const u = call.url.replace(BASE, '');
+        if (call.method === 'POST' && u === '/v2/admin/communities')
+          return answer(u);
+        if (u === '/v2/auth/prelogin') return Response.json(argonAnswer);
+        if (u === '/v2/auth/login') {
+          const res = Response.json({ user: { id: 1 } });
+          res.headers.append(
+            'set-cookie',
+            'ts_session=super-cookie-value; Path=/'
+          );
+          return res;
+        }
+        return undefined;
+      });
+      const err: string[] = [];
+      vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+      vi.spyOn(process.stderr, 'write').mockImplementation((c) => {
+        err.push(String(c));
+        return true;
+      });
+      vi.stubGlobal('fetch', base.impl);
+      expect(await main(['--file', path], ENV), name).toBe(1);
+      const slug = JSON.parse(
+        String(
+          base.calls.find((c) => c.url.endsWith('/v2/admin/communities'))!.body
+        )
+      ).slug;
+      const cmds = err
+        .join('')
+        .split('\n')
+        .filter((l) => l.includes('--disable-community'));
+      if (name === 'ambiguous') {
+        expect(cmds).toEqual([
+          `STAGING_URL=${BASE} npx tsx scripts/staging/upload-large.ts --disable-community ${slug}`,
+        ]);
+      } else {
+        expect(cmds).toEqual([]);
+      }
       vi.restoreAllMocks();
       vi.unstubAllGlobals();
     }

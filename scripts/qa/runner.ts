@@ -182,6 +182,9 @@ export async function runJourneys(options: {
     const ids: Record<string, number | string> = {};
     for (const step of journey.steps) {
       let path = step.path;
+      // External requests (presigned R2 part targets) keep step.path as their
+      // report label but never count toward API route coverage.
+      let externalRequest = false;
       let actual = 0;
       let pass = false;
       let failure: Result['failure'];
@@ -232,6 +235,7 @@ export async function runJourneys(options: {
             (journeyBaseUrl ?? baseUrl)?.origin ?? 'http://qa.invalid';
           const isExternalTarget =
             isAbsoluteTarget && parsedRequestUrl.origin !== apiOrigin;
+          externalRequest = isExternalTarget;
           path = isExternalTarget
             ? interpolate(step.path)
             : parsedRequestUrl.pathname + parsedRequestUrl.search;
@@ -402,7 +406,9 @@ export async function runJourneys(options: {
               a.path.split('/').filter((p) => p.startsWith(':')).length -
               b.path.split('/').filter((p) => p.startsWith(':')).length
           );
-          if (candidates[0]) reached.add(key(candidates[0]));
+          if (externalRequest) {
+            // Not an API request: nothing to mark reached.
+          } else if (candidates[0]) reached.add(key(candidates[0]));
           else {
             pass = false;
             failure = 'unmatched-route';

@@ -212,22 +212,35 @@ export async function runJourneys(options: {
       };
       try {
         const work = (async () => {
+          const interpolate = (template: string) =>
+            template.replace(/\{(\w+)\}/g, (_, name: string) => {
+              if (!ids[name]) throw new Error(`Missing captured id: ${name}`);
+              return String(ids[name]);
+            });
           const prepared = await step.prepare?.();
           if (controller.signal.aborted)
             throw new Error('Request deadline elapsed');
-          path = (typeof prepared === 'string' ? prepared : step.path).replace(
-            /\{(\w+)\}/g,
-            (_, name: string) => {
-              if (!ids[name]) throw new Error(`Missing captured id: ${name}`);
-              return String(ids[name]);
-            }
+          const rawTarget = interpolate(
+            typeof prepared === 'string' ? prepared : step.path
           );
+          const isAbsoluteTarget = /^https?:\/\//.test(rawTarget);
+          const requestUrl = isAbsoluteTarget
+            ? rawTarget
+            : `http://qa.invalid${rawTarget}`;
+          const parsedRequestUrl = new URL(requestUrl);
+          const apiOrigin =
+            (journeyBaseUrl ?? baseUrl)?.origin ?? 'http://qa.invalid';
+          const isExternalTarget =
+            isAbsoluteTarget && parsedRequestUrl.origin !== apiOrigin;
+          path = isExternalTarget
+            ? interpolate(step.path)
+            : parsedRequestUrl.pathname + parsedRequestUrl.search;
           const headers = new Headers(step.headers);
           if (step.useSavedCookie) {
             const saved = savedCookies[step.useSavedCookie];
             if (!saved) throw new Error('Saved session cookie is unavailable');
             headers.set('cookie', saved);
-          } else if (cookie && !headers.has('cookie'))
+          } else if (cookie && !isExternalTarget && !headers.has('cookie'))
             headers.set('cookie', cookie);
           if (step.saveCookieAs) {
             const outgoingCookie = headers.get('cookie');
@@ -268,7 +281,7 @@ export async function runJourneys(options: {
             headers.set('content-type', 'application/json');
           stage = 'Sending request';
           response = await journeyHandler(
-            new Request(`http://qa.invalid${path}`, {
+            new Request(requestUrl, {
               method: step.method,
               headers,
               signal: controller.signal,

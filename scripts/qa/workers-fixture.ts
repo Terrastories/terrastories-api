@@ -21,6 +21,10 @@ import {
   startWorkerRuntime,
 } from '../../tests/helpers/worker-runtime.js';
 import {
+  handleFakeR2PartRequest,
+  type FakeS3Options,
+} from '../../tests/helpers/fake-r2-s3.js';
+import {
   createFixture as createHonoPersonaFixture,
   honoPersonaRouteTable,
   type HonoQaBackend,
@@ -45,53 +49,37 @@ type MediaBucket = Awaited<
 >;
 
 /**
- * Persona journeys send direct-upload parts to `PUT /v2/media/uploads/:id/
- * parts/:n`. On Node that route stores the part; on Workers the presigned
- * part URL points at R2's S3 endpoint, which Miniflare does not serve. This
- * wrapper plays that endpoint: it finds the session journal in R2, checks
- * the persona fixture’s Node-format checksum and Content-Length, stores
- * the part through the binding and answers with the part's ETag. Everything
- * else (create, complete, abort and the whole Worker) is the real bundle.
+ * Persona journeys send direct-upload parts to the target URLs returned by
+ * `POST /v2/media/uploads` (and re-issued by `/parts/presign`). On Workers
+ * (`mode: 'presigned'`), each part URL points at R2's S3 endpoint
+ * (`https://<accountId>.r2.cloudflarestorage.com/<bucket>/<key>?...`), which
+ * Miniflare does not serve. This wrapper intercepts requests to that R2 S3
+ * origin and verifies them with the same fake R2 S3 logic as the unit tests
+ * (`tests/helpers/fake-r2-s3.ts`): SigV4 query signature over
+ * `UNSIGNED-PAYLOAD`, signed `Content-Length`, signed `x-amz-content-sha256`
+ * matched against the body bytes (`400 XAmzContentSHA256Mismatch`), and `501`
+ * for `x-amz-checksum-sha256`. Everything on the Worker's own origin
+ * (including `PUT /v2/media/uploads/:id/parts/:n`) goes to the real bundle.
  */
-function withR2PartEndpoint(handler: Handler, bucket: MediaBucket): Handler {
-  const partRoute = /^\/v2\/media\/uploads\/([0-9a-f-]{36})\/parts\/(\d+)$/;
+function withR2PartEndpoint(
+  handler: Handler,
+  bucket: MediaBucket,
+  options: FakeS3Options
+): Handler {
+  const r2Origin = `https://${options.accountId}.r2.cloudflarestorage.com`;
   return async (request) => {
-    const match =
-      request.method === 'PUT'
-        ? partRoute.exec(new URL(request.url).pathname)
-        : null;
-    if (!match) return handler(request);
-    const bytes = new Uint8Array(await request.arrayBuffer());
-    const sum = Buffer.from(
-      await crypto.subtle.digest('SHA-256', bytes)
-    ).toString('base64');
-    if (
-      request.headers.get('x-amz-checksum-sha256') !== sum ||
-      request.headers.get('content-length') !== String(bytes.byteLength)
-    ) {
-      return new Response(null, { status: 400 });
-    }
-    let cursor: string | undefined;
-    do {
-      const page = await bucket.list({ prefix: 'communities/', cursor });
-      const journal = page.objects.find((o) =>
-        o.key.endsWith(`/.multipart/${match[1]}.json`)
-      );
-      if (journal) {
-        const session = (await (await bucket.get(journal.key))!.json()) as {
-          key: string;
-          uploadId: string;
-        };
-        const part = await bucket
-          .resumeMultipartUpload(session.key, session.uploadId)
-          .uploadPart(Number(match[2]), bytes);
-        return Response.json({
-          data: { partNumber: part.partNumber, etag: part.etag },
-        });
-      }
-      cursor = page.truncated ? page.cursor : undefined;
-    } while (cursor);
-    return new Response(null, { status: 404 });
+    const url = new URL(request.url);
+    if (url.origin !== r2Origin) return handler(request);
+    const result = await handleFakeR2PartRequest(bucket, options, {
+      method: request.method,
+      url,
+      header: (name) => request.headers.get(name) ?? '',
+      body: new Uint8Array(await request.arrayBuffer()),
+    });
+    return new Response(result.body ?? null, {
+      status: result.status,
+      headers: result.headers,
+    });
   };
 }
 
@@ -117,6 +105,12 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
     R2_ACCESS_KEY_ID: toHex(crypto.getRandomValues(new Uint8Array(10))),
     R2_SECRET_ACCESS_KEY: toHex(crypto.getRandomValues(new Uint8Array(20))),
     R2_BUCKET_NAME: 'media-qa',
+  };
+  const fakeS3Options: FakeS3Options = {
+    accountId: r2S3.R2_ACCOUNT_ID,
+    bucketName: r2S3.R2_BUCKET_NAME,
+    accessKeyId: r2S3.R2_ACCESS_KEY_ID,
+    secretAccessKey: r2S3.R2_SECRET_ACCESS_KEY,
   };
   const mf = startWorkerRuntime(
     workerScript,
@@ -190,7 +184,11 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       putMedia: (key, bytes) => bucket.put(key, bytes),
       hasMedia: async (key) => (await bucket.head(key)) !== null,
       handler: (observeResponseCookies) =>
-        withR2PartEndpoint(dispatchTo(mf, observeResponseCookies), bucket),
+        withR2PartEndpoint(
+          dispatchTo(mf, observeResponseCookies),
+          bucket,
+          fakeS3Options
+        ),
       freshBootstrap: {
         bootstrapSecret: freshBootstrapSecret,
         handler: (observeResponseCookies) =>

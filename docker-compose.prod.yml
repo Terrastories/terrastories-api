@@ -34,7 +34,7 @@ services:
       # No default on purpose: set disable only for the bundled in-network
       # postgres (it has no TLS); use require or verify-full for an external
       # DATABASE_URL_PROD so TLS is never silently dropped.
-      - DATABASE_SSL=${DATABASE_SSL:?set DATABASE_SSL: disable only for the bundled in-network postgres, require or verify-full for an external database}
+      - DATABASE_SSL=${DATABASE_SSL:?set DATABASE_SSL - disable only for the bundled in-network postgres, require or verify-full for an external database}
       # Shared legacy config loader (src/shared/config) still requires these.
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
       - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET is required}

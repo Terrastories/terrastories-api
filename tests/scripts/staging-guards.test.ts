@@ -1,11 +1,19 @@
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   GuardError,
+  WORKER_CRONS,
   assertAccountMatches,
+  assertStagingConfig,
   assertCronBudget,
   assertD1Size,
   assertStagingName,
@@ -43,12 +51,31 @@ describe('staging guards', () => {
   });
 
   it('enforces the free cron limit and counts the committed staging env', () => {
-    expect(() => assertCronBudget(2, 3)).not.toThrow();
+    expect(() => assertCronBudget(3, 0)).not.toThrow();
     expect(() => assertCronBudget(3, 3)).toThrow(/Free limit/);
     const config = parseJsonc(
       readFileSync(join(ROOT, 'wrangler.jsonc'), 'utf8')
     );
-    expect(countCrons(config, 'staging')).toBe(2);
+    expect(countCrons(config, 'staging')).toBe(3);
+    expect(() => assertStagingConfig(config)).not.toThrow();
+    // every cron the Worker matches on is declared (exact strings)
+    const worker = readFileSync(join(ROOT, 'src/worker.ts'), 'utf8');
+    for (const cron of WORKER_CRONS.filter((c) => c !== '0 * * * *')) {
+      expect(worker).toContain("cron === '" + cron + "'");
+    }
+    const bad = structuredClone(config) as {
+      env: {
+        staging: { triggers: { crons: string[] }; r2_buckets: unknown[] };
+      };
+    };
+    bad.env.staging.triggers.crons = ['0 * * * *', '* * * * *'];
+    expect(() => assertStagingConfig(bad)).toThrow(/crons must be exactly/);
+    const noErasure = structuredClone(config) as typeof bad;
+    noErasure.env.staging.r2_buckets = noErasure.env.staging.r2_buckets.slice(
+      0,
+      1
+    );
+    expect(() => assertStagingConfig(noErasure)).toThrow(/ERASURE_RECORDS/);
     const staging = (config as { env: { staging: { name: string } } }).env
       .staging;
     expect(staging.name.startsWith('terrastories-staging-')).toBe(true);
@@ -113,13 +140,22 @@ esac
     expect(calls).not.toMatch(/create/);
   });
 
-  it('refuses a name without the staging prefix', () => {
+  it('creates the erasure-records bucket and ignores name overrides', () => {
     const r = run({
       CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
       STAGING_R2_BUCKET: 'terrastories-media',
     });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain(
+      '+ npx wrangler r2 bucket create terrastories-staging-erasure-records'
+    );
+    expect(r.stdout).not.toContain('terrastories-media');
+  });
+
+  it('refuses when the cron budget is exceeded', () => {
+    const r = run({ CLOUDFLARE_ACCOUNT_ID: ACCOUNT, OTHER_CRON_TRIGGERS: '3' });
     expect(r.status).not.toBe(0);
-    expect(r.stdout).not.toContain('bucket create');
+    expect(r.stdout).not.toContain('d1 create');
   });
 
   it('refuses an account mismatch', () => {
@@ -127,5 +163,68 @@ esac
     expect(r.status).not.toBe(0);
     expect(r.stderr).toMatch(/does not show|refused/);
     expect(r.stdout).not.toContain('d1 create');
+  });
+});
+
+describe('load-community.sh resume guard (fake npx)', () => {
+  const work = mkdtempSync(join(tmpdir(), 'load-guard-'));
+  const bin = join(work, 'bin');
+  mkdirSync(bin);
+  writeFileSync(
+    join(bin, 'npx'),
+    `#!/usr/bin/env bash
+case "$*" in
+  *whoami*) echo "Account ${ACCOUNT}" ;;
+  *tsx*) shift; shift; exec "${ROOT}/node_modules/.bin/tsx" "$@" ;;
+  *) exit 0 ;;
+esac
+`
+  );
+  writeFileSync(join(bin, 'npm'), '#!/usr/bin/env bash\nexit 0\n');
+  chmodSync(join(bin, 'npx'), 0o755);
+  chmodSync(join(bin, 'npm'), 0o755);
+  const transform = join(work, 'transform');
+  mkdirSync(transform);
+  writeFileSync(join(transform, 'manifest.json'), '{"a":1}');
+  const run = (sqlOut: string) =>
+    spawnSync(
+      'bash',
+      [
+        'scripts/staging/load-community.sh',
+        '--transform-output',
+        transform,
+        '--sql-out',
+        sqlOut,
+        '--apply',
+        '--skip-r2',
+      ],
+      {
+        cwd: ROOT,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
+        },
+      }
+    );
+
+  it('refuses an sql-out dir built from another transform output', () => {
+    const other = join(work, 'sql-other');
+    mkdirSync(other);
+    writeFileSync(join(other, '.transform-manifest.sha256'), 'deadbeef');
+    writeFileSync(join(other, 'd1-import.json'), '{"files":[]}');
+    const r = run(other);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/different transform output/);
+  });
+
+  it('refuses an unstamped existing sql-out dir', () => {
+    const bare = join(work, 'sql-bare');
+    mkdirSync(bare);
+    writeFileSync(join(bare, 'd1-import.json'), '{"files":[]}');
+    const r = run(bare);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/without a transform stamp/);
   });
 });

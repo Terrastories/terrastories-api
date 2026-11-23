@@ -10,11 +10,11 @@
 #   CLOUDFLARE_ACCOUNT_ID  the expected work-account id; must appear in
 #                          `npx wrangler whoami` or the script refuses
 #   CLOUDFLARE_API_TOKEN   (or an interactive wrangler login)
-# Optional name overrides (must keep the prefix):
-#   STAGING_D1_NAME (terrastories-staging-db)
-#   STAGING_R2_BUCKET (terrastories-staging-media)
-#   STAGING_WORKER_NAME (terrastories-staging-api)
-#   OTHER_CRON_TRIGGERS (3: crons already used by the production template)
+# Names are fixed (terrastories-staging-api / -db / -media / -erasure-records)
+# and checked against wrangler.jsonc env.staging, so the deployed config and
+# the created resources cannot diverge. Optional:
+#   OTHER_CRON_TRIGGERS (0) cron triggers already used by other Workers in the
+#                       account (production uses 3; the Free limit is 5)
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -27,13 +27,15 @@ for arg in "$@"; do
   esac
 done
 
-D1_NAME="${STAGING_D1_NAME:-terrastories-staging-db}"
-BUCKET="${STAGING_R2_BUCKET:-terrastories-staging-media}"
-WORKER="${STAGING_WORKER_NAME:-terrastories-staging-api}"
+D1_NAME="terrastories-staging-db"
+BUCKET="terrastories-staging-media"
+ERASURE_BUCKET="terrastories-staging-erasure-records"
+WORKER="terrastories-staging-api"
 
-guard name "$D1_NAME" "$BUCKET" "$WORKER"
+guard name "$D1_NAME" "$BUCKET" "$ERASURE_BUCKET" "$WORKER"
+guard config "$REPO_ROOT/wrangler.jsonc"
 check_account
-guard crons "$REPO_ROOT/wrangler.jsonc" staging "${OTHER_CRON_TRIGGERS:-3}"
+guard crons "$REPO_ROOT/wrangler.jsonc" staging "${OTHER_CRON_TRIGGERS:-0}"
 info "mode: $([ "$APPLY" = 1 ] && echo APPLY || echo DRY-RUN)"
 
 cd "$REPO_ROOT"
@@ -50,11 +52,18 @@ else
   info "paste the printed database_id into wrangler.jsonc env.staging.d1_databases[0]"
 fi
 
-if printf '%s' "$r2_list" | grep -q "$BUCKET"; then
+if printf '%s' "$r2_list" | grep -qw "$BUCKET"; then
   info "R2 bucket $BUCKET exists: skipping create"
 else
   run npx wrangler r2 bucket create "$BUCKET"
 fi
+
+if printf '%s' "$r2_list" | grep -q "$ERASURE_BUCKET"; then
+  info "R2 bucket $ERASURE_BUCKET exists: skipping create"
+else
+  run npx wrangler r2 bucket create "$ERASURE_BUCKET"
+fi
+info "erasure-records bucket: no lifecycle expiration, never restored/copied with D1 or MEDIA, excluded from backups (src/services/ERASURE-OPERATIONS.md)"
 
 info "R2 lifecycle (abort incomplete multipart after 1 day) and CORS (PUT, x-amz-checksum-sha256, content-type; expose ETag; MaxAge >= 3600) are set per docs/CUTOVER-RUNBOOK.md section 3"
 
@@ -66,5 +75,5 @@ else
   run npx wrangler deploy --env staging --dry-run
   run npx wrangler deploy --env staging
 fi
-info "secrets are set by hand, never by this script: npx wrangler secret put <NAME> --env staging"
+info "secrets by hand, never by this script (npx wrangler secret put <NAME> --env staging): AUTH_SERVER_SECRET BOOTSTRAP_SECRET R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY, optional MAPBOX_ACCESS_TOKEN"
 info "done ($WORKER)"

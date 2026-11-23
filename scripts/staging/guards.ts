@@ -9,6 +9,7 @@
  *   tsx guards.ts account <expected-id>        reads `wrangler whoami` text on stdin
  *   tsx guards.ts crons <wrangler.jsonc> <env> cron triggers within the free limit
  *   tsx guards.ts d1-size <bytes>              D1 database within the free limit
+ *   tsx guards.ts config <wrangler.jsonc>      env.staging matches the kit's fixed names
  *   tsx guards.ts url <staging-url>            URL is a staging origin
  */
 import { readFileSync } from 'node:fs';
@@ -21,6 +22,16 @@ export const FREE_CRON_LIMIT_PER_ACCOUNT = 5;
 /** D1 Free: 500 MB per database. Keep 10 percent headroom. */
 export const D1_FREE_MAX_BYTES = 500 * 1000 * 1000;
 export const D1_HEADROOM_BYTES = Math.floor(D1_FREE_MAX_BYTES * 0.9);
+
+/** Fixed staging resource names: the deployed config and the scripts share them. */
+export const STAGING_NAMES = {
+  worker: 'terrastories-staging-api',
+  d1: 'terrastories-staging-db',
+  media: 'terrastories-staging-media',
+  erasure: 'terrastories-staging-erasure-records',
+} as const;
+/** Exact cron strings src/worker.ts dispatches on (matched by string equality). */
+export const WORKER_CRONS = ['0 * * * *', '* * * * *', '*/1 * * * *'] as const;
 
 const NAME_RE = /^terrastories-staging-[a-z0-9][a-z0-9-]*$/;
 
@@ -107,6 +118,41 @@ export function countCrons(config: unknown, env: string): number {
  * used by other Workers (production template: 3). Default assumes the repo's
  * top-level (production) block is deployed too.
  */
+type StagingEnv = {
+  name?: string;
+  d1_databases?: Array<{ binding?: string; database_name?: string }>;
+  r2_buckets?: Array<{ binding?: string; bucket_name?: string }>;
+  vars?: Record<string, string>;
+  triggers?: { crons?: string[] };
+};
+
+/** The committed env.staging block must match the names the scripts create. */
+export function assertStagingConfig(config: unknown): void {
+  const staging = (config as { env?: { staging?: StagingEnv } }).env?.staging;
+  if (!staging)
+    throw new GuardError('refused: wrangler.jsonc has no env.staging');
+  const bad = (what: string): never => {
+    throw new GuardError('refused: env.staging ' + what);
+  };
+  if (staging.name !== STAGING_NAMES.worker)
+    bad('name is not ' + STAGING_NAMES.worker);
+  const d1 = staging.d1_databases?.find((d) => d.binding === 'DB');
+  if (d1?.database_name !== STAGING_NAMES.d1)
+    bad('DB binding is not ' + STAGING_NAMES.d1);
+  const bucket = (binding: string) =>
+    staging.r2_buckets?.find((b) => b.binding === binding)?.bucket_name;
+  if (bucket('MEDIA') !== STAGING_NAMES.media)
+    bad('MEDIA binding is not ' + STAGING_NAMES.media);
+  if (bucket('ERASURE_RECORDS') !== STAGING_NAMES.erasure)
+    bad('ERASURE_RECORDS binding is not ' + STAGING_NAMES.erasure);
+  if (staging.vars?.R2_BUCKET_NAME !== STAGING_NAMES.media)
+    bad('R2_BUCKET_NAME var is not the media bucket');
+  if (!staging.vars?.PUBLIC_ORIGIN) bad('has no PUBLIC_ORIGIN');
+  const crons = [...(staging.triggers?.crons ?? [])].sort();
+  if (JSON.stringify(crons) !== JSON.stringify([...WORKER_CRONS].sort()))
+    bad('crons must be exactly ' + WORKER_CRONS.join(' | '));
+}
+
 export function assertCronBudget(
   stagingCrons: number,
   otherCrons: number
@@ -169,13 +215,15 @@ export function main(argv: string[]): number {
   const [cmd, ...rest] = argv;
   try {
     if (cmd === 'name' && rest.length > 0) rest.forEach(assertStagingName);
+    else if (cmd === 'config' && rest.length === 1)
+      assertStagingConfig(parseJsonc(readFileSync(rest[0] as string, 'utf8')));
     else if (cmd === 'account' && rest.length === 1)
       assertAccountMatches(readStdin(), rest[0]);
     else if (cmd === 'crons' && rest.length >= 2) {
       const config = parseJsonc(readFileSync(rest[0] as string, 'utf8'));
       assertCronBudget(
         countCrons(config, rest[1] as string),
-        Number(rest[2] ?? '3')
+        Number(rest[2] ?? '0')
       );
     } else if (cmd === 'd1-size' && rest.length === 1)
       assertD1Size(Number(rest[0]));

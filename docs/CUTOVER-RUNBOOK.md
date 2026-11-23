@@ -34,6 +34,7 @@ V2 ships an API only. The V2 frontend is not built ([V2-FRONTEND-HANDOFF.md](./V
    - `AUTH_SERVER_SECRET`: prelogin HMAC key, at least 32 characters, unique.
    - `BOOTSTRAP_SECRET`: installation bootstrap secret, unique, length per `BOOTSTRAP_SECRET_MIN_LENGTH`.
    - `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`: for `/v2/media/uploads`; without all of them plus the var `R2_BUCKET_NAME` the route answers `501`.
+   - Binding `ERASURE_RECORDS`: dedicated R2 bucket (staging `terrastories-staging-erasure-records`, created by `provision.sh`). Never restored, rotated or copied with D1/MEDIA; excluded from backups; no lifecycle expiration. Var `R2_BUCKET_NAME` names the media bucket; `ENVIRONMENT` stays unset; `ORPHAN_SWEEP_PAUSED` is set only during a restore.
    - `MAPBOX_ACCESS_TOKEN`: optional instance default (a public `pk.*` token; `sk.*` is rejected with `422`). Unset falls back to OpenFreeMap.
    - Verify presence without printing: `npx wrangler secret list --env staging`.
 4. **Bucket configuration** (staging and production): CORS for the frontend origin (allow `PUT`; headers `x-amz-checksum-sha256`, `content-type`; expose `ETag`; MaxAge at least 3600) and a lifecycle rule aborting incomplete multipart uploads after 1 day.
@@ -51,7 +52,7 @@ Staging uses only `terrastories-staging-*` resources, a workers.dev URL, no DNS 
    ```bash
    export CLOUDFLARE_ACCOUNT_ID=<expected account id>
    scripts/staging/provision.sh            # prints the plan
-   scripts/staging/provision.sh --apply    # creates D1 + R2 only
+   scripts/staging/provision.sh --apply    # creates D1 + two R2 buckets (media, erasure records) only
    ```
    Creating Cloudflare resources: **REQUIRES HUMAN APPROVAL** (free tier, create-only; the script never deletes). Paste the printed `database_id` and your workers.dev subdomain into `wrangler.jsonc` `env.staging` (do not commit real ids if the repo is public; keep the edit local or commit only if the owner agrees). Set secrets (section 2.3), configure bucket CORS and lifecycle, then rerun `provision.sh --apply` to deploy the Worker. Time Travel needs `wrangler d1 info` to show `version: production`.
 2. **Capture, barbara first.** Use a real source capture only on the trusted host. The pilot community `barbara` goes first:
@@ -110,13 +111,13 @@ All must be true on the final rehearsal, with evidence attached. A single NO is 
   - MANUAL items in the transform output: **zero**.
 - [ ] Decision A (R2 storage) resolved and any paid plan active.
 - [ ] D1 free limits hold: database under 500 MB with headroom, row-write estimate under the 100,000 per day budget (or a split load across days, or a paid decision). `load-community.sh` fails on over-budget unless `--allow-over-budget` is chosen by a person.
-- [ ] Cron triggers within 5 per account (staging 2 + production 3).
+- [ ] Cron triggers within 5 per account: staging (3) crons removed before production (3) is deployed (section 6).
 - [ ] V2 frontend accepted (section 0), custom domain access confirmed, community approvals and custodians recorded, Mapbox notice sent.
 - [ ] Rollback rehearsed (section 9) and the Heroku DB and S3 confirmed intact.
 
 ## 6. Production resources (create-only; before the window)
 
-Production D1 and R2 names do not use the staging prefix, so the staging scripts will not touch them. Create them by hand after the go decision: **REQUIRES HUMAN APPROVAL**. Use the top-level `wrangler.jsonc` block with real ids, set production secrets (section 2.3), configure bucket CORS and lifecycle, and deploy the Worker without a route. Confirm that `PUBLIC_ORIGIN` is the final custom origin, not `https://example.org` (the Worker returns `503 config-refused` otherwise). Run the production dry-run: `npx wrangler deploy --dry-run`.
+Production D1 and R2 names do not use the staging prefix, so the staging scripts will not touch them. Create them by hand after the go decision, including a **production `ERASURE_RECORDS` R2 bucket** (a dedicated bucket, no lifecycle expiration rule, excluded from backups, never restored or copied with D1/MEDIA; without it erasure answers 503): **REQUIRES HUMAN APPROVAL**. **Cron limit:** Workers Free allows 5 cron triggers per account. The Worker dispatches 3 exact crons (`0 * * * *`, `* * * * *`, `*/1 * * * *`), staging holds 3, production needs 3, so 6 > 5. Before deploying production, redeploy staging with its `triggers.crons` emptied (or delete the staging Worker after the rehearsal is closed; deletion **REQUIRES HUMAN APPROVAL**), or take a paid decision. Never run production without all three crons: the `*/1` entry is the erasure retry. Use the top-level `wrangler.jsonc` block with real ids, set production secrets (section 2.3), configure bucket CORS and lifecycle, and deploy the Worker without a route. Confirm that `PUBLIC_ORIGIN` is the final custom origin, not `https://example.org` (the Worker returns `503 config-refused` otherwise). Run the production dry-run: `npx wrangler deploy --dry-run`.
 
 ## 7. Maintenance window (blocked on frontend, section 0)
 
@@ -124,7 +125,7 @@ Estimate the length from the full-capture rehearsal. Run from the trusted host. 
 
 1. **Announce.** Notify communities and stewards of the window. **REQUIRES HUMAN APPROVAL.**
 2. **Heroku maintenance mode on:** `heroku maintenance:on -a terrastories`. **REQUIRES HUMAN APPROVAL.** The source writer boundary must cover relational writes, background jobs, attachments and stored-object uploads.
-3. **Drain and freeze writers:** `heroku ps:scale web=0 worker=0 -a terrastories` (include any scheduler or worker dyno; verify with `heroku ps`). The legacy source is now read-only. **REQUIRES HUMAN APPROVAL.**
+3. **Record the dyno formation, then drain and freeze writers.** First `heroku ps -a terrastories` and `heroku ps:type -a terrastories`; save the exact formation (every process type, quantity and size: web, worker, any scheduler or release process) in the evidence folder. Then scale every listed type to 0, for example `heroku ps:scale web=0 worker=0 -a terrastories`, and verify with `heroku ps` that nothing runs. Heroku Scheduler jobs are add-on triggers: record and disable them too. The legacy source is now read-only. **REQUIRES HUMAN APPROVAL.**
 4. **Final Heroku backup:** `heroku pg:backups:capture -a terrastories`, then `heroku pg:backups:download` to the restricted store; record the backup id and checksum. **REQUIRES HUMAN APPROVAL** (production data copy).
 5. **Final S3 capture, full** (do not pass `--community`), from the quiescent source into a new bundle directory, with read-only AWS credentials from the environment. Verify per RAILS-MIGRATION.md ("Required verification before accepting Stage 1"). **REQUIRES HUMAN APPROVAL.**
 6. **Transform, full**, then review `validation-summary.txt` and confirm MANUAL items are zero and the manifest counts equal the rehearsal counts.
@@ -134,7 +135,7 @@ Estimate the length from the full-capture rehearsal. Run from the trusted host. 
 10. **Community acceptance.** Each steward confirms their community; record acceptance date and custodian. Acceptance starts the 30-day retention clock.
 11. **Close the window**, announce completion. **REQUIRES HUMAN APPROVAL.**
 
-Abort criteria before step 8: any failed verify, any count mismatch, any MANUAL item. Abort means: leave Heroku untouched, `heroku ps:scale web=<previous>`, `heroku maintenance:off`, and wipe nothing on Heroku or S3.
+Abort criteria before step 8: any failed verify, any count mismatch, any MANUAL item. Abort means: leave Heroku untouched, restore the recorded formation (`heroku ps:scale web=<n> worker=<n> ...` for every type, then re-enable Scheduler jobs), `heroku maintenance:off`, and wipe nothing on Heroku or S3.
 
 ## 8. Post-cutover and Heroku shutdown
 
@@ -151,8 +152,14 @@ Before DNS switch (steps 1 to 7): nothing user-facing changed. Leave Heroku as i
 After DNS switch, within the retention window:
 
 1. Restore the previous DNS records (recorded in step 8) or detach the custom domain from the Worker. **REQUIRES HUMAN APPROVAL.**
-2. Restore Heroku: `heroku ps:scale web=<previous> -a terrastories`, `heroku maintenance:off`. The Heroku DB and S3 were read-only and untouched, so Rails serves the pre-window state. Writes made on V2 after cutover are not carried back; export them first if the community needs them (community export API).
-3. D1 problems that do not need a full rollback: use Time Travel. Record the bookmark before every load (`wrangler d1 time-travel info <db>`); set the orphan-sweep hold first (`ORPHAN_SWEEP_PAUSED=true` or the `system/orphan-sweep-hold` object), then `wrangler d1 time-travel restore <db> --bookmark=<id>` (destructive, overwrites the database), repair, and lift the hold only after D1 and R2 agree. Time Travel keeps 7 days on Free. **REQUIRES HUMAN APPROVAL.**
+2. Restore Heroku to the **recorded formation** from window step 3: scale every process type (web, worker, scheduler and any other) back to its recorded quantity and size, re-enable Heroku Scheduler jobs, check with `heroku ps`, then `heroku maintenance:off`. Scaling only web leaves background jobs (mail, ActiveStorage processing) stopped. The Heroku DB and S3 were read-only and untouched, so Rails serves the pre-window state. Writes made on V2 after cutover are not carried back; export them first if the community needs them (community export API).
+3. D1 problems that do not need a full rollback: use Time Travel, but a restore can resurrect a community that was erased after the bookmark, so the erasure procedure comes first. Record the bookmark before every load (`wrangler d1 time-travel info <db>`). Then, per [OPERATIONS-GOVERNANCE.md §6.4](./OPERATIONS-GOVERNANCE.md#64-restore-hold-for-the-orphan-sweeper) and [src/services/ERASURE-OPERATIONS.md](../src/services/ERASURE-OPERATIONS.md):
+   1. Quiesce the deployment (no traffic) and set the orphan-sweep hold (`ORPHAN_SWEEP_PAUSED=true` or the `system/orphan-sweep-hold` object).
+   2. Run `CommunityErasureService.verifyRestorePoint(targetTimestamp, now)` against the live database and the `ERASURE_RECORDS` bucket. It refuses the restore while an erasure is pending or when the target is before any recorded erasure completion; in that case do not restore, forward-fix instead.
+   3. `wrangler d1 time-travel restore <db> --bookmark=<id>` (destructive, overwrites the database).
+   4. Before serving: `CommunityErasureService.reconcileRestore(targetTimestamp, now)` re-applies every retained erasure (objects, multipart uploads, rows, sessions). A failure keeps the deployment closed.
+   5. Verify D1 and R2 agree, then lift the hold and reopen.
+      The `ERASURE_RECORDS` bucket is never restored, rotated or copied with D1 or MEDIA. Time Travel keeps 7 days on Free. **REQUIRES HUMAN APPROVAL.**
 4. A Worker code rollback does not undo database writes (CLOUDFLARE-STAGING.md, "Teardown and rollback").
 
 ## 10. Known gaps

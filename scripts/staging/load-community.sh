@@ -17,7 +17,10 @@
 # under the --sql-out directory, never to the terminal.
 # A file that fails midway is NOT retried automatically. After reading the log,
 # rerun with --wipe-and-retry to run wipe-and-retry.sql (staging only) first.
-# Env: CLOUDFLARE_ACCOUNT_ID, STAGING_D1_NAME, STAGING_R2_BUCKET; for r2:
+# Resume safety: the SQL dump directory records the SHA-256 of the transform
+# output's manifest.json (.transform-manifest.sha256); a directory made from a
+# different transform output is refused, never reused.
+# Env: CLOUDFLARE_ACCOUNT_ID (resource names are fixed); for r2:
 #   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY (environment only).
 set -euo pipefail
 # shellcheck source=lib.sh
@@ -41,9 +44,11 @@ done
 TRANSFORM="$(cd "$TRANSFORM" && pwd)"
 SQL_OUT="${SQL_OUT:-$TRANSFORM.d1-sql}"
 
-D1_NAME="${STAGING_D1_NAME:-terrastories-staging-db}"
-BUCKET="${STAGING_R2_BUCKET:-terrastories-staging-media}"
+# Names are fixed and match wrangler.jsonc env.staging (see provision.sh).
+D1_NAME="terrastories-staging-db"
+BUCKET="terrastories-staging-media"
 guard name "$D1_NAME" "$BUCKET"
+guard config "$REPO_ROOT/wrangler.jsonc"
 check_account
 info "mode: $([ "$APPLY" = 1 ] && echo APPLY || echo DRY-RUN)"
 cd "$REPO_ROOT"
@@ -58,11 +63,18 @@ if [ "$APPLY" != 1 ]; then
   exit 0
 fi
 
-if [ -d "$SQL_OUT" ] && [ -f "$SQL_OUT/d1-import.json" ]; then
-  info "step 2: reusing existing SQL dump (resume)"
+[ -f "$TRANSFORM/manifest.json" ] || die "$TRANSFORM/manifest.json missing: not a Stage-2 output"
+MANIFEST_SHA="$(sha256sum "$TRANSFORM/manifest.json" | cut -d' ' -f1)"
+STAMP_FILE="$SQL_OUT/.transform-manifest.sha256"
+if [ -e "$SQL_OUT" ]; then
+  [ -f "$STAMP_FILE" ] || die "$SQL_OUT exists without a transform stamp: refusing to reuse it; pass a new --sql-out"
+  [ "$(cat "$STAMP_FILE")" = "$MANIFEST_SHA" ] || die "$SQL_OUT was built from a different transform output: refusing to resume; pass a new --sql-out"
+  [ -f "$SQL_OUT/d1-import.json" ] || die "$SQL_OUT is incomplete (no d1-import.json): pass a new --sql-out"
+  info "step 2: reusing existing SQL dump (resume; manifest sha matches)"
 else
   info "step 2: writing D1 SQL dump"
   load --target d1 --sql-out "$SQL_OUT" ${OVER:+"$OVER"}
+  printf '%s' "$MANIFEST_SHA" > "$STAMP_FILE"
 fi
 LOG="$SQL_OUT/wrangler.log"; : >> "$LOG"; chmod 600 "$LOG"
 wr() { npx wrangler "$@" >>"$LOG" 2>&1; }

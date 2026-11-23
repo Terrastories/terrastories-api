@@ -729,8 +729,8 @@ describe('direct multipart media upload (#286)', () => {
         ).status
       ).toBe(204);
       expect(
-        [...bucket.uploads.values()].some(
-          (u) => u.key.includes(`communities/${ids.own}/`) && false
+        [...bucket.uploads.keys()].includes(
+          new URL(target.url).searchParams.get('uploadId')!
         )
       ).toBe(false);
       expect(

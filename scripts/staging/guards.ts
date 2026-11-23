@@ -153,6 +153,34 @@ export function assertStagingConfig(config: unknown): void {
     bad('crons must be exactly ' + WORKER_CRONS.join(' | '));
 }
 
+/**
+ * Exact-name membership in `wrangler d1 list --json` / `r2 bucket list`
+ * output. JSON: any string equal to the name under a name-like key. Text:
+ * a `name: <value>` line or a whole line equal to the name. Never a
+ * substring or prefix match.
+ */
+export function listHasName(output: string, name: string): boolean {
+  const keys = new Set(['name', 'database_name', 'Name']);
+  const walk = (v: unknown): boolean => {
+    if (Array.isArray(v)) return v.some(walk);
+    if (v && typeof v === 'object') {
+      return Object.entries(v).some(([k, x]) =>
+        typeof x === 'string' ? keys.has(k) && x === name : walk(x)
+      );
+    }
+    return false;
+  };
+  try {
+    return walk(JSON.parse(output));
+  } catch {
+    return output.split('\n').some((line) => {
+      const t = line.trim();
+      const m = /^name:\s*(\S+)$/i.exec(t);
+      return (m ? m[1] : t) === name;
+    });
+  }
+}
+
 export function assertCronBudget(
   stagingCrons: number,
   otherCrons: number
@@ -215,6 +243,8 @@ export function main(argv: string[]): number {
   const [cmd, ...rest] = argv;
   try {
     if (cmd === 'name' && rest.length > 0) rest.forEach(assertStagingName);
+    else if (cmd === 'has-name' && rest.length === 1)
+      return listHasName(readStdin(), rest[0] as string) ? 0 : 3;
     else if (cmd === 'config' && rest.length === 1)
       assertStagingConfig(parseJsonc(readFileSync(rest[0] as string, 'utf8')));
     else if (cmd === 'account' && rest.length === 1)

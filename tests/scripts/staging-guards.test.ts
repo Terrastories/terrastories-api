@@ -14,6 +14,7 @@ import {
   WORKER_CRONS,
   assertAccountMatches,
   assertStagingConfig,
+  listHasName,
   assertCronBudget,
   assertD1Size,
   assertStagingName,
@@ -104,6 +105,20 @@ describe('staging guards', () => {
   });
 });
 
+describe('exact-name matching', () => {
+  it('does not treat prefixes or substrings as present', () => {
+    const erasure = 'terrastories-staging-erasure-records';
+    const json = JSON.stringify([{ name: erasure + '-old' }]);
+    expect(listHasName(json, erasure)).toBe(false);
+    expect(listHasName(JSON.stringify([{ name: erasure }]), erasure)).toBe(
+      true
+    );
+    expect(listHasName('name:   ' + erasure + '-old\n', erasure)).toBe(false);
+    expect(listHasName('name:   ' + erasure + '\n', erasure)).toBe(true);
+    expect(listHasName('x ' + erasure + ' y', erasure)).toBe(false);
+  });
+});
+
 describe('provision.sh guard wiring (fake npx, no network)', () => {
   const bin = mkdtempSync(join(tmpdir(), 'fake-npx-'));
   const log = join(bin, 'calls.log');
@@ -114,7 +129,7 @@ echo "$@" >> "${log}"
 case "$*" in
   *whoami*) echo "Account ${ACCOUNT}" ;;
   *"d1 list"*) echo "[]" ;;
-  *"r2 bucket list"*) echo "" ;;
+  *"r2 bucket list"*) printf 'name:  terrastories-staging-erasure-records-old\n' ;;
   *tsx*) shift; shift; exec "${ROOT}/node_modules/.bin/tsx" "$@" ;;
 esac
 `
@@ -150,6 +165,8 @@ esac
       '+ npx wrangler r2 bucket create terrastories-staging-erasure-records'
     );
     expect(r.stdout).not.toContain('terrastories-media');
+    // the "-old" lookalike must not count as the existing bucket
+    expect(r.stdout).not.toContain('erasure-records exists');
   });
 
   it('refuses when the cron budget is exceeded', () => {

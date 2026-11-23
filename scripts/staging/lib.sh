@@ -14,6 +14,11 @@ guard() {
     || die "guard '$1' refused"
 }
 
+# has_name <name>: stdin is a wrangler list; exact-name match (exit 0 = present).
+has_name() {
+  (cd "$REPO_ROOT" && npx --no-install tsx scripts/staging/guards.ts has-name "$1")
+}
+
 # run <cmd...>: print the command; execute only with --apply.
 run() {
   echo "+ $*"

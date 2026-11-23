@@ -45,20 +45,20 @@ cd "$REPO_ROOT"
 d1_list="$(npx wrangler d1 list --json 2>/dev/null)" || die "wrangler d1 list failed"
 r2_list="$(npx wrangler r2 bucket list 2>/dev/null)" || die "wrangler r2 bucket list failed"
 
-if printf '%s' "$d1_list" | grep -q "\"$D1_NAME\""; then
+if printf '%s' "$d1_list" | has_name "$D1_NAME"; then
   info "D1 $D1_NAME exists: skipping create"
 else
   run npx wrangler d1 create "$D1_NAME"
   info "paste the printed database_id into wrangler.jsonc env.staging.d1_databases[0]"
 fi
 
-if printf '%s' "$r2_list" | grep -qw "$BUCKET"; then
+if printf '%s' "$r2_list" | has_name "$BUCKET"; then
   info "R2 bucket $BUCKET exists: skipping create"
 else
   run npx wrangler r2 bucket create "$BUCKET"
 fi
 
-if printf '%s' "$r2_list" | grep -q "$ERASURE_BUCKET"; then
+if printf '%s' "$r2_list" | has_name "$ERASURE_BUCKET"; then
   info "R2 bucket $ERASURE_BUCKET exists: skipping create"
 else
   run npx wrangler r2 bucket create "$ERASURE_BUCKET"

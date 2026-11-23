@@ -10282,6 +10282,69 @@ export async function createFixture(
             },
           },
           {
+            name: 'upload pdf as story media document',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 201,
+            captureId: 'qaPdfFile',
+            ...qaRawUpload({
+              filename: 'qa-notes.pdf',
+              contentType: 'application/pdf',
+              bytes: new TextEncoder().encode('%PDF-1.4\n%%EOF\n'),
+            }),
+            check: (body) => {
+              const parsed = MediaUploadResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.mimeType === 'application/pdf' &&
+                parsed.data.data.attachment === null
+              );
+            },
+          },
+          {
+            name: 'attach pdf as story_media',
+            method: 'POST',
+            path: '/v2/attachments',
+            expected: 201,
+            captureId: 'qaPdfAtt',
+            check: (body) => AttachmentResponseSchema.safeParse(body).success,
+            body: {
+              fileId: '{qaPdfFile}',
+              ownerType: 'story',
+              ownerId: mediaStory.id,
+              role: 'story_media',
+            },
+          },
+          {
+            name: 'serve pdf only as sandboxed attachment',
+            method: 'GET',
+            path: '/v2/media/{qaPdfFile}',
+            expected: 200,
+            checkHeaders: (headers: Headers) =>
+              headers.get('content-type') === 'application/pdf' &&
+              headers.get('content-disposition') === 'attachment' &&
+              headers.get('x-content-type-options') === 'nosniff' &&
+              headers.get('content-security-policy') ===
+                "default-src 'none'; sandbox",
+          },
+          {
+            name: 'detach pdf story media',
+            method: 'DELETE',
+            path: '/v2/attachments/{qaPdfAtt}',
+            expected: 204,
+          },
+          {
+            name: 'reject pdf signature mismatch',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 400,
+            ...qaRawUpload({
+              filename: 'qa-fake.pdf',
+              contentType: 'application/pdf',
+              bytes: mediaPngBytes,
+            }),
+          },
+          {
             name: 'upload second staging media',
             method: 'POST',
             path: '/v2/media',

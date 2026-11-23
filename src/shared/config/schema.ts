@@ -54,6 +54,8 @@ export const DatabaseConfigSchema = z.object({
       return (
         url === ':memory:' ||
         url.endsWith('.db') ||
+        url.endsWith('.sqlite') ||
+        url.endsWith('.sqlite3') ||
         url.startsWith('postgresql://') ||
         url.startsWith('postgres://')
       );

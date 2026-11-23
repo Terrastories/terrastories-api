@@ -91,17 +91,17 @@ INSERT INTO flipper_gates(id, feature_key, key, value, created_at, updated_at) V
 INSERT INTO active_storage_blobs(
   id, key, filename, content_type, metadata, byte_size, checksum, created_at, service_name
 ) VALUES
-  (100, 'storymedia01', 'story-media.svg', 'image/svg+xml', '{"identified":true}', 73, 'vbI/K5NsG01FrWVzX3D3tQ==', '2020-10-01 00:00:00', 'local'),
-  (101, 'placephoto01', 'place-photo.svg', 'image/svg+xml', '{"identified":true,"width":32,"height":32}', 79, '0kyL/cNtVpjyoICeH5EfwQ==', '2020-10-01 00:01:00', 'local'),
+  (100, 'storymedia01', 'story-media.svg', 'image/png', '{"identified":true}', 73, 'vbI/K5NsG01FrWVzX3D3tQ==', '2020-10-01 00:00:00', 'local'),
+  (101, 'placephoto01', 'place-photo.svg', 'image/png', '{"identified":true,"width":32,"height":32}', 79, '0kyL/cNtVpjyoICeH5EfwQ==', '2020-10-01 00:01:00', 'local'),
   (102, 'placeaudio01', 'place-name.ogg', 'audio/ogg', '{"identified":true}', 38, 'lqv+OfAwJXGagMZF1G4gQA==', '2020-10-01 00:02:00', 'local'),
-  (103, 'spkrphoto01', 'speaker-photo.svg', 'image/svg+xml', '{"identified":true}', 77, 'duwGykWkmeqbHbtZjhgT1Q==', '2020-10-01 00:03:00', 'local'),
-  (104, 'userphoto01', 'user-photo.svg', 'image/svg+xml', '{"identified":true}', 68, '1gWHJAatYAQE/NVm0GGzjQ==', '2020-10-01 00:04:00', 'local'),
-  (105, 'commdisp01', 'community-display.svg', 'image/svg+xml', '{"identified":true}', 75, '00ZEa8eaDt7QG8z686RHdA==', '2020-10-01 00:05:00', 'local'),
-  (106, 'commbgimg01', 'community-bg.svg', 'image/svg+xml', '{"identified":true}', 77, 'qtRyuLb9mLOXjkPpXUxHGA==', '2020-10-01 00:06:00', 'local'),
-  (107, 'sponsorlogo1', 'sponsor-1.svg', 'image/svg+xml', '{"identified":true}', 62, 'CDx+2AXkJOObRoP9KBhXfQ==', '2020-10-01 00:07:00', 'local'),
-  (108, 'sponsorlogo2', 'sponsor-2.svg', 'image/svg+xml', '{"identified":true}', 62, 'Ygouleu8tU3tsx6NPT8C8w==', '2020-10-01 00:08:00', 'local'),
-  (109, 'sponsorlogo3', 'sponsor-3.svg', 'image/svg+xml', '{"identified":true}', 62, 'ZaqX9PtM8csyqbTKUAV02g==', '2020-10-01 00:09:00', 'local'),
-  (114, 'sierraimg01', 'sierra-display.svg', 'image/svg+xml', '{"identified":true}', 66, 'eONby6CGsbDDMuKpzSXwNw==', '2020-10-01 00:14:00', 'local');
+  (103, 'spkrphoto01', 'speaker-photo.svg', 'image/png', '{"identified":true}', 77, 'duwGykWkmeqbHbtZjhgT1Q==', '2020-10-01 00:03:00', 'local'),
+  (104, 'userphoto01', 'user-photo.svg', 'image/png', '{"identified":true}', 68, '1gWHJAatYAQE/NVm0GGzjQ==', '2020-10-01 00:04:00', 'local'),
+  (105, 'commdisp01', 'community-display.svg', 'image/png', '{"identified":true}', 75, '00ZEa8eaDt7QG8z686RHdA==', '2020-10-01 00:05:00', 'local'),
+  (106, 'commbgimg01', 'community-bg.svg', 'image/png', '{"identified":true}', 77, 'qtRyuLb9mLOXjkPpXUxHGA==', '2020-10-01 00:06:00', 'local'),
+  (107, 'sponsorlogo1', 'sponsor-1.svg', 'image/png', '{"identified":true}', 62, 'CDx+2AXkJOObRoP9KBhXfQ==', '2020-10-01 00:07:00', 'local'),
+  (108, 'sponsorlogo2', 'sponsor-2.svg', 'image/png', '{"identified":true}', 62, 'Ygouleu8tU3tsx6NPT8C8w==', '2020-10-01 00:08:00', 'local'),
+  (109, 'sponsorlogo3', 'sponsor-3.svg', 'image/png', '{"identified":true}', 62, 'ZaqX9PtM8csyqbTKUAV02g==', '2020-10-01 00:09:00', 'local'),
+  (114, 'sierraimg01', 'sierra-display.svg', 'image/png', '{"identified":true}', 66, 'eONby6CGsbDDMuKpzSXwNw==', '2020-10-01 00:14:00', 'local');
 
 INSERT INTO active_storage_attachments(id, name, record_type, record_id, blob_id, created_at) VALUES
   (101, 'media', 'Media', 70, 100, '2020-10-02 00:00:00'),

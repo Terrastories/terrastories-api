@@ -181,7 +181,8 @@ The bundle is verified first (manifest, archive size/SHA-256, row and table dige
 
 - `v2.sqlite` - V2 SQLite migrations applied, canonical rows inserted with legacy primary keys preserved (`idRemaps` in the manifest records any remap; currently none). Foreign-key and integrity checks run before it is accepted.
 - `legacy-archive.sqlite` - restricted. Every source row not represented canonically (`archived_rows`) and every archive-only field (`archived_fields`: raw bcrypt hashes, reset tokens, sign-in IPs, theme credentials, raw role/super_admin values, changed descriptions, raw birthdates, sub-millisecond timestamps).
-- `manifest.json` - input digests, selection, source counts, per-table dispositions, canonical counts, per-field disposition registry, warnings, MANUAL items, pending media, flipper classification, and checksums of the canonical rows. No timestamps: the same bundle gives a byte-identical manifest.
+- `v2-media/` and `archive-media/` - verified media objects (see Media below).
+- `manifest.json` - input digests, selection, source counts, per-table dispositions, canonical counts, per-field disposition registry, warnings, MANUAL items, the media blob ledger, flipper classification, and checksums of the canonical rows. No timestamps: the same bundle gives a byte-identical manifest.
 - `manual-review.json` - ids and codes only (written only with `--allow-manual` when MANUAL items exist).
 - `validation-summary.txt` - counts only; no contents or secrets.
 
@@ -194,7 +195,7 @@ Every source row gets exactly one status per table: `imported`, `not_selected`, 
 - Story `permission_level` 0/1/2 maps to public/members_only/editors; NULL or unknown is MANUAL (never defaults to public). A public story in a private community stays physically `public`; the community's private flag gates it.
 - Defaults recorded as `TRANSFORM_DEFAULT` events plus warnings: community locale NULL to `en`; story title/language and place/speaker name NULL to an empty string.
 - Descriptions are sanitized with the migration sanitizer; changed values keep the raw original in the archive.
-- Media (`media`, `active_storage_*`) is recorded as `pending_media_slice`; no `files` rows are created yet. Theme Mapbox/Protomaps settings are imported into `community_map_configs` using the same validators as the API (`src/shared/utils/map-config.ts`): only a public `pk.` token and a valid style URL are imported, and only as a pair (if either half is missing or invalid, neither is imported and a warning is recorded); `sk.`/malformed tokens and invalid style URLs stay in the restricted archive (warning codes `mapbox_token_not_public`, `mapbox_style_url_invalid`, `mapbox_pair_incomplete`; values are never logged). `expose_mapbox_credentials` is reset to false for a private community (`expose_mapbox_credentials_reset_private`), matching Rails.
+- Media (`media`, `active_storage_*`) is resolved by the media stage (see below): every row ends `imported` or `archived` (or the status the earlier stages gave it); `pending_media_slice` is an intermediate state that is always 0 in the final manifest. Theme Mapbox/Protomaps settings are imported into `community_map_configs` using the same validators as the API (`src/shared/utils/map-config.ts`): only a public `pk.` token and a valid style URL are imported, and only as a pair (if either half is missing or invalid, neither is imported and a warning is recorded); `sk.`/malformed tokens and invalid style URLs stay in the restricted archive (warning codes `mapbox_token_not_public`, `mapbox_style_url_invalid`, `mapbox_pair_incomplete`; values are never logged). `expose_mapbox_credentials` is reset to false for a private community (`expose_mapbox_credentials_reset_private`), matching Rails.
 - Unknown tables are archived whole with a warning; unknown enabled flipper flags are MANUAL.
 
 ### Wrapped bcrypt verifiers
@@ -214,6 +215,40 @@ Orphan rows (a join row or media row whose story, place or speaker has no source
 - full run: MANUAL (`story_missing`, `place_missing`, `speaker_missing`, `orphan_edge`, `media_story_missing`, `attachment_unattributable`);
 - scoped run: MANUAL only when the surviving endpoint belongs to a selected community; otherwise `not_selected`.
 
-`pending_media_slice` applies only to media rows, attachments and variant records reachable from a selected community (Media via story, Place, Speaker, Community, Theme, User, and variants/previews via their blob), matching the Stage-1 allowlist. The number of pending blobs equals Stage 1's `blobsSelected`.
+The media stage handles only media rows, attachments and variant records reachable from a selected community (Media via story, Place, Speaker, Community, Theme, User, and variants/previews via their blob), matching the Stage-1 allowlist. The number of pending blobs equals Stage 1's `blobsSelected`.
 
-Until the media slice, the PostgreSQL target and the validation gates exist and pass, a Stage-2 SQLite output is not a cutover; until then, a Stage-1 bundle is **migration-ready source preservation**, not a completed Terrastories V2 migration.
+### Media: blobs -> files + attachments
+
+Every captured ActiveStorage blob gets exactly one disposition in `manifest.json` `media.blobs` (hard gate: a missing or duplicated blob fails the run):
+
+- **canonical** - one `files` row per destination community (a blob attached in two communities becomes two files with two tenant-scoped storage keys and two verified copies; a file is never shared across tenants; several relations inside one community share one file). The file id is deterministic (derived from blob id and tenant scope) so reruns are byte-identical. Storage key is `communities/<id>/media/<file-id>` (runtime scheme); the null-community super_admin profile photo uses the account namespace `users/<id>/media/<file-id>` with `community_id` NULL and `uploaded_by` NULL. `files` rows are active, `original_name`/`mime_type`/`size`/`metadata` come from the blob, `checksum` is the SHA-256 hex of the bytes.
+- **archive** - one protected object under `archive-media/<source-key>` (orphan blobs, `ActiveStorage::VariantRecord` images, `ActiveStorage::Blob` preview images, blobs with no accepted attachment). V2 regenerates variants; the rows and the reason (`orphan`, `derived_variant`, `derived_preview`, `no_accepted_attachment`) are in `legacy-archive.sqlite`.
+- **not_selected** - outside a `--community` selection; no bytes were captured.
+
+Roles: Community `display_image` / `background_img` / `sponsor_logos`, User `photo`, Place `photo` / `name_audio`, Speaker `photo`, Media `media` (owner = `media.story_id`), Theme `static_map` (owner = the community's map config, also written to `community_map_configs.static_map_file_id`). An unknown (record_type, name) pair on a reachable attachment is MANUAL (`attachment_role_unknown`). Attachment ids are preserved; `sqlite_sequence` is raised above the highest source attachment id.
+
+Ordering (`attachments.ordinal`) is a 0-based rank inside (destination, owner, role): sponsor logos by attachment id, story media by (`media.id`, attachment id), everything else by attachment id (more than one attachment in a single-slot role raises `multiple_single_slot_attachments`). A `media` row without an attachment is archived with a warning (`media_without_attachment_archived`); its `created_at`/`updated_at` otherwise go to the archive.
+
+Bytes are written into `v2-media/` and `archive-media/` (owner-only, fsynced) inside the same temporary directory as the database, streamed with SHA-256 checked while writing and again after an fsync read-back. Any mismatch aborts the whole run and leaves no output. The output holds a second copy of every selected blob; budget disk for bundle plus output (and fan-out copies).
+
+## Stage-3 load (`migrate:rails:load`)
+
+```bash
+npm run migrate:rails:load -- --transform-output <dir> --target <node-sqlite|d1|r2> [--dry-run] ...
+```
+
+Every target first re-verifies the output (files table, manifest ledger, size and SHA-256 of every object) and fails closed. `--dry-run` prints counts only.
+
+- **node-sqlite** (`--data-dir`, `--storage-root`): objects are copied first, each through a `<key>.loading` temporary that is SHA-256 verified and then renamed (an identical existing object is kept, a different one aborts before anything is written), then `v2.sqlite` the same way. A stale `.loading` file from an interrupted run is overwritten; a final path never holds a partial object, and an existing database is never overwritten. The storage root is the directory the Node server uses for media. Point the server at the result with `DATABASE_URL=<data-dir>/v2.sqlite` and `HONO_STORAGE_ROOT=<storage-root>` (it defaults to `./data.db` and `./uploads`, so skipping this serves an old or empty database) (the `.db`, `.sqlite` and `.sqlite3` extensions are accepted).
+- **d1** (`--sql-out <new-dir>`): writes a data-only SQL dump (foreign-key ordered, `PRAGMA defer_foreign_keys`, statements below the 100 KB D1 limit, files chunked by `--max-file-bytes`), plus `d1-import.json`, `r2-upload-manifest.json`, `verify.sql` and `wipe-and-retry.sql`. Apply the V2 migrations to D1 first, then `wrangler d1 execute <db> --remote --file <file>` for each file listed in `d1-import.json` in order.
+  - `0000-preflight.sql` creates the ledger table `_rails_migration_load(file, sha256, applied_at)` and fails (CHECK violation) unless every table the dump writes is empty and the ledger has no rows. Every file ends by recording itself in the ledger, so `SELECT file FROM _rails_migration_load ORDER BY file` lists what was applied.
+  - The `sqlite_sequence` file is required, not optional: the dump fails if an AUTOINCREMENT table has rows and no sequence at or above its highest id. After the last file run `verify.sql`; it fails when a row count, the applied-file count or a sequence floor (for example `attachments`) does not match.
+  - Wipe and retry: a file that fails midway may have been partially applied and must not be re-run. Run `wipe-and-retry.sql` (it first asserts that the ledger holds the preflight row of this exact dump and fails without deleting anything otherwise, so it cannot erase a target that was populated beforehand; then it deletes only the rows this dump writes, the matching sequences and the ledger), then restart from the first file.
+  - `--dry-run` reports an estimate of rows written (rows + index entries + ledger rows) against the Workers Free budget of 100,000 rows per day and warns when it is exceeded; a real run refuses unless `--allow-over-budget` is given.
+- **r2** (`--bucket`, optional `--endpoint`, `--concurrency`): streams each canonical object over the S3-compatible API (SigV4) and verifies it by HEAD (size and SHA-256 metadata); reruns skip objects that already verify. Objects above 100 MiB use multipart upload in 64 MiB streamed parts; request bytes in flight are capped at concurrency x part size, so memory stays flat for large videos. Requests are retried with exponential backoff (up to 5 attempts) on 5xx, 429 and network errors, per object or per part; an abandoned multipart upload is aborted. Credentials come only from the environment: `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID`. Nothing credential-shaped is accepted on the command line, written to a file or printed. Archive objects are never uploaded; they stay in the restricted local archive.
+
+Media type policy (Stage 2): an attachment whose blob content type is not in the runtime upload allowlist (`MEDIA_MIME_RULES`, for example SVG), or whose category the role does not allow (a `user_photo` must be an image), is archived (kept in the protected archive, not imported; the runtime allowlist is to be widened separately, so check the per-type counts in `validation-summary.txt`) with the warning `media_type_not_supported_runtime` instead of being imported.
+
+Disk budget: plan for about three copies of the media at peak: the Stage-1 bundle, the Stage-2 output (`v2-media/`, plus the archive), and the loaded destination (node-sqlite storage root); fan-out to several communities adds copies.
+
+The PostgreSQL target and the validation gates (S4) are not part of this stage, so a Stage-2/3 result is not a cutover; a Stage-1 bundle remains **migration-ready source preservation**, not a completed Terrastories V2 migration.

@@ -39,11 +39,11 @@ INSERT INTO media_links(id, url, story_id, created_at, updated_at) VALUES
 INSERT INTO active_storage_blobs(
   id, key, filename, content_type, metadata, byte_size, checksum, created_at, service_name
 ) VALUES
-  (110, 'staticmap01', 'static-map.svg', 'image/svg+xml', '{"identified":true}', 80, 'vWA2cLU7Da+YoQ78iuhr8g==', '2020-10-01 00:10:00', 'local'),
-  (111, 'sharedblob01', 'shared-river.svg', 'image/svg+xml', '{"identified":true}', 84, 'D7pagKqqIiTTVIUxI7VDbA==', '2020-10-01 00:11:00', 'local'),
+  (110, 'staticmap01', 'static-map.svg', 'image/png', '{"identified":true}', 80, 'vWA2cLU7Da+YoQ78iuhr8g==', '2020-10-01 00:10:00', 'local'),
+  (111, 'sharedblob01', 'shared-river.svg', 'image/png', '{"identified":true}', 84, 'D7pagKqqIiTTVIUxI7VDbA==', '2020-10-01 00:11:00', 'local'),
   (112, 'orphanblob01', 'orphan-note.txt', 'text/plain', '{"identified":true}', 31, 'CfGvu7DfH99ZCmJQrweMWA==', '2020-10-01 00:12:00', 'local'),
-  (113, 'variantblob1', 'place-photo-thumb.svg', 'image/svg+xml', '{"identified":true}', 76, 'lr/9lb+/D/KyuZMz6XVbmg==', '2020-10-01 00:13:00', 'local'),
-  (115, 'previewimg01', 'story-video-preview.svg', 'image/svg+xml', '{"identified":true}', 80, '3kLpA8WCkb709ToP0u2gwA==', '2020-10-01 00:15:00', 'local');
+  (113, 'variantblob1', 'place-photo-thumb.svg', 'image/png', '{"identified":true}', 76, 'lr/9lb+/D/KyuZMz6XVbmg==', '2020-10-01 00:13:00', 'local'),
+  (115, 'previewimg01', 'story-video-preview.svg', 'image/png', '{"identified":true}', 80, '3kLpA8WCkb709ToP0u2gwA==', '2020-10-01 00:15:00', 'local');
 
 INSERT INTO active_storage_variant_records(id, blob_id, variation_digest) VALUES
   (120, 101, 'variant-digest-place-thumb');

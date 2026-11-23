@@ -294,12 +294,22 @@ describe('media reachability', () => {
     sha256: 'x',
     disposition: 'captured',
   });
+  const DEFAULT_ATTACHMENT_NAME: Record<string, string> = {
+    Media: 'media',
+    User: 'photo',
+    Place: 'photo',
+    Speaker: 'photo',
+    Community: 'display_image',
+    Theme: 'static_map',
+    'ActiveStorage::VariantRecord': 'image',
+    'ActiveStorage::Blob': 'preview_image',
+  };
   const att = (
     id: string,
     type: string,
     recordId: string,
     blobId: string,
-    name = 'file'
+    name = DEFAULT_ATTACHMENT_NAME[type] ?? 'file'
   ): SourceRow => ({
     id,
     record_type: type,
@@ -382,14 +392,14 @@ describe('media bytes not captured', () => {
             record_type: 'Media',
             record_id: '1',
             blob_id: '100',
-            name: 'file',
+            name: 'media',
           },
           {
             id: '2',
             record_type: 'User',
             record_id: '12',
             blob_id: '200',
-            name: 'avatar',
+            name: 'photo',
           },
         ],
       },
@@ -436,6 +446,39 @@ describe('media bytes not captured', () => {
     expect(
       plan.pendingMedia.attachments.find((a) => a.id === '2')?.status
     ).toBe('not_selected');
+  });
+});
+
+describe('unknown attachment roles', () => {
+  it('are MANUAL and never promised to the media stage', () => {
+    const b = bundleOf({
+      communities: [community('1', 'one')],
+      active_storage_attachments: [
+        {
+          id: '1',
+          record_type: 'Community',
+          record_id: '1',
+          blob_id: '100',
+          name: 'logo',
+        },
+      ],
+    });
+    (b.manifest as unknown as { blobs: unknown[] }).blobs = [
+      {
+        id: '100',
+        key: 'k',
+        byteSize: '1',
+        sha256: 'x',
+        disposition: 'captured',
+      },
+    ];
+    const plan = planTransform(b);
+    expect(plan.manual).toContainEqual({
+      table: 'active_storage_attachments',
+      id: '1',
+      code: 'attachment_role_unknown',
+    });
+    expect(plan.pendingMedia.attachments).toEqual([]);
   });
 });
 
@@ -514,14 +557,14 @@ describe('media of a non-imported owner', () => {
           record_type: 'Media',
           record_id: '1',
           blob_id: '100',
-          name: 'f',
+          name: 'media',
         },
         {
           id: '2',
           record_type: 'Media',
           record_id: '2',
           blob_id: '101',
-          name: 'f',
+          name: 'media',
         },
       ],
     });

@@ -142,14 +142,17 @@ describeWithPostgres('Rails -> V2 SQLite transform (Stage 2)', () => {
     it('writes owner-only outputs and passes FK/integrity checks', async () => {
       const files = (await readdir(run.dir)).sort();
       expect(files).toEqual([
+        'archive-media',
         'legacy-archive.sqlite',
         'manifest.json',
         'manual-review.json',
+        'v2-media',
         'v2.sqlite',
         'validation-summary.txt',
       ]);
       for (const file of files) {
-        expect((await stat(join(run.dir, file))).mode & 0o777).toBe(0o600);
+        const info = await stat(join(run.dir, file));
+        expect(info.mode & 0o777).toBe(info.isDirectory() ? 0o700 : 0o600);
       }
       expect((await stat(run.dir)).mode & 0o777).toBe(0o700);
       const db = open(run);
@@ -172,6 +175,8 @@ describeWithPostgres('Rails -> V2 SQLite transform (Stage 2)', () => {
         story_speakers: 4,
         external_media_links: 1,
         community_map_configs: 1,
+        files: 14,
+        attachments: 14,
       });
       expect(run.manifest.dispositions.users).toMatchObject({
         imported: 6,
@@ -414,7 +419,7 @@ describeWithPostgres('Rails -> V2 SQLite transform (Stage 2)', () => {
         projection: 'globe',
         mapbox_3d: 1,
         three_dimensional: 1,
-        static_map_file_id: null,
+        static_map_file_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
       });
       expect(config.zoom).toBeCloseTo(8.5, 6);
       expect(config.south_west_latitude).toBeCloseTo(-2, 6);
@@ -448,7 +453,7 @@ describeWithPostgres('Rails -> V2 SQLite transform (Stage 2)', () => {
       );
     });
 
-    it('archives curriculums, flipper, metadata and unknown tables; records media as pending', () => {
+    it('archives curriculums, flipper, metadata and unknown tables; resolves media dispositions', () => {
       const archive = open(run, 'legacy-archive.sqlite');
       const tables = (
         archive
@@ -484,7 +489,16 @@ describeWithPostgres('Rails -> V2 SQLite transform (Stage 2)', () => {
       expect(blobs.length).toBeGreaterThan(0);
       expect(blobs.every((b) => b.status === 'pending_media_slice')).toBe(true);
       expect(attachments.length).toBeGreaterThan(0);
-      expect(run.manifest.canonicalCounts).not.toHaveProperty('files');
+      // the media stage resolves every pending row to a final disposition
+      for (const table of [
+        'media',
+        'active_storage_blobs',
+        'active_storage_attachments',
+        'active_storage_variant_records',
+      ]) {
+        expect(run.manifest.dispositions[table]?.pending_media_slice).toBe(0);
+      }
+      expect(run.manifest.canonicalCounts.files).toBe(14);
     });
 
     it('records TRANSFORM_DEFAULT events with warnings for defaulted display text', () => {

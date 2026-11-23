@@ -65,7 +65,7 @@ else
 fi
 info "erasure-records bucket: no lifecycle expiration, never restored/copied with D1 or MEDIA, excluded from backups (src/services/ERASURE-OPERATIONS.md)"
 
-info "R2 lifecycle (abort incomplete multipart after 1 day) and CORS (PUT, x-amz-checksum-sha256, content-type; expose ETag; MaxAge >= 3600) are set per docs/CUTOVER-RUNBOOK.md section 3"
+info "R2 lifecycle (abort incomplete multipart after 1 day) and CORS (PUT, x-amz-content-sha256, content-type; expose ETag; MaxAge >= 3600) are set per docs/CUTOVER-RUNBOOK.md section 3"
 
 if grep -q 'REPLACE-WITH-STAGING-D1-ID' wrangler.jsonc; then
   info "wrangler.jsonc still has the placeholder staging database_id: not deploying the Worker"

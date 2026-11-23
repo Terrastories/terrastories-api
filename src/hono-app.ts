@@ -249,6 +249,7 @@ export function createHonoApp(options: FoundationOptions) {
         'Content-Type',
         'x-content-sha256',
         'x-amz-checksum-sha256',
+        'x-amz-content-sha256',
       ],
       exposeHeaders: ['ETag'],
     })

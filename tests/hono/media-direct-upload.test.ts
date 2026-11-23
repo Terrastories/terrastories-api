@@ -691,7 +691,7 @@ describe('direct multipart media upload (#286)', () => {
       expect(apiPart.status).toBe(404);
     });
 
-    it('the fake S3 endpoint rejects tampered URLs, wrong bodies and wrong digests', async () => {
+    it('avoids R2 UploadPart 501 and rejects tampered URLs and wrong bodies', async () => {
       const bytes = sparseMp4(17 * MIB);
       const { json } = await createSession(r2App, cookies.editor!, bytes);
       const session = DirectUploadSessionResponseSchema.parse(json).data;
@@ -706,7 +706,16 @@ describe('direct multipart media upload (#286)', () => {
       expect((await fakeS3.putPart(target, chunk.subarray(1))).status).toBe(
         403
       );
-      expect(target.headers).toEqual({});
+      expect(target.headers).toEqual({
+        'x-amz-content-sha256': sha256Hex(chunk),
+      });
+      expect(new URL(target.url).searchParams.get('X-Amz-SignedHeaders')).toBe(
+        'content-length;host;x-amz-content-sha256'
+      );
+      const corrupted = chunk.slice();
+      corrupted[0] ^= 1;
+      expect((await fakeS3.putPart(target, corrupted)).status).toBe(400);
+      expect((await fakeS3.putPart(target, chunk)).status).toBe(200);
       // Completion with a part never uploaded fails and keeps the session retryable.
       const incomplete = await post(
         r2App,

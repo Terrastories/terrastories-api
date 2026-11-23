@@ -91,8 +91,7 @@ if [ "$APPLY" = 1 ]; then
 fi
 (cd "$REPO_ROOT" && run npx tsx scripts/staging/verify-r2-part-checksum.ts) || {
   rc=$?
-  # exit 2 = not enforced (documented outcome, record it); anything else fails.
-  [ "$rc" = 2 ] && info "probe: R2 does NOT enforce part checksums (recorded, not a failure)" || die "probe inconclusive (exit $rc)"
+  die "R2 payload hash probe failed (exit $rc)"
 }
 echo
 cpu_procedure

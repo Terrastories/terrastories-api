@@ -4,8 +4,9 @@
  *
  * The fake endpoint verifies the SigV4 signature with an independent
  * node:crypto derivation and enforces the signed Content-Length and
- * R2 checks no checksum header: the API deliberately signs none (R2 answers
- * 501 for x-amz-checksum-sha256 on UploadPart).
+ * The fake rejects the unsupported UploadPart checksum header with 501 (as
+ * R2 does) and, like R2, checks the signed x-amz-content-sha256 header
+ * against the bytes.
  */
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 import http from 'node:http';
@@ -186,6 +187,8 @@ export async function startFakeS3(
     const signedHeaderNames = (q.get('X-Amz-SignedHeaders') ?? '').split(';');
     const headerValue = (name: string) =>
       name === 'host' ? host : String(req.headers[name] ?? '');
+    if (req.headers['x-amz-checksum-sha256']) return finish(501);
+    const payloadHash = headerValue('x-amz-content-sha256');
     const amzDate = q.get('X-Amz-Date') ?? '';
     const scope = `${amzDate.slice(0, 8)}/auto/s3/aws4_request`;
     const canonicalQuery = [...q.entries()]
@@ -200,6 +203,9 @@ export async function startFakeS3(
       canonicalQuery,
       signedHeaderNames.map((n) => `${n}:${headerValue(n)}\n`).join(''),
       signedHeaderNames.join(';'),
+      // Real R2 (verified 2026-11-23) canonicalizes presigned requests over
+      // UNSIGNED-PAYLOAD and enforces the signed x-amz-content-sha256 header
+      // separately (400 XAmzContentSHA256Mismatch).
       'UNSIGNED-PAYLOAD',
     ].join('\n');
     const hmac = (k: Buffer | string, d: string) =>
@@ -231,6 +237,8 @@ export async function startFakeS3(
     }
     if (
       !signedHeaderNames.includes('content-length') ||
+      !signedHeaderNames.includes('x-amz-content-sha256') ||
+      payloadHash !== createHash('sha256').update(body).digest('hex') ||
       String(body.length) !== req.headers['content-length']
     ) {
       return finish(400);

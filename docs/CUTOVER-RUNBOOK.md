@@ -37,7 +37,7 @@ V2 ships an API only. The V2 frontend is not built ([V2-FRONTEND-HANDOFF.md](./V
    - Binding `ERASURE_RECORDS`: dedicated R2 bucket (staging `terrastories-staging-erasure-records`, created by `provision.sh`). Never restored, rotated or copied with D1/MEDIA; excluded from backups; no lifecycle expiration. Var `R2_BUCKET_NAME` names the media bucket; `ENVIRONMENT` stays unset; `ORPHAN_SWEEP_PAUSED` is set only during a restore.
    - `MAPBOX_ACCESS_TOKEN`: optional instance default (a public `pk.*` token; `sk.*` is rejected with `422`). Unset falls back to OpenFreeMap.
    - Verify presence without printing: `npx wrangler secret list --env staging`.
-4. **Bucket configuration** (staging and production): CORS for the frontend origin (allow `PUT`; headers `x-amz-checksum-sha256`, `content-type`; expose `ETag`; MaxAge at least 3600) and a lifecycle rule aborting incomplete multipart uploads after 1 day.
+4. **Bucket configuration** (staging and production): CORS for the frontend origin (allow `PUT`; headers `x-amz-content-sha256`, `content-type`; expose `ETag`; MaxAge at least 3600) and a lifecycle rule aborting incomplete multipart uploads after 1 day.
 5. **Community approvals and steward designations.** Each community (or its named steward) approves the maintenance window and designates the archive custodian (SPEC-V2 §10.4 item 5). Record custodian and retention (30 days after acceptance unless the community sets another) per community. Sending approval requests to communities: **REQUIRES HUMAN APPROVAL**.
 6. **Mapbox notice.** Communities with Mapbox styles/tokens are told that tokens migrate as public `pk.*` values only and that they remain responsible for their Mapbox usage; field kits fall back to local PMTiles. Sending the notice: **REQUIRES HUMAN APPROVAL**.
 7. **Heroku access.** Operator can run `heroku` against app `terrastories` (backups, maintenance, scale) and holds read-only AWS credentials for the ActiveStorage bucket in the environment. Using the production Heroku or AWS credentials: **REQUIRES HUMAN APPROVAL** each time.
@@ -105,7 +105,7 @@ All must be true on the final rehearsal, with evidence attached. A single NO is 
 - [ ] Local workerd rehearsal (optional, before staging): `npm run walkthrough:workers` passes 89/89.
 - [ ] `verify.sql` passed on staging D1 (rows, applied-file count, sequence floors).
 - [ ] Row and object counts reconcile with the Stage-2 manifests (source, bundle, target, archive; `validation-summary.txt` has no unexplained difference).
-- [ ] R2 part-checksum probe result recorded (exit 0 enforced, or exit 2 not enforced: both are acceptable once recorded; exit 1 inconclusive is not).
+- [ ] R2 part-checksum probe confirms payload hash enforcement (exit 0). Exit 2 means corrupted bytes were accepted. Exit 1 is inconclusive. Both block cutover.
 - [ ] CPU measurements recorded and under budget: 90 MB raw upload and 300 MB multipart upload, no error 1102 (`scripts/staging/smoke.sh --cpu-procedure`).
 - [ ] Manual-review list resolved and signed off:
   - 92 users with null community: 89 are `role_requires_community` and 3 are `super_admin` contradictions; each has a recorded disposition.
@@ -169,7 +169,7 @@ After DNS switch, within the retention window:
 - **V2 frontend not built.** The Rails UI cannot be retired and Heroku shutdown is blocked until the frontend ships and is accepted (section 0).
 - **#282: CSV import media on Workers.** The bounded CSV import is a multi-file multipart bundle; its media handling on Workers is open. Do not promise bulk import with media on Free until #282 closes.
 - **Per-community storage quota** is open (SPEC-V2 open question 15).
-- **R2 part checksum** is not relied on; integrity of large uploads is part length, total size and the type sniff. `File.checksum` is null for multipart uploads on Workers.
+- **R2 multipart integrity.** R2 verifies each part against the signed SHA-256 payload hash and length. The API checks the assembled size and sniffs the media type. `File.checksum` is null for multipart uploads on Workers.
 - **R2 Free 10 GB** versus 30 GB media (decision A).
 - **Time Travel on Free** keeps 7 days; the retention window is 30 days, so archive custody, not D1, is the long-term rollback source.
 - This runbook and the staging kit were authored offline and have only been exercised against fakes (guard tests). The first real run on staging is a rehearsal of the kit itself; expect to fix wrangler flag drift (`d1 execute` flags, `d1 list --json` shape).

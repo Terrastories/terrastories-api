@@ -8,11 +8,10 @@
  * Free 100 MB request-body ceiling and its CPU budget.
  *
  * Integrity: each part URL signs the part's exact `Content-Length` and the
- * client-declared `x-amz-checksum-sha256`, so R2 enforces both outside Worker
- * CPU. The Worker cannot cheaply re-hash a 500 MiB object (a streaming SHA-256
- * would exceed the 10 ms Free CPU budget), so the whole-file digest stays
- * client-attested on this path; size equality and the 8 KiB type sniff are
- * verified server-side at completion.
+ * client-declared SHA-256 payload hash (`x-amz-content-sha256`), so R2
+ * enforces both outside Worker CPU. The Worker checks size and sniffs the
+ * first 8 KiB at completion. The whole-file digest is unverified and omitted
+ * from the file record.
  */
 
 import type { R2Bucket } from '@cloudflare/workers-types';
@@ -155,13 +154,14 @@ export function createR2DirectUploads(
       );
       const host = `${config.accountId}.r2.cloudflarestorage.com`;
       return Promise.all(
-        session.partSha256.map(async (_sha256, index) => {
+        session.partSha256.map(async (sha256, index) => {
           const partNumber = index + 1;
           const size = directUploadPartSize(
             session.byteSize,
             session.partSize,
             partNumber
           );
+          const headers = { 'x-amz-content-sha256': sha256 };
           const url = await presigner.presign({
             method: 'PUT',
             host,
@@ -172,6 +172,7 @@ export function createR2DirectUploads(
             },
             signedHeaders: {
               'content-length': String(size),
+              ...headers,
             },
             expiresSeconds: context.ttlSeconds,
             now: context.now,
@@ -180,7 +181,7 @@ export function createR2DirectUploads(
             partNumber,
             method: 'PUT' as const,
             url,
-            headers: {},
+            headers,
             size,
           };
         })

@@ -90,8 +90,9 @@ Worker CPU measurement (manual; Workers Free budget is about 10 ms per invocatio
     actor's role in a community and the super admin has none (403), so the helper
     signs in as the super admin only to create a throwaway community
     "stg-upload-<random>" and a throwaway community admin (random password, memory
-    only), uploads as that admin, deletes the media, and always disables the
-    community afterwards (it cannot be deleted once claimed):
+    only), uploads as that admin, deletes the media, and disables the community
+    again (always on normal exit and on SIGINT/SIGTERM; a SIGKILL leaves it
+    active: disable stg-upload-<slug> by hand; it cannot be deleted once claimed):
       STAGING_URL=... WT_SUPER_IDENTIFIER=... WT_SUPER_PASSWORD=... \
         npx tsx scripts/staging/upload-large.ts --file sample300.mp4
     (--dry-run prints the plan with no network call and no credentials needed.

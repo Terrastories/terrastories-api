@@ -9,7 +9,9 @@
  * admin (who has no membership) gets 403. The helper therefore signs in as the
  * super admin only to provision a throwaway community ("stg-upload-<random>")
  * with a throwaway community admin (random password, memory only), uploads as
- * that admin, deletes the media, and ALWAYS disables the community again.
+ * that admin, deletes the media, and disables the community again (always on
+ * normal exit and on SIGINT/SIGTERM; a SIGKILL leaves the community active:
+ * disable stg-upload-<slug> by hand). The slug is printed BEFORE the create call.
  *
  *   STAGING_URL=https://terrastories-staging-api.<sub>.workers.dev \
  *   WT_SUPER_IDENTIFIER=... WT_SUPER_PASSWORD=... \
@@ -369,7 +371,7 @@ export async function runUpload(
       );
     }
     log(
-      `delete ${removed.status} in ${deleteMs} ms (measurement object removed)`
+      `delete ${removed.status} in ${deleteMs} ms (file record deleted; storage removal not verified by the API)`
     );
     return {
       sessionId: session.id,
@@ -489,19 +491,103 @@ async function expectJson(
   >;
 }
 
+/** Largest page the admin list route serves. */
+const ADMIN_PAGE = 100;
+
+/**
+ * Validate an admin community body: data.id must match (when expectId is
+ * given), data.slug must match, and data.status must be the expected value.
+ */
+function communityMatches(
+  body: unknown,
+  want: { slug: string; id?: number; status?: string }
+): { id: number } | undefined {
+  const data = (body as { data?: Record<string, unknown> } | null)?.data;
+  if (!data || data.slug !== want.slug) return undefined;
+  const id = data.id;
+  if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0)
+    return undefined;
+  if (want.id !== undefined && id !== want.id) return undefined;
+  if (want.status !== undefined && data.status !== want.status)
+    return undefined;
+  return { id };
+}
+
+/**
+ * Find a community by EXACT slug as the super admin. The list route has no
+ * slug filter, so scan the newest pages (rows are ordered by id ascending).
+ * Returns undefined when not found or when any call fails.
+ */
+export async function findCommunityBySlug(
+  fetchImpl: FetchLike,
+  baseUrl: string,
+  superCookie: string,
+  slug: string
+): Promise<number | undefined> {
+  try {
+    const page = async (
+      offset: number
+    ): Promise<{ rows: unknown[]; total: number } | undefined> => {
+      const res = await fetchImpl(
+        `${baseUrl}/v2/admin/communities?limit=${ADMIN_PAGE}&offset=${offset}`,
+        { method: 'GET', headers: { cookie: superCookie }, redirect: 'error' }
+      );
+      if (res.status !== 200) return undefined;
+      const body = (await res.json().catch(() => null)) as {
+        data?: unknown;
+        meta?: { total?: unknown };
+      } | null;
+      if (!Array.isArray(body?.data) || typeof body?.meta?.total !== 'number')
+        return undefined;
+      return { rows: body.data, total: body.meta.total };
+    };
+    const first = await page(0);
+    if (!first) return undefined;
+    const lastOffset = Math.max(
+      0,
+      Math.floor((first.total - 1) / ADMIN_PAGE) * ADMIN_PAGE
+    );
+    // The new community is the newest row: scan the last pages first.
+    for (const offset of [lastOffset, Math.max(0, lastOffset - ADMIN_PAGE)]) {
+      const p = offset === 0 ? first : await page(offset);
+      if (!p) return undefined;
+      for (const row of p.rows) {
+        const hit = communityMatches({ data: row }, { slug });
+        if (hit) return hit.id;
+      }
+      if (offset === 0) break;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+export interface ProvisionOptions {
+  log?: (line: string) => void;
+  /** Called with the generated slug BEFORE the create request is sent. */
+  onSlug?: (slug: string) => void;
+  /** Seam for tests: the throwaway admin's password generator. */
+  randomPassword?: () => string;
+}
+
 /**
  * As the super admin: create the throwaway community, issue a claim token and
  * claim it as a new community admin with a random password (the same route
- * the persona walkthrough uses). The community is returned as soon as it
- * exists so cleanup can disable it even if a later step fails.
+ * the persona walkthrough uses). The slug is printed and reported BEFORE the
+ * create call, and the community is returned (via onCreated) only once the
+ * create response is validated (same slug, positive safe integer id).
  */
 export async function provisionThrowaway(
   fetchImpl: FetchLike,
   baseUrl: string,
   superCookie: string,
-  onCreated: (t: Throwaway) => void
+  onCreated: (t: Throwaway) => void,
+  options: ProvisionOptions = {}
 ): Promise<Throwaway> {
   const slug = `stg-upload-${randomBytes(4).toString('hex')}`;
+  options.log?.(`creating community ${slug}`);
+  options.onSlug?.(slug);
   const made = await expectJson(
     await fetchImpl(`${baseUrl}/v2/admin/communities`, {
       method: 'POST',
@@ -512,15 +598,18 @@ export async function provisionThrowaway(
     'POST /v2/admin/communities',
     [201]
   );
-  const id = (made.data as { id?: unknown } | undefined)?.id;
-  if (typeof id !== 'number') {
-    throw new Error('create community answered 201 but returned no id');
+  const hit = communityMatches(made, { slug });
+  if (!hit) {
+    throw new Error(
+      `create community answered 201 but the response does not match the requested slug ${slug} with a positive integer id`
+    );
   }
+  const id = hit.id;
   const throwaway: Throwaway = {
     id,
     slug,
     adminIdentifier: `${slug}-admin`,
-    adminPassword: randomPassword(),
+    adminPassword: (options.randomPassword ?? randomPassword)(),
   };
   onCreated(throwaway);
   const tokenBody = await expectJson(
@@ -568,28 +657,86 @@ export interface ThroughCommunityResult {
   mediaDeleted: boolean;
 }
 
+export interface ThroughCommunityInput {
+  baseUrl: string;
+  superCookie: string;
+  file: UploadFile;
+  partSize?: number;
+  /** --local rehearsal and STAGING_ALLOW_HOST, as main() validated them. */
+  local?: boolean;
+  allowHost?: string;
+  /**
+   * Receives an idempotent cleanup function (disable the community) so a
+   * signal handler can run it; the same call is shared with the finally block.
+   */
+  onCleanupReady?: (cleanup: () => Promise<void>) => void;
+}
+
 /**
  * Provision a throwaway community + admin as the super admin, run the upload
- * as that admin, then ALWAYS (finally) disable the community as the super
- * admin. Never throws: failures land in `error` so the caller can print the
- * cleanup outcome. Nothing here prints a password or cookie.
+ * as that admin, then disable the community as the super admin (in finally,
+ * so on every normal exit; main() also runs it on SIGINT/SIGTERM). Never
+ * throws: failures land in `error` so the caller can print the cleanup
+ * outcome. Nothing here prints a password or cookie.
  */
 export async function uploadViaThrowawayCommunity(
-  input: {
-    baseUrl: string;
-    superCookie: string;
-    file: UploadFile;
-    partSize?: number;
-  },
-  deps: UploadDeps
+  input: ThroughCommunityInput,
+  deps: UploadDeps & { randomPassword?: () => string }
 ): Promise<ThroughCommunityResult> {
   const { baseUrl, superCookie } = input;
   const result: ThroughCommunityResult = {
     communityDisabled: false,
     mediaDeleted: false,
   };
+  try {
+    assertStagingUrl(baseUrl, input.allowHost, input.local ?? false);
+  } catch (error) {
+    result.error = error instanceof Error ? error.message : String(error);
+    return result;
+  }
   const log = deps.log ?? ((): void => {});
   let created: Throwaway | undefined;
+  let plannedSlug: string | undefined;
+
+  const disableOnce = async (): Promise<void> => {
+    let id = created?.id;
+    let slug = created?.slug;
+    if (id === undefined && plannedSlug !== undefined) {
+      // The create response was lost, unreadable or invalid: the slug is
+      // random, so an exact slug match is this run's community.
+      slug = plannedSlug;
+      id = await findCommunityBySlug(deps.fetch, baseUrl, superCookie, slug);
+      if (id !== undefined) {
+        log(`community ${slug} found by slug after an unconfirmed create`);
+        result.community = { slug };
+      }
+    }
+    if (id === undefined || slug === undefined) return;
+    try {
+      const res = await deps.fetch(
+        `${baseUrl}/v2/admin/communities/${id}/status`,
+        {
+          method: 'PATCH',
+          headers: jsonHeaders(superCookie),
+          body: JSON.stringify({ status: 'disabled' }),
+          redirect: 'error',
+        }
+      );
+      result.disableStatus = res.status;
+      // Success needs HTTP 200 AND a body naming this community as disabled.
+      const body =
+        res.status === 200 ? await res.json().catch(() => null) : null;
+      result.communityDisabled =
+        res.status === 200 &&
+        communityMatches(body, { slug, id, status: 'disabled' }) !== undefined;
+    } catch {
+      result.communityDisabled = false;
+    }
+  };
+  let cleanup: Promise<void> | undefined;
+  const cleanupOnce = (): Promise<void> => (cleanup ??= disableOnce());
+  input.onCleanupReady?.(cleanupOnce);
+
   try {
     const t = await provisionThrowaway(
       deps.fetch,
@@ -598,6 +745,11 @@ export async function uploadViaThrowawayCommunity(
       (c) => {
         created = c;
         result.community = { slug: c.slug };
+      },
+      {
+        log,
+        onSlug: (s) => (plannedSlug = s),
+        randomPassword: deps.randomPassword,
       }
     );
     log(`community ${t.slug} created and claimed by a throwaway admin`);
@@ -616,23 +768,7 @@ export async function uploadViaThrowawayCommunity(
   } catch (error) {
     result.error = error instanceof Error ? error.message : String(error);
   } finally {
-    if (created) {
-      try {
-        const res = await deps.fetch(
-          `${baseUrl}/v2/admin/communities/${created.id}/status`,
-          {
-            method: 'PATCH',
-            headers: jsonHeaders(superCookie),
-            body: JSON.stringify({ status: 'disabled' }),
-            redirect: 'error',
-          }
-        );
-        result.disableStatus = res.status;
-        result.communityDisabled = res.ok;
-      } catch {
-        result.communityDisabled = false;
-      }
-    }
+    await cleanupOnce();
   }
   return result;
 }
@@ -645,13 +781,15 @@ const USAGE = `Usage: STAGING_URL=... WT_SUPER_IDENTIFIER=... WT_SUPER_PASSWORD=
   --content-type <t>   declared MIME type (default video/mp4)
 The super admin has no community role, so the helper creates a throwaway
 community "stg-upload-<random>" with a throwaway admin (random password, memory
-only), uploads as that admin, deletes the media, and always disables the
-community afterwards. Credentials are read from the environment only and never
+only), uploads as that admin, deletes the media, and disables the community
+afterwards (always on normal exit and on SIGINT/SIGTERM; a SIGKILL leaves it
+active: disable stg-upload-<slug> by hand). Credentials are read from the environment only and never
 printed.`;
 
 export async function main(
   argv: string[],
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  seams: { randomPassword?: () => string } = {}
 ): Promise<number> {
   let file = '';
   let dryRun = false;
@@ -752,10 +890,42 @@ export async function main(
     return 1;
   }
   log('signed in as the super admin (cookie held in memory, never printed)');
-  const res = await uploadViaThrowawayCommunity(
-    { baseUrl, superCookie, file: { name, contentType, bytes } },
-    { fetch, log }
-  );
+  // SIGINT/SIGTERM: disable the throwaway community (short timeout) before
+  // exiting non-zero. SIGKILL cannot be caught and leaves it active.
+  let cleanup: (() => Promise<void>) | undefined;
+  const onSignal = (signal: NodeJS.Signals): void => {
+    process.stderr.write(`\n${signal}: disabling the throwaway community...\n`);
+    const timeout = new Promise<void>((r) => setTimeout(r, 10_000));
+    void Promise.race([cleanup?.() ?? Promise.resolve(), timeout]).finally(
+      () => {
+        process.stderr.write(
+          'exiting; if the community is still active, disable stg-upload-<slug> by hand\n'
+        );
+        process.exit(signal === 'SIGINT' ? 130 : 143);
+      }
+    );
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+  let res: ThroughCommunityResult;
+  try {
+    res = await uploadViaThrowawayCommunity(
+      {
+        baseUrl,
+        superCookie,
+        file: { name, contentType, bytes },
+        local,
+        allowHost: env.STAGING_ALLOW_HOST,
+        onCleanupReady: (fn) => {
+          cleanup = fn;
+        },
+      },
+      { fetch, log, randomPassword: seams.randomPassword }
+    );
+  } finally {
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
+  }
   const o = res.outcome;
   const lines = [
     `community: ${res.community?.slug ?? '(not created)'}`,
@@ -768,7 +938,7 @@ export async function main(
     );
   }
   lines.push(
-    `cleanup: media ${res.mediaDeleted ? 'deleted' : 'NOT confirmed deleted (see error)'}, community ${res.communityDisabled ? 'disabled' : 'NOT disabled: disable it manually as the super admin'}${res.disableStatus !== undefined ? ` (HTTP ${res.disableStatus})` : ''}`
+    `cleanup: media ${res.mediaDeleted ? 'file record deleted (storage removal not verified by the API)' : 'NOT confirmed deleted (see error)'}, community ${res.communityDisabled ? 'disabled' : 'NOT disabled: disable it manually as the super admin'}${res.disableStatus !== undefined ? ` (HTTP ${res.disableStatus})` : ''}`
   );
   process.stdout.write(lines.join('\n') + '\n');
   if (res.error) {

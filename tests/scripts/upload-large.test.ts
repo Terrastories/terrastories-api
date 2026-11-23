@@ -678,18 +678,42 @@ describe('uploadViaThrowawayCommunity (fake fetch)', () => {
     params: { memoryKiB: 19 * 1024, iterations: 2, parallelism: 1 },
   };
 
-  function world(opts: { putStatus?: number; disableStatus?: number } = {}) {
+  function world(
+    opts: {
+      putStatus?: number;
+      disableStatus?: number;
+      disableBody?: 'empty' | 'mismatch';
+      claimStatus?: number;
+      createSlug?: string;
+      listed?: boolean;
+    } = {}
+  ) {
+    let slug = '';
     return fakeFetch((call) => {
       const u = call.url.replace(BASE, '');
-      if (call.method === 'POST' && u === '/v2/admin/communities')
-        return Response.json({ data: { id: 42, slug: 'x' } }, { status: 201 });
+      if (call.method === 'POST' && u === '/v2/admin/communities') {
+        slug = JSON.parse(String(call.body)).slug;
+        return Response.json(
+          { data: { id: 42, slug: opts.createSlug ?? slug } },
+          { status: 201 }
+        );
+      }
+      if (call.method === 'GET' && u.split('?')[0] === '/v2/admin/communities')
+        return Response.json({
+          data: opts.listed
+            ? [{ id: 77, slug, status: 'active', claimStatus: 'unclaimed' }]
+            : [],
+          meta: { total: opts.listed ? 1 : 0, limit: 100, offset: 0 },
+        });
       if (u === '/v2/admin/communities/42/claim-tokens')
         return Response.json(
           { data: { token: 'claim-token-secret' } },
           { status: 201 }
         );
       if (u === '/v2/bootstrap/claim')
-        return Response.json({ data: {} }, { status: 201 });
+        return opts.claimStatus
+          ? new Response(null, { status: opts.claimStatus })
+          : Response.json({ data: {} }, { status: 201 });
       if (u === '/v2/auth/prelogin') return Response.json(argonAnswer);
       if (u === '/v2/auth/login') {
         const res = Response.json({ user: { id: 7 } });
@@ -712,8 +736,16 @@ describe('uploadViaThrowawayCommunity (fake fetch)', () => {
         return new Response(null, { status: 204 });
       if (call.method === 'DELETE' && u === '/v2/media/uploads/sess-1')
         return new Response(null, { status: 204 });
-      if (call.method === 'PATCH' && u === '/v2/admin/communities/42/status')
-        return new Response(null, { status: opts.disableStatus ?? 200 });
+      const patch = /^\/v2\/admin\/communities\/(\d+)\/status$/.exec(u);
+      if (call.method === 'PATCH' && patch) {
+        const status = opts.disableStatus ?? 200;
+        if (opts.disableBody === 'empty') return new Response(null, { status });
+        const id = opts.disableBody === 'mismatch' ? 999 : Number(patch[1]);
+        return Response.json(
+          { data: { id, slug, status: 'disabled', claimStatus: 'claimed' } },
+          { status }
+        );
+      }
       return undefined;
     });
   }
@@ -814,5 +846,149 @@ describe('uploadViaThrowawayCommunity (fake fetch)', () => {
     expect(JSON.stringify(calls.map((c) => c.body ?? '')).includes('wt-')).toBe(
       false
     );
+  });
+
+  it('prints the slug before the create call is sent', async () => {
+    const lines: string[] = [];
+    const { calls, impl } = world();
+    const log = (l: string) => lines.push(`${calls.length}|${l}`);
+    await uploadViaThrowawayCommunity(input, { fetch: impl, log });
+    const first = lines.find((l) => /creating community stg-upload-/.test(l))!;
+    expect(first.startsWith('0|')).toBe(true);
+  });
+
+  it('reports a disable with an empty 200 or a mismatched body as FAILED', async () => {
+    for (const disableBody of ['empty', 'mismatch'] as const) {
+      const { impl } = world({ disableBody });
+      const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
+      expect(res.communityDisabled, disableBody).toBe(false);
+      expect(res.disableStatus).toBe(200);
+    }
+  });
+
+  it('a claim failure (401 or 500) after create still PATCHes and reports disabled', async () => {
+    for (const claimStatus of [401, 500]) {
+      const { calls, impl } = world({ claimStatus });
+      const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
+      expect(res.error, String(claimStatus)).toMatch(
+        new RegExp(`bootstrap/claim answered ${claimStatus}`)
+      );
+      expect(res.communityDisabled).toBe(true);
+      expect(
+        calls.some(
+          (c) =>
+            c.method === 'PATCH' && c.url.endsWith('/communities/42/status')
+        )
+      ).toBe(true);
+    }
+  });
+
+  it('a create response with another slug stops before claim-token and never PATCHes that id', async () => {
+    const { calls, impl } = world({ createSlug: 'someone-else' });
+    const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
+    expect(res.error).toMatch(/does not match the requested slug/);
+    expect(calls.some((c) => c.url.includes('claim-tokens'))).toBe(false);
+    expect(calls.some((c) => c.method === 'PATCH')).toBe(false);
+    expect(res.communityDisabled).toBe(false);
+  });
+
+  it('after a lost create response, finds the community by exact slug and disables it', async () => {
+    const { calls, impl } = world({ createSlug: 'someone-else', listed: true });
+    const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
+    const patch = calls.find((c) => c.method === 'PATCH')!;
+    expect(patch.url).toBe(`${BASE}/v2/admin/communities/77/status`);
+    expect(res.communityDisabled).toBe(true);
+    expect(calls.some((c) => c.url.includes('claim-tokens'))).toBe(false);
+  });
+
+  it('refuses a non-staging URL itself, before any call', async () => {
+    const { calls, impl } = world();
+    const res = await uploadViaThrowawayCommunity(
+      { ...input, baseUrl: 'https://our.terrastories.app' },
+      { fetch: impl }
+    );
+    expect(res.error).toMatch(/not a staging host/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('with a known password: never in the log, nor the claim or login derived keys (success and failure)', async () => {
+    const KNOWN = 'wt-KNOWN-PASSWORD-for-test';
+    for (const putStatus of [200, 403]) {
+      const { calls, impl } = world({ putStatus });
+      const lines: string[] = [];
+      const res = await uploadViaThrowawayCommunity(input, {
+        fetch: impl,
+        log: (l) => lines.push(l),
+        randomPassword: () => KNOWN,
+      });
+      const text = [...lines, res.error ?? ''].join('\n');
+      const claim = JSON.parse(
+        String(calls.find((c) => c.url.endsWith('/bootstrap/claim'))!.body)
+      );
+      const login = JSON.parse(
+        String(calls.find((c) => c.url.endsWith('/v2/auth/login'))!.body)
+      );
+      for (const secret of [
+        KNOWN,
+        claim.password.derivedKey,
+        login.derivedKey,
+      ]) {
+        expect(secret).toBeTruthy();
+        expect(text).not.toContain(secret);
+      }
+      // the password itself never goes on the wire either
+      for (const c of calls) expect(String(c.body ?? '')).not.toContain(KNOWN);
+    }
+  });
+
+  it('CLI stdout and stderr never contain the password or derived keys, on success and failure', async () => {
+    const KNOWN = 'wt-KNOWN-PASSWORD-for-test';
+    const dir = mkdtempSync(join(tmpdir(), 'upload-large-'));
+    const path = join(dir, 'sample.mp4');
+    writeFileSync(path, PNG_BYTES);
+    for (const putStatus of [200, 403]) {
+      const { calls, impl } = world({ putStatus });
+      const out: string[] = [];
+      const err: string[] = [];
+      vi.spyOn(process.stdout, 'write').mockImplementation((c) => {
+        out.push(String(c));
+        return true;
+      });
+      vi.spyOn(process.stderr, 'write').mockImplementation((c) => {
+        err.push(String(c));
+        return true;
+      });
+      vi.stubGlobal('fetch', impl);
+      const code = await main(
+        ['--file', path],
+        {
+          STAGING_URL: BASE,
+          WT_SUPER_IDENTIFIER: 'super',
+          WT_SUPER_PASSWORD: 'super-password-secret',
+        },
+        { randomPassword: () => KNOWN }
+      );
+      expect(code).toBe(putStatus === 200 ? 0 : 1);
+      const text = out.join('') + err.join('');
+      const claim = JSON.parse(
+        String(calls.find((c) => c.url.endsWith('/bootstrap/claim'))!.body)
+      );
+      const logins = calls
+        .filter((c) => c.url.endsWith('/v2/auth/login'))
+        .map((c) => JSON.parse(String(c.body)).derivedKey as string);
+      for (const secret of [
+        KNOWN,
+        'super-password-secret',
+        claim.password.derivedKey,
+        ...logins,
+        'admin-cookie-value',
+        'super-cookie-value',
+      ]) {
+        expect(text).not.toContain(secret);
+      }
+      expect(text).toMatch(/community: stg-upload-/);
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    }
   });
 });

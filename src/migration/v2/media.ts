@@ -310,13 +310,20 @@ export function planMedia(
         archivedRows.push({
           table: 'active_storage_attachments',
           id,
-          reason: 'media_type_not_allowed',
+          reason: 'media_type_not_supported_runtime',
           row,
         });
+        // Explicit, countable per content type: these are archived (not
+        // lost); widening the runtime allowlist is tracked separately.
         warn(
-          'attachment_media_type_not_allowed_archived',
+          'media_type_not_supported_runtime',
           'active_storage_attachments',
           id
+        );
+        event(
+          'media_type_not_supported_runtime:' +
+            (normalizeMediaMimeType(blobRows.get(blobId)?.content_type ?? '') ||
+              'unknown')
         );
         continue;
       }

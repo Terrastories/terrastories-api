@@ -243,8 +243,8 @@ describeWithPostgres('Rails -> V2 media stage (S3)', () => {
           )
           .all()
       ).toEqual([
-        { source_id: '143', reason: 'media_type_not_allowed' },
-        { source_id: '144', reason: 'media_type_not_allowed' },
+        { source_id: '143', reason: 'media_type_not_supported_runtime' },
+        { source_id: '144', reason: 'media_type_not_supported_runtime' },
       ]);
     } finally {
       archive.close();
@@ -254,10 +254,19 @@ describeWithPostgres('Rails -> V2 media stage (S3)', () => {
       id: string | null;
     }>;
     const flagged = warnings
-      .filter((w) => w.code === 'attachment_media_type_not_allowed_archived')
+      .filter((w) => w.code === 'media_type_not_supported_runtime')
       .map((w) => w.id)
       .sort();
     expect(flagged).toEqual(['143', '144']);
+    // counted per content type in the manifest summary
+    expect(
+      full.manifest.fieldEvents[
+        'media_type_not_supported_runtime:image/svg+xml'
+      ]
+    ).toBe(1);
+    expect(
+      full.manifest.fieldEvents['media_type_not_supported_runtime:audio/ogg']
+    ).toBe(1);
     const ledger = full.manifest.media.blobs.filter((b) =>
       ['123', '124'].includes(b.blobId)
     );

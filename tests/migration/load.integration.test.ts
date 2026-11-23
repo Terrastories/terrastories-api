@@ -379,6 +379,83 @@ describeWithPostgres('Rails -> V2 load (stage 3)', () => {
       target.close();
     });
 
+    it('wipe-and-retry never erases a target the dump did not preflight', async () => {
+      const dump = async (
+        maxFileBytes: number
+      ): Promise<{ files: string[]; read: (n: string) => Promise<string> }> => {
+        const sqlOut = next('d1');
+        await loadTransformOutput({
+          transformDir: outDir,
+          target: 'd1',
+          sqlOut,
+          maxFileBytes,
+        });
+        const index = JSON.parse(
+          await readFile(join(sqlOut, 'd1-import.json'), 'utf8')
+        ) as { files: string[] };
+        return {
+          files: index.files,
+          read: (name) => readFile(join(sqlOut, name), 'utf8'),
+        };
+      };
+      const a = await dump(4000);
+      const fresh = (): Database.Database => {
+        const db = new Database(':memory:');
+        db.pragma('foreign_keys = ON');
+        migrate(drizzle(db), { migrationsFolder });
+        return db;
+      };
+      const rowCount = (db: Database.Database): number => {
+        const names = (
+          db
+            .prepare(
+              "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%drizzle%' AND name NOT LIKE '\\_rails\\_%' ESCAPE '\\'"
+            )
+            .all() as Array<{ name: string }>
+        ).map((r) => r.name);
+        return names.reduce(
+          (sum, name) =>
+            sum +
+            (
+              db.prepare('SELECT COUNT(*) AS n FROM "' + name + '"').get() as {
+                n: number;
+              }
+            ).n,
+          0
+        );
+      };
+      const wipeA = await a.read('wipe-and-retry.sql');
+      // another dump's wipe carries a different preflight identity
+      const wipeB = wipeA.replace(/[0-9a-f]{64}/, 'f'.repeat(64));
+      expect(wipeB).not.toBe(wipeA);
+
+      // 1. populated target that never ran a preflight (no ledger): refused
+      const populated = fresh();
+      const dataOnly = (await a.read(a.files[1]!)).replace(
+        /INSERT INTO _rails_migration_load[^\n]*\n$/,
+        ''
+      );
+      expect(dataOnly).not.toContain('_rails_migration_load');
+      populated.exec(dataOnly);
+      const before = rowCount(populated);
+      expect(before).toBeGreaterThan(0);
+      expect(() => populated.exec(wipeA)).toThrow();
+      expect(rowCount(populated)).toBe(before);
+      populated.close();
+
+      // 2. target preflighted by dump A: dump B's wipe is refused, A's works
+      const target = fresh();
+      target.exec(await a.read(a.files[0]!));
+      target.exec(await a.read(a.files[1]!));
+      const partial = rowCount(target);
+      expect(partial).toBeGreaterThan(0);
+      expect(() => target.exec(wipeB)).toThrow(/CHECK constraint/);
+      expect(rowCount(target)).toBe(partial);
+      target.exec(wipeA);
+      expect(rowCount(target)).toBe(0);
+      target.close();
+    });
+
     it('estimates rows written and refuses above the budget unless allowed', async () => {
       const dry = await loadTransformOutput({
         transformDir: outDir,

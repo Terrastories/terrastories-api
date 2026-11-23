@@ -27,7 +27,8 @@ export interface FakeR2Request {
   attempt: number;
 }
 
-export type FakeR2Fault = number | 'reset' | undefined;
+/** 'drop': process the request fully, then cut the connection (lost response). */
+export type FakeR2Fault = number | 'reset' | 'drop' | undefined;
 
 export interface FakeR2Options {
   accessKeyId: string;
@@ -116,7 +117,13 @@ export async function startFakeR2(options: FakeR2Options): Promise<FakeR2> {
   let peak = 0;
   let uploadCounter = 0;
 
+  let dropNext = false;
   const end = (res: ServerResponse, status: number, body = ''): void => {
+    if (dropNext) {
+      dropNext = false;
+      res.destroy();
+      return;
+    }
     res.statusCode = status;
     res.end(body);
   };
@@ -155,10 +162,16 @@ export async function startFakeR2(options: FakeR2Options): Promise<FakeR2> {
           size += (chunk as Buffer).length;
         }
         const bodySha = hash.digest('hex');
-        if (fault !== undefined) return end(res, fault);
+        if (fault === 'drop') dropNext = true;
+        else if (fault !== undefined) return end(res, fault as number);
         if (!signatureOk(req, url, options)) return end(res, 403);
         const payload = String(req.headers['x-amz-content-sha256']);
-        if (method !== 'HEAD' && method !== 'DELETE' && payload !== bodySha) {
+        if (
+          method !== 'HEAD' &&
+          method !== 'DELETE' &&
+          payload !== 'UNSIGNED-PAYLOAD' &&
+          payload !== bodySha
+        ) {
           return end(res, 400, 'XAmzContentSHA256Mismatch');
         }
         const meta = String(req.headers['x-amz-meta-sha256'] ?? '');

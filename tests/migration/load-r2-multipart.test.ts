@@ -278,6 +278,59 @@ describe('R2 upload: streaming, multipart, retries', () => {
     expect(r2.objects.has('/media/communities/5/media/doomed')).toBe(false);
   });
 
+  it('aborts when the file is mutated mid-upload (hash of streamed bytes vs manifest)', async () => {
+    const dir = await makeOutput(root, [
+      { key: 'communities/8/media/mutated', size: 5 * MIB, mime: 'video/mp4' },
+    ]);
+    fault = () => undefined;
+    const path = join(dir, 'v2-media', 'communities/8/media/mutated');
+    let mutated = false;
+    const spy: typeof fetch = async (input, init) => {
+      // Same size, different bytes in a later part, after the pre-upload check.
+      if (!mutated && String(input).includes('partNumber=1')) {
+        mutated = true;
+        const handle = await open(path, 'r+');
+        await handle.write(Buffer.from('MUTATED'), 0, 7, 4 * MIB + 10);
+        await handle.close();
+      }
+      return fetch(input, init);
+    };
+    const before = r2.aborted.length;
+    await expect(
+      run(dir, {
+        fetchImpl: spy,
+        multipartThresholdBytes: MIB,
+        partSizeBytes: 2 * MIB,
+      })
+    ).rejects.toThrow(/changed during upload/);
+    expect(mutated).toBe(true);
+    expect(r2.aborted.length).toBe(before + 1);
+    expect(r2.objects.has('/media/communities/8/media/mutated')).toBe(false);
+  });
+
+  it('accepts NoSuchUpload on a retried complete when the object already matches', async () => {
+    const dir = await makeOutput(root, [
+      { key: 'communities/9/media/lost', size: 3 * MIB, mime: 'video/mp4' },
+    ]);
+    // first complete is processed by the server but its response is lost
+    fault = (r) =>
+      r.method === 'POST' && r.query.uploadId && r.attempt === 1
+        ? 'drop'
+        : undefined;
+    const report = await run(dir, {
+      multipartThresholdBytes: MIB,
+      partSizeBytes: 2 * MIB,
+    });
+    expect(report).toMatchObject({ uploaded: 1, multipart: 1 });
+    const completes = r2.requests.filter(
+      (r) => r.method === 'POST' && r.key.endsWith('/lost') && r.query.uploadId
+    );
+    expect(completes.length).toBe(2);
+    expect(r2.objects.get('/media/communities/9/media/lost')!.size).toBe(
+      3 * MIB
+    );
+  });
+
   it('signs a collapsed-whitespace header value like the single-spaced one, and signs the query', () => {
     const base = {
       method: 'PUT' as const,

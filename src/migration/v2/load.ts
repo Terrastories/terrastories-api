@@ -453,7 +453,7 @@ function loadD1Instructions(
       ' ORDER BY file.',
     'If a file fails, it may have been partially applied. Do not re-run it: run ' +
       wipe +
-      ' (deletes only the rows this dump writes and drops the ledger) and restart from the first file.',
+      " (deletes only the rows this dump writes and drops the ledger; it fails without deleting anything unless the ledger shows this dump's preflight succeeded, so it never erases a target that was populated beforehand) and restart from the first file. If the preflight itself failed, nothing was written: fix the target instead.",
     'After the last file run ' +
       verify +
       ' with wrangler d1 execute; it fails when a row count, an applied file or a sqlite_sequence floor does not match.',
@@ -612,7 +612,22 @@ async function loadD1(
 
   // Apply files: the preflight first, then data, each ending in its ledger row.
   const preflightName = '0000-preflight.sql';
+  // Identifies this dump: wipe-and-retry only acts when the ledger holds the
+  // preflight row of this exact dump.
+  const dumpId = createHash('sha256')
+    .update(
+      JSON.stringify([
+        writtenTables,
+        sequences,
+        bodies.map((b) => [b.label, b.text]),
+      ]),
+      'utf8'
+    )
+    .digest('hex');
   let preflight =
+    '-- rails-migration-load dump ' +
+    dumpId +
+    '\n' +
     LEDGER_DDL +
     CHECK_TABLE_DDL('_rails_preflight') +
     assertion(
@@ -639,6 +654,9 @@ async function loadD1(
         ),
     },
   ];
+  const preflightSha = createHash('sha256')
+    .update(preflight, 'utf8')
+    .digest('hex');
   bodies.forEach((body, index) => {
     const name = String(index + 1).padStart(4, '0') + '-' + body.label + '.sql';
     files.push({
@@ -678,7 +696,24 @@ async function loadD1(
   }
   verify += 'DROP TABLE _rails_verify;\n';
 
-  let wipe = 'PRAGMA defer_foreign_keys = true;\n';
+  // Guard first: fails (and deletes nothing) unless the ledger shows that the
+  // preflight of THIS dump succeeded, so a pre-existing populated target, or
+  // another dump's data, is never erased.
+  let wipe =
+    CHECK_TABLE_DDL('_rails_wipe_guard') +
+    assertion(
+      '_rails_wipe_guard',
+      'this-dump-preflight-recorded',
+      '(SELECT COUNT(*) FROM ' +
+        D1_LEDGER_TABLE +
+        ' WHERE file = ' +
+        sqlLiteral(preflightName) +
+        ' AND sha256 = ' +
+        sqlLiteral(preflightSha) +
+        ') = 1'
+    ) +
+    'DROP TABLE _rails_wipe_guard;\n' +
+    'PRAGMA defer_foreign_keys = true;\n';
   for (const { table } of [...writtenTables].reverse()) {
     wipe += 'DELETE FROM ' + quoteIdent(table) + ';\n';
   }
@@ -689,7 +724,7 @@ async function loadD1(
       ';\n';
   }
   wipe +=
-    'DROP TABLE IF EXISTS _rails_preflight;\nDROP TABLE IF EXISTS _rails_verify;\nDROP TABLE IF EXISTS ' +
+    'DROP TABLE IF EXISTS _rails_preflight;\nDROP TABLE IF EXISTS _rails_wipe_guard;\nDROP TABLE IF EXISTS _rails_verify;\nDROP TABLE IF EXISTS ' +
     D1_LEDGER_TABLE +
     ';\n';
   const verifyName = 'verify.sql';
@@ -942,16 +977,17 @@ function isRetryableStatus(status: number): boolean {
   return status === 429 || status === 408 || status >= 500;
 }
 
-async function hashRange(
+/** Streams a byte range of a file, feeding every chunk to a hash as it is sent. */
+async function* tapped(
   path: string,
   start: number,
-  end: number
-): Promise<string> {
-  const hash = createHash('sha256');
+  end: number,
+  tap: (chunk: Buffer) => void
+): AsyncGenerator<Buffer> {
   for await (const chunk of createReadStream(path, { start, end })) {
-    hash.update(chunk as Buffer);
+    tap(chunk as Buffer);
+    yield chunk as Buffer;
   }
-  return hash.digest('hex');
 }
 
 async function loadR2(
@@ -1144,19 +1180,39 @@ async function loadR2(
     try {
       const etags: string[] = [];
       const count = Math.ceil(object.byteSize / partSize);
+      // SHA-256 of the bytes actually sent, in part order. A part attempt
+      // hashes into a copy that is adopted only when the part succeeds, so a
+      // retried part is never counted twice.
+      let whole = createHash('sha256');
+      let sentBytes = 0;
       for (let number = 1; number <= count; number += 1) {
         const start = (number - 1) * partSize;
         const end = Math.min(object.byteSize, start + partSize) - 1;
         const length = end - start + 1;
-        const partSha = await hashRange(path, start, end);
         const held = await budget.acquire(length);
+        let attempt = whole;
+        let attemptBytes = 0;
         try {
           const response = await send('multipart part', {
             method: 'PUT',
             key: object.storageKey,
-            payloadSha256: partSha,
+            // The part hash is computed while streaming (below), never
+            // trusted from an earlier read of a file that may have changed.
+            payloadSha256: 'UNSIGNED-PAYLOAD',
             query: { partNumber: String(number), uploadId },
-            body: streamOf(path, start, end),
+            body: () => {
+              attempt = whole.copy();
+              attemptBytes = 0;
+              return Readable.toWeb(
+                Readable.from(
+                  tapped(path, start, end, (chunk) => {
+                    attempt.update(chunk);
+                    attemptBytes += chunk.length;
+                  }),
+                  { objectMode: false }
+                )
+              ) as unknown as BodyInit;
+            },
             contentLength: length,
           });
           if (!response.ok) {
@@ -1166,10 +1222,22 @@ async function loadR2(
           }
           const etag = response.headers.get('etag');
           if (!etag) throw new Error('R2 multipart part returned no ETag');
+          if (attemptBytes !== length) {
+            throw new Error('A media object changed during upload');
+          }
+          whole = attempt;
+          sentBytes += attemptBytes;
           etags.push(etag);
         } finally {
           budget.release(held);
         }
+      }
+      // Verify what was streamed against the manifest before completing.
+      if (
+        sentBytes !== object.byteSize ||
+        whole.digest('hex') !== object.sha256
+      ) {
+        throw new Error('A media object changed during upload');
       }
       const xml =
         '<CompleteMultipartUpload>' +
@@ -1193,7 +1261,14 @@ async function loadR2(
         body: () => xml,
         contentLength: Buffer.byteLength(xml),
       });
-      if (!completed.ok || /<Error>/.test(await completed.text())) {
+      if (completed.status === 404) {
+        // A lost response to a first complete attempt makes the retry see
+        // NoSuchUpload. Accept it only if the object exists with the expected
+        // size and sha256 metadata (head throws on a diverged object).
+        if ((await head(object)) !== 'match') {
+          throw new Error('R2 multipart complete failed (upload not found)');
+        }
+      } else if (!completed.ok || /<Error>/.test(await completed.text())) {
         throw new Error('R2 multipart complete failed');
       }
     } catch (error) {

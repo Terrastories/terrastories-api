@@ -284,6 +284,21 @@ function writeLegacyArchive(
   }
 }
 
+/** Per content type counts of attachments archived because the runtime cannot serve them. */
+function unsupportedMediaLines(events: Record<string, number>): string[] {
+  const prefix = 'media_type_not_supported_runtime:';
+  const lines = Object.entries(events)
+    .filter(([key]) => key.startsWith(prefix))
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([key, count]) => '  - ' + key.slice(prefix.length) + ': ' + count);
+  return lines.length === 0
+    ? []
+    : [
+        'Attachments archived, media type not supported by the runtime (media_type_not_supported_runtime):',
+        ...lines,
+      ];
+}
+
 export function buildTransformSummary(manifest: TransformManifest): string {
   const lines = [
     'Terrastories Rails Stage-2 Transform Validation Summary',
@@ -298,6 +313,7 @@ export function buildTransformSummary(manifest: TransformManifest): string {
       ' communities)',
     'MANUAL items: ' + manifest.manual.length,
     'Warnings: ' + manifest.warnings.length,
+    ...unsupportedMediaLines(manifest.fieldEvents),
     '',
     'Canonical row counts:',
     ...Object.entries(manifest.canonicalCounts).map(

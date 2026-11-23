@@ -213,6 +213,12 @@ async function seed() {
   );
   await createStoredFile('placePhoto1', ids.alpha, 'PLACE_PHOTO_1');
   await createStoredFile(
+    'placePhotoTiff',
+    ids.alpha,
+    'PLACE_PHOTO_TIFF',
+    'image/tiff'
+  );
+  await createStoredFile(
     'placeAudio1',
     ids.alpha,
     'PLACE_AUDIO_1',
@@ -387,6 +393,15 @@ async function seed() {
     ownerId: ids.pRiver,
     role: 'place_photo',
     ordinal: 0,
+    createdAt: T0,
+  });
+  await insertRow(tables.attachments, {
+    communityId: ids.alpha,
+    fileId: fileIds.placePhotoTiff,
+    ownerType: 'place',
+    ownerId: ids.pRiver,
+    role: 'place_photo',
+    ordinal: 1,
     createdAt: T0,
   });
   await insertRow(tables.attachments, {
@@ -988,6 +1003,14 @@ describe('V2 public story, place, speaker, and media endpoints (#145 Slice 5)', 
       {
         fileId: fileIds.placePhoto1,
         url: `https://cdn.example.test/v2/public/communities/public-alpha/media/${fileIds.placePhoto1}`,
+        mimeType: 'image/png',
+        renderable: true,
+      },
+      {
+        fileId: fileIds.placePhotoTiff,
+        url: `https://cdn.example.test/v2/public/communities/public-alpha/media/${fileIds.placePhotoTiff}`,
+        mimeType: 'image/tiff',
+        renderable: false,
       },
     ]);
     expect(river.placenameAudio).toEqual({

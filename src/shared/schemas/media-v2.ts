@@ -168,29 +168,101 @@ function startsWith(bytes: Uint8Array, sig: number[], offset = 0): boolean {
   return sig.every((b, i) => bytes[offset + i] === b);
 }
 
-function containsAscii(bytes: Uint8Array, needle: string): boolean {
-  const sig = ASCII(needle);
-  for (let i = 0; i + sig.length <= bytes.length; i++) {
-    if (startsWith(bytes, sig, i)) return true;
-  }
-  return false;
-}
-
-const HEIC_BRANDS = [
+const HEIC_BRANDS: readonly string[] = [
   'heic',
   'heix',
   'hevc',
   'hevx',
   'heim',
   'heis',
-  'mif1',
-  'msf1',
 ];
+
+function ascii4(bytes: Uint8Array, at: number): string {
+  return String.fromCharCode(...bytes.subarray(at, at + 4));
+}
+
+/** Major or compatible brand must be an HEVC-image brand (mif1/msf1 alone are AVIF-capable). */
+function sniffHeic(bytes: Uint8Array): boolean {
+  if (bytes.length < 12 || !startsWith(bytes, ASCII('ftyp'), 4)) return false;
+  if (HEIC_BRANDS.includes(ascii4(bytes, 8))) return true;
+  const boxSize = Math.min(
+    ((bytes[0]! << 24) | (bytes[1]! << 16) | (bytes[2]! << 8) | bytes[3]!) >>>
+      0,
+    bytes.length
+  );
+  for (let i = 16; i + 4 <= boxSize; i += 4) {
+    if (HEIC_BRANDS.includes(ascii4(bytes, i))) return true;
+  }
+  return false;
+}
+
+/**
+ * Walks ZIP local file headers inside the window and returns the entry names
+ * that are fully visible. Stops at the first entry it cannot step over
+ * (data descriptor, truncated window, bad signature).
+ */
+function zipLocalEntryNames(bytes: Uint8Array): string[] {
+  const names: string[] = [];
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let pos = 0;
+  while (pos + 30 <= bytes.length && view.getUint32(pos, true) === 0x04034b50) {
+    const flags = view.getUint16(pos + 6, true);
+    const compressedSize = view.getUint32(pos + 18, true);
+    const nameLen = view.getUint16(pos + 26, true);
+    const extraLen = view.getUint16(pos + 28, true);
+    const nameEnd = pos + 30 + nameLen;
+    if (nameEnd > bytes.length) break;
+    names.push(new TextDecoder().decode(bytes.subarray(pos + 30, nameEnd)));
+    if ((flags & 0x08) !== 0) break; // sizes follow the data; cannot skip
+    pos = nameEnd + extraLen + compressedSize;
+  }
+  return names;
+}
+
+function sniffDocx(bytes: Uint8Array): boolean {
+  const names = zipLocalEntryNames(bytes);
+  if (names.some((n) => n.startsWith('xl/') || n.startsWith('ppt/'))) {
+    return false;
+  }
+  return names.some(
+    (n) => n === '[Content_Types].xml' || n.startsWith('word/')
+  );
+}
+
+interface AdtsHeader {
+  frameLength: number;
+}
+
+function parseAdtsHeader(bytes: Uint8Array, at: number): AdtsHeader | null {
+  if (at + 7 > bytes.length) return null;
+  if (bytes[at] !== 0xff || (bytes[at + 1]! & 0xf6) !== 0xf0) return null;
+  const protectionAbsent = (bytes[at + 1]! & 0x01) === 1;
+  const samplingIndex = (bytes[at + 2]! >> 2) & 0x0f;
+  if (samplingIndex > 12) return null;
+  const frameLength =
+    ((bytes[at + 3]! & 0x03) << 11) |
+    (bytes[at + 4]! << 3) |
+    (bytes[at + 5]! >> 5);
+  if (frameLength < (protectionAbsent ? 7 : 9)) return null;
+  return { frameLength };
+}
+
+/**
+ * ADTS: sync 0xFFF, layer 00, valid sampling index, sane frame length. When a
+ * second frame fits in the window it must also be a valid ADTS header.
+ */
+function sniffAdts(bytes: Uint8Array): boolean {
+  const first = parseAdtsHeader(bytes, 0);
+  if (!first) return false;
+  const next = first.frameLength;
+  if (next === bytes.length) return true;
+  if (next + 7 > bytes.length) return true; // second header outside the window
+  return parseAdtsHeader(bytes, next) !== null;
+}
 
 /**
  * Deterministic magic-byte sniffers for the document / download-only /
- * ADTS types (decided on the 8 KiB header window). Returns the sniffed
- * canonical MIME or null when the bytes do not match `mime`.
+ * ADTS types (decided on the 8 KiB header window).
  */
 function sniffExtraType(bytes: Uint8Array, mime: string): boolean {
   switch (mime) {
@@ -200,47 +272,14 @@ function sniffExtraType(bytes: Uint8Array, mime: string): boolean {
         startsWith(bytes, [0x49, 0x49, 0x2a, 0x00]) ||
         startsWith(bytes, [0x4d, 0x4d, 0x00, 0x2a])
       );
-    case 'image/heic': {
-      if (bytes.length < 12 || !startsWith(bytes, ASCII('ftyp'), 4)) {
-        return false;
-      }
-      const brand = String.fromCharCode(...bytes.subarray(8, 12));
-      if (HEIC_BRANDS.includes(brand)) return true;
-      // Compatible brands list (after major brand + minor version).
-      const boxSize = Math.min(
-        ((bytes[0]! << 24) |
-          (bytes[1]! << 16) |
-          (bytes[2]! << 8) |
-          bytes[3]!) >>>
-          0,
-        bytes.length
-      );
-      for (let i = 16; i + 4 <= boxSize; i += 4) {
-        const b = String.fromCharCode(...bytes.subarray(i, i + 4));
-        if (HEIC_BRANDS.includes(b)) return true;
-      }
-      return false;
-    }
+    case 'image/heic':
+      return sniffHeic(bytes);
     case 'application/pdf':
       return startsWith(bytes, ASCII('%PDF-'));
-    case DOCX_MIME: {
-      if (!startsWith(bytes, [0x50, 0x4b, 0x03, 0x04])) return false;
-      // Local-file-header names are stored uncompressed. Reject other OOXML
-      // families; accept when word/ or [Content_Types].xml is visible, or when
-      // the window shows neither (declared type + PK container).
-      if (
-        containsAscii(bytes, 'xl/workbook') ||
-        containsAscii(bytes, 'ppt/presentation')
-      ) {
-        return false;
-      }
-      return true;
-    }
+    case DOCX_MIME:
+      return sniffDocx(bytes);
     case 'audio/aac':
-      // ADTS: 12-bit sync 0xFFF, layer bits 00 (distinguishes from MPEG audio).
-      return (
-        bytes.length >= 2 && bytes[0] === 0xff && (bytes[1]! & 0xf6) === 0xf0
-      );
+      return sniffAdts(bytes);
     default:
       return false;
   }
@@ -253,6 +292,16 @@ const EXTRA_SNIFFED_MIMES: ReadonlySet<string> = new Set([
   DOCX_MIME,
   'audio/aac',
 ]);
+
+/**
+ * Whether a browser can render this stored MIME type inline (e.g. in `img`).
+ * False for tiff/heic and documents: clients show a download card instead.
+ * Note: the API itself always serves media as an attachment.
+ */
+export function isBrowserRenderableMime(mime: string): boolean {
+  const category = MEDIA_MIME_RULES[normalizeMediaMimeType(mime)]?.category;
+  return category === 'image' || category === 'audio' || category === 'video';
+}
 
 export function normalizeMediaMimeType(raw: string | undefined): string {
   if (!raw) return '';

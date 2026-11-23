@@ -509,10 +509,14 @@ export async function fileRoutes(
         // Set appropriate headers
         reply.header('Content-Type', fileData.mimeType);
         reply.header('Content-Length', fileData.size);
+        // Never render stored bytes inline (shared `files` table also holds
+        // V2 pdf/docx/tiff/heic/user uploads): attachment + nosniff + sandbox.
         reply.header(
           'Content-Disposition',
-          `inline; filename="${fileData.originalName}"`
+          `attachment; filename="${fileData.originalName}"`
         );
+        reply.header('X-Content-Type-Options', 'nosniff');
+        reply.header('Content-Security-Policy', "default-src 'none'; sandbox");
         reply.header('Cache-Control', 'public, max-age=31536000'); // 1 year cache
 
         // Stream file to response

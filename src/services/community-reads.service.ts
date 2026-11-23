@@ -25,6 +25,7 @@ import { CommunityReadsRepository } from '../repositories/community-reads.reposi
 import {
   PUBLIC_COMMUNITY_FILTER_CATEGORIES,
   type PublicCommunityFilterOption,
+  toPublicPlacePhotoRef,
 } from '../shared/schemas/public-communities.js';
 import type {
   PublicExternalMediaLink,
@@ -55,6 +56,7 @@ import {
   type CommunityStorySummary,
 } from '../shared/schemas/community-reads.js';
 import { isDatabaseIdString } from '../shared/types/public.js';
+import { isBrowserRenderableMime } from '../shared/schemas/media-v2.js';
 import {
   FORBIDDEN_BODY,
   INTERNAL_ERROR_BODY,
@@ -579,10 +581,14 @@ export class CommunityReadsService {
       const audioFileId = page.placenameAudioByPlaceId.get(place.id) ?? null;
       return {
         ...projectPlaceSummary(place),
-        photos: photoIds.map((fileId) => ({
-          fileId,
-          url: authenticatedMediaUrl(origin, fileId),
-        })),
+        photos: photoIds.map((fileId) =>
+          toPublicPlacePhotoRef(
+            fileId,
+            authenticatedMediaUrl(origin, fileId),
+            page.photoMimeByFileId.get(fileId),
+            isBrowserRenderableMime
+          )
+        ),
         placenameAudio: audioFileId
           ? {
               fileId: audioFileId,
@@ -628,10 +634,14 @@ export class CommunityReadsService {
     return validateResponse(PublicPlaceDetailResponseSchema, {
       data: {
         ...projectPlaceSummary(detail.place),
-        photos: detail.photos.map((fileId) => ({
-          fileId,
-          url: authenticatedMediaUrl(origin, fileId),
-        })),
+        photos: detail.photos.map((fileId) =>
+          toPublicPlacePhotoRef(
+            fileId,
+            authenticatedMediaUrl(origin, fileId),
+            detail.photoMimeByFileId.get(fileId),
+            isBrowserRenderableMime
+          )
+        ),
         placenameAudio: detail.placenameAudioFileId
           ? {
               fileId: detail.placenameAudioFileId,

@@ -16,10 +16,13 @@
 #      --r2-via-wrangler (no R2_* S3 credentials), 'wrangler r2 object put
 #      --remote --content-type' per r2-upload-manifest.json entry, each object
 #      verified afterwards by 'wrangler r2 object get' (size and sha256). Reruns
-#      skip objects already present and matching. If any object is over 300 MiB
-#      (wrangler limit) the whole path is refused up front: the S3 loader needs
-#      x-amz-meta-sha256 on existing objects, which wrangler cannot set, so
-#      do not mix the two paths in one bucket.
+#      skip objects already present and matching. An object is uploaded ONLY
+#      when wrangler confirms the key is absent ("The specified key does not
+#      exist."); any other read error, or an existing object whose size/sha256
+#      does not match the manifest, aborts the load without overwriting. If
+#      any object is over 300 MiB (wrangler limit) the whole path is refused
+#      up front: the S3 loader needs x-amz-meta-sha256 on existing objects,
+#      which wrangler cannot set, so do not mix the two paths in one bucket.
 #   7. [apply] verify.sql
 # Prints counts and step status only. Wrangler output goes to a mode-600 log
 # under the --sql-out directory, never to the terminal.
@@ -70,9 +73,10 @@ load() { npm run --silent migrate:rails:load -- --transform-output "$TRANSFORM" 
 
 info "step 1: D1 budget dry run"
 load --target d1 --dry-run ${OVER:+"$OVER"}
-# wrangler-based R2 upload: put each manifest object, then verify its size.
+# wrangler-based R2 upload: get first, put only a confirmed-absent key, then
+# verify size and sha256. Any other outcome aborts without overwriting.
 r2_via_wrangler() {
-  local manifest="$SQL_OUT/r2-upload-manifest.json" listing key size ct src tmp got n=0 up=0 present=0 total
+  local manifest="$SQL_OUT/r2-upload-manifest.json" listing key size ct src tmp got log_start n=0 up=0 present=0 total
   [ -f "$manifest" ] || die "$manifest missing: run the D1 dump step first"
   # \x1f (unit separator) is not IFS whitespace, so empty fields (e.g. an empty
   # contentType) keep their position instead of collapsing into the next field.
@@ -88,8 +92,25 @@ r2_via_wrangler() {
     n=$((n+1))
     src="$TRANSFORM/v2-media/$key"
     [ -f "$src" ] || { rm -f "$tmp"; die "r2 object $n/$total: source file missing"; }
-    if wr r2 object get "$BUCKET/$key" --remote --file "$tmp" && [ "$(stat -c %s "$tmp")" = "$size" ] && [ "$(sha256sum "$tmp" | cut -d' ' -f1)" = "$sha" ]; then
-      present=$((present+1)); continue
+    # Read before writing: an existing object may carry S3 checksum metadata
+    # this path cannot reproduce, so it must never be overwritten blindly.
+    log_start="$(stat -c %s "$LOG")"
+    if wr r2 object get "$BUCKET/$key" --remote --file "$tmp"; then
+      got="$(stat -c %s "$tmp")"
+      if [ "$got" = "$size" ] && [ "$(sha256sum "$tmp" | cut -d' ' -f1)" = "$sha" ]; then
+        present=$((present+1)); continue
+      fi
+      rm -f "$tmp"
+      die "r2 object $n/$total already exists but does not match the manifest (expected size $size, got $got, or sha256 differs): refusing to overwrite; see $LOG"
+    fi
+    # Upload ONLY on a confirmed not-found. wrangler answers a missing key with
+    # the exact UserError "The specified key does not exist." (404 from the R2
+    # API); permission, network and other API errors print different messages.
+    # If that distinction is ever unavailable, fail closed: never PUT over an
+    # object whose absence was not confirmed.
+    if ! tail -c +"$((log_start + 1))" "$LOG" | grep -qF 'The specified key does not exist.'; then
+      rm -f "$tmp"
+      die "r2 get $n/$total failed without confirming the key is absent: refusing to upload (an existing object could be overwritten); read $LOG, fix the cause, rerun"
     fi
     wr r2 object put "$BUCKET/$key" --remote --file "$src" --content-type "$ct" || { rm -f "$tmp"; die "r2 put $n/$total failed; see $LOG"; }
     : > "$tmp"

@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmdirSync,
+  rmSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -291,7 +292,10 @@ if [ "\${args[1]}" = r2 ] && [ "\${args[2]}" = object ]; then
   op="\${args[3]}"; key="\${args[4]//\\//_}"
   for i in "\${!args[@]}"; do [ "\${args[$i]}" = --file ] && f="\${args[$((i+1))]}"; done
   if [ "$op" = put ]; then cp "$f" "${store}/$key"; fi
-  if [ "$op" = get ]; then [ -f "${store}/$key" ] || exit 1; cp "${store}/$key" "$f"; fi
+  if [ "$op" = get ]; then
+    if [ ! -f "${store}/$key" ]; then echo "The specified key does not exist." >&2; exit 1; fi
+    cp "${store}/$key" "$f"
+  fi
 fi
 exit 0
 `
@@ -395,6 +399,158 @@ exit 0
   });
 });
 
+describe('load-community.sh --r2-via-wrangler fail-closed get (fake npx)', () => {
+  // A fresh work dir per scenario. The fake wrangler stores objects under
+  // store/, logs every r2 call, and answers a missing key exactly like real
+  // wrangler ("The specified key does not exist.", exit 1). R2_GET_ERROR
+  // simulates a read failure that is NOT a not-found (a 403 from the R2 API).
+  const setup = () => {
+    const work = mkdtempSync(join(tmpdir(), 'load-r2-failclosed-'));
+    const bin = join(work, 'bin');
+    mkdirSync(bin);
+    const calls = join(work, 'calls.log');
+    const store = join(work, 'store');
+    mkdirSync(store);
+    writeFileSync(
+      join(bin, 'npx'),
+      `#!/usr/bin/env bash
+case "$*" in
+  *whoami*) echo "Account ${ACCOUNT}" ; exit 0 ;;
+  *tsx*) shift; shift; exec "${ROOT}/node_modules/.bin/tsx" "$@" ;;
+esac
+echo "$*" >> "${calls}"
+args=("$@")
+if [ "\${args[1]}" = r2 ] && [ "\${args[2]}" = object ]; then
+  op="\${args[3]}"; key="\${args[4]//\\//_}"
+  for i in "\${!args[@]}"; do [ "\${args[$i]}" = --file ] && f="\${args[$((i+1))]}"; done
+  if [ "$op" = put ]; then cp "$f" "${store}/$key"; fi
+  if [ "$op" = get ]; then
+    if [ -n "\${R2_GET_ERROR:-}" ]; then
+      echo "Failed to fetch /accounts/x/r2/buckets/b/objects/$key - 403: Forbidden;" >&2
+      exit 1
+    fi
+    if [ ! -f "${store}/$key" ]; then echo "The specified key does not exist." >&2; exit 1; fi
+    cp "${store}/$key" "$f"
+  fi
+fi
+exit 0
+`
+    );
+    writeFileSync(join(bin, 'npm'), '#!/usr/bin/env bash\nexit 0\n');
+    chmodSync(join(bin, 'npx'), 0o755);
+    chmodSync(join(bin, 'npm'), 0o755);
+    const transform = join(work, 'transform');
+    mkdirSync(join(transform, 'v2-media'), { recursive: true });
+    writeFileSync(join(transform, 'manifest.json'), '{"a":1}');
+    const body = 'hello';
+    writeFileSync(join(transform, 'v2-media', 'k1'), body);
+    const sha = createHash('sha256').update(body).digest('hex');
+    const sqlOut = join(work, 'sql');
+    mkdirSync(sqlOut);
+    writeFileSync(join(sqlOut, 'd1-import.json'), '{"files":[]}');
+    writeFileSync(join(sqlOut, '.backup-done'), '');
+    writeFileSync(
+      join(sqlOut, 'r2-upload-manifest.json'),
+      JSON.stringify({
+        formatVersion: 1,
+        objects: [
+          {
+            key: 'k1',
+            size: body.length,
+            sha256: sha,
+            contentType: 'video/mp4',
+          },
+        ],
+      })
+    );
+    writeFileSync(
+      join(sqlOut, '.transform-manifest.sha256'),
+      createHash('sha256').update('{"a":1}').digest('hex')
+    );
+    const run = (env: Record<string, string> = {}) =>
+      spawnSync(
+        'bash',
+        [
+          'scripts/staging/load-community.sh',
+          '--transform-output',
+          transform,
+          '--sql-out',
+          sqlOut,
+          '--apply',
+          '--r2-via-wrangler',
+        ],
+        {
+          cwd: ROOT,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
+            R2_ACCESS_KEY_ID: '',
+            R2_SECRET_ACCESS_KEY: '',
+            R2_ACCOUNT_ID: '',
+            ...env,
+          },
+        }
+      );
+    return { calls, store, run };
+  };
+  // the fake wrangler flattens bucket/key into one store filename
+  const stored = 'terrastories-staging-media_k1';
+
+  it('absent object: confirmed not-found leads to put and verify', () => {
+    const { calls, store, run } = setup();
+    const r = run();
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(r.stdout).toMatch(/uploaded=1 already_present=0/);
+    const log = readFileSync(calls, 'utf8');
+    expect(log).toMatch(/r2 object get terrastories-staging-media\/k1/);
+    expect(log).toMatch(/r2 object put terrastories-staging-media\/k1/);
+    expect(readFileSync(join(store, stored), 'utf8')).toBe('hello');
+  });
+
+  it('present and matching: skip, never put', () => {
+    const { calls, store, run } = setup();
+    writeFileSync(join(store, stored), 'hello');
+    const r = run();
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(r.stdout).toMatch(/uploaded=0 already_present=1/);
+    expect(readFileSync(calls, 'utf8')).not.toMatch(/r2 object put/);
+  });
+
+  it('present with a different sha256: die without overwriting', () => {
+    const { calls, store, run } = setup();
+    writeFileSync(join(store, stored), 'HELLO');
+    const r = run();
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/does not match the manifest/);
+    expect(readFileSync(calls, 'utf8')).not.toMatch(/r2 object put/);
+    expect(readFileSync(join(store, stored), 'utf8')).toBe('HELLO');
+  });
+
+  it('present with a different size: die without overwriting', () => {
+    const { calls, store, run } = setup();
+    writeFileSync(join(store, stored), 'hello world');
+    const r = run();
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/does not match the manifest/);
+    expect(readFileSync(calls, 'utf8')).not.toMatch(/r2 object put/);
+    expect(readFileSync(join(store, stored), 'utf8')).toBe('hello world');
+  });
+
+  it('get error that is not not-found: die without put, object untouched', () => {
+    const { calls, store, run } = setup();
+    // the object EXISTS: a blind put would overwrite it (and any S3 checksum
+    // metadata it carries), so the read error must abort the load instead
+    writeFileSync(join(store, stored), 'hello');
+    const r = run({ R2_GET_ERROR: '1' });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/without confirming the key is absent/);
+    expect(readFileSync(calls, 'utf8')).not.toMatch(/r2 object put/);
+    expect(readFileSync(join(store, stored), 'utf8')).toBe('hello');
+  });
+});
+
 describe('staging script --help', () => {
   it('load-community.sh prints the whole header, not a fixed line range', () => {
     const r = spawnSync(
@@ -444,7 +600,10 @@ if [ "\${args[1]}" = r2 ] && [ "\${args[2]}" = object ]; then
   op="\${args[3]}"; key="\${args[4]//\\//_}"
   for i in "\${!args[@]}"; do [ "\${args[$i]}" = --file ] && f="\${args[$((i+1))]}"; done
   if [ "$op" = put ]; then cp "$f" "${store}/$key"; fi
-  if [ "$op" = get ]; then [ -f "${store}/$key" ] || exit 1; cp "${store}/$key" "$f"; fi
+  if [ "$op" = get ]; then
+    if [ ! -f "${store}/$key" ]; then echo "The specified key does not exist." >&2; exit 1; fi
+    cp "${store}/$key" "$f"
+  fi
 fi
 exit 0
 `
@@ -595,15 +754,48 @@ describe('smoke.sh walkthrough gating (fake npm)', () => {
     expect(r.stdout).not.toMatch(/role=story_media/);
     expect(r.stdout).toMatch(/parse-tail\.mjs/);
   });
+
+  it('cpu procedure is a concrete 300 MB create -> parts -> complete flow', () => {
+    const r = run(['--cpu-procedure']);
+    expect(r.status, r.stderr).toBe(0);
+    // the helper and the exact routes/bodies of the direct-upload contract
+    expect(r.stdout).toContain('scripts/staging/upload-large.ts --file');
+    expect(r.stdout).toContain('--dry-run');
+    expect(r.stdout).toContain('POST $STAGING_URL/v2/media/uploads');
+    expect(r.stdout).toContain('partSha256');
+    expect(r.stdout).toContain('EXACTLY its returned headers');
+    expect(r.stdout).toContain('{parts: [{partNumber, etag}]}');
+    expect(r.stdout).toContain('DELETEs /v2/media/<fileId>');
+    // 2xx required everywhere; cpuTime AND wallTime for create AND complete
+    expect(r.stdout).toMatch(/require 2xx for every part/);
+    expect(r.stdout).toContain('(create) AND POST .../complete');
+    expect(r.stdout).toMatch(/cpuTime \(ms\), wallTime \(ms\)/);
+    // the old pointer at a walkthrough that never calls /v2/media/uploads
+    expect(r.stdout).not.toContain('walkthrough media chapter');
+    expect(r.stdout).not.toContain('record the complete call only');
+  });
 });
 
 describe('smoke.sh --apply gating (fake npm, curl, date)', () => {
   const work = mkdtempSync(join(tmpdir(), 'smoke-apply-'));
   const bin = join(work, 'bin');
   mkdirSync(bin);
+  // Fake npm: when WT_RESULTS_FIXTURE is set, play the walkthrough far enough
+  // to copy that results.json into the --out directory smoke passes.
   writeFileSync(
     join(bin, 'npm'),
-    '#!/usr/bin/env bash\necho "npm $*" >> "${NPM_LOG}"\nexit "${NPM_RC:-0}"\n'
+    `#!/usr/bin/env bash
+echo "npm $*" >> "\${NPM_LOG}"
+if [ -n "\${WT_RESULTS_FIXTURE:-}" ]; then
+  out=""
+  args=("$@")
+  for i in "\${!args[@]}"; do
+    if [ "\${args[$i]}" = --out ]; then out="\${args[$((i+1))]}"; fi
+  done
+  if [ -n "$out" ]; then mkdir -p "$out"; cp "$WT_RESULTS_FIXTURE" "$out/results.json"; fi
+fi
+exit "\${NPM_RC:-0}"
+`
   );
   // Fake curl: /health answers 200, everything else 404 (dev routes absent).
   writeFileSync(
@@ -616,9 +808,10 @@ case "$url" in
 esac
 `
   );
-  // Fake date: the first 'date -u +%F' says 2026-01-01 and later ones
-  // 2026-01-02, so a marker written after a midnight-crossing walkthrough is
-  // observable. Other formats (the walkthrough out-dir stamp) stay fixed.
+  // Fake date: the first two 'date -u +%F' calls (TODAY and the walkthrough
+  // START day) say 2026-01-01; any later one says 2026-01-02, so a marker that
+  // wrongly used the END time would be observable. Other formats (the
+  // walkthrough out-dir stamp) stay fixed at 20260101T000000Z.
   writeFileSync(
     join(bin, 'date'),
     `#!/usr/bin/env bash
@@ -626,7 +819,7 @@ case "$*" in
   *+%F*)
     n="$(cat "$DATE_STATE" 2>/dev/null || echo 0)"
     n=$((n+1)); printf '%s' "$n" > "$DATE_STATE"
-    if [ "$n" -le 1 ]; then echo 2026-01-01; else echo 2026-01-02; fi ;;
+    if [ "$n" -le 2 ]; then echo 2026-01-01; else echo 2026-01-02; fi ;;
   *) echo 20260101T000000Z ;;
 esac
 `
@@ -670,15 +863,49 @@ esac
     expect(r.stderr).toMatch(/WT_SUPER_IDENTIFIER/);
   });
 
-  it('marker records the UTC day at write time, not at start', () => {
-    const hash = createHash('sha256')
-      .update(LOCAL_URL)
-      .digest('hex')
-      .slice(0, 12);
-    const markDir = join(ROOT, 'walkthrough-out');
-    const mark = join(markDir, '.staging-import-utc-day-' + hash);
+  // The marker must record the UTC day the import COMMITTED: prefer the
+  // commit step's timestamp in the walkthrough's results.json, fall back to
+  // the walkthrough START day, never the end time (fake date: the first two
+  // +%F calls say 2026-01-01, any later one says 2026-01-02).
+  const hash = createHash('sha256')
+    .update(LOCAL_URL)
+    .digest('hex')
+    .slice(0, 12);
+  const markDir = join(ROOT, 'walkthrough-out');
+  const mark = join(markDir, '.staging-import-utc-day-' + hash);
+  const wtOut = join(markDir, 'staging-20260101T000000Z');
+  const cleanMarker = () => {
     if (existsSync(mark)) unlinkSync(mark);
+    if (existsSync(wtOut)) rmSync(wtOut, { recursive: true, force: true });
+    try {
+      rmdirSync(markDir);
+    } catch {
+      // keep the directory if other markers exist
+    }
+  };
+  const runWithResults = (steps: unknown[]) => {
+    const fixture = join(work, 'results-fixture.json');
+    writeFileSync(fixture, JSON.stringify({ runId: 'wt-test', steps }));
     writeFileSync(join(work, 'date.state'), '0');
+    cleanMarker();
+    try {
+      const r = run(['--apply', '--local'], {
+        WT_SUPER_IDENTIFIER: 'test-super',
+        WT_SUPER_PASSWORD: 'test-password',
+        WT_RESULTS_FIXTURE: fixture,
+      });
+      expect(r.status, r.stderr + r.stdout).toBe(0);
+      expect(r.stdout).toMatch(/npm run walkthrough/);
+      return readFileSync(mark, 'utf8').trim();
+    } finally {
+      cleanMarker();
+    }
+  };
+
+  it('marker falls back to the walkthrough START day, never the end time', () => {
+    // no results.json: the fake npm writes nothing without a fixture
+    writeFileSync(join(work, 'date.state'), '0');
+    cleanMarker();
     try {
       const r = run(['--apply', '--local'], {
         WT_SUPER_IDENTIFIER: 'test-super',
@@ -686,16 +913,46 @@ esac
       });
       expect(r.status, r.stderr + r.stdout).toBe(0);
       expect(r.stdout).toMatch(/npm run walkthrough/);
-      // start-of-run date was 2026-01-01; the write-time date is 2026-01-02
-      expect(readFileSync(mark, 'utf8').trim()).toBe('2026-01-02');
+      // start day was 2026-01-01; an end-time marker would say 2026-01-02
+      expect(readFileSync(mark, 'utf8').trim()).toBe('2026-01-01');
     } finally {
-      if (existsSync(mark)) unlinkSync(mark);
-      try {
-        rmdirSync(markDir);
-      } catch {
-        // keep the directory if other markers exist
-      }
+      cleanMarker();
     }
+  });
+
+  it('marker records the commit day from results.json, ignoring the 429 retry', () => {
+    // committed just before midnight; the run (and a refused second commit)
+    // ended on the next day: the marker must stay on the commit day
+    const day = runWithResults([
+      {
+        outcome: 'pass',
+        method: 'POST',
+        path: '/v2/imports/7/commit',
+        status: 201,
+        at: '2026-01-01T23:59:50.000Z',
+      },
+      {
+        outcome: 'pass',
+        method: 'POST',
+        path: '/v2/imports/8/commit',
+        status: 429,
+        at: '2026-01-02T00:00:05.000Z',
+      },
+    ]);
+    expect(day).toBe('2026-01-01');
+  });
+
+  it('marker follows a commit that happened after midnight', () => {
+    const day = runWithResults([
+      {
+        outcome: 'pass',
+        method: 'POST',
+        path: '/v2/imports/7/commit',
+        status: 200,
+        at: '2026-01-02T00:00:10.000Z',
+      },
+    ]);
+    expect(day).toBe('2026-01-02');
   });
 
   it('--skip-r2-probe records the probe as NOT done, never a pass', () => {

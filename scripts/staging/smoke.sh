@@ -14,8 +14,10 @@
 # walkthrough always gets --d1: staging and workerd both run on D1.
 # --skip-walkthrough: skip the embedded walkthrough (use on a second run the same
 # UTC day: D1 allows one committed import per UTC day for the whole database and
-# the walkthrough commits one). Without the flag, smoke remembers the UTC day of
-# its last successful walkthrough per target URL (walkthrough-out/
+# the walkthrough commits one). Without the flag, smoke remembers the UTC day
+# its last successful walkthrough COMMITTED the import (the commit step's
+# timestamp in results.json; fallback: the day the walkthrough started, never
+# the end time) per target URL (walkthrough-out/
 # .staging-import-utc-day-<hash of URL>, so local and remote runs do not share
 # it) and prints 'walkthrough already ran today' instead of failing. A run from
 # another machine is not seen; a walkthrough failure is never reclassified (it
@@ -66,21 +68,41 @@ Worker CPU measurement (manual; Workers Free budget is about 10 ms per invocatio
       curl -sS -X POST "$STAGING_URL/v2/media?filename=sample90.mp4" \
         -H "Content-Type: video/mp4" -H "x-content-sha256: $SHA" \
         -H "Cookie: <staging session cookie>" --data-binary @sample90.mp4 -o /dev/null -w '%{http_code}\n'
- 3. Role note: do NOT send a role param for this upload. POST /v2/media with raw
-    bytes only accepts role=user_photo (binds the upload to a user); any other
-    role is 400 "Direct upload binding only supports user_photo; use POST
-    /v2/attachments". Omitting role stores an unbound media object.
- 4. Terminal B, 300 MB multipart (/v2/media/uploads): create the session, PUT each
-    presigned part directly to R2, then POST .../complete. The walkthrough media
-    chapter or the frontend uploader does this; record the complete call only,
-    parts bypass the Worker.
- 5. Stop the tail. wrangler pretty-prints each event over many lines, so the file
+      Require 201. Role note: do NOT send a role param for this upload. POST /v2/media
+      with raw bytes only accepts role=user_photo (binds the upload to a user); any
+      other role is 400 "Direct upload binding only supports user_photo; use POST
+      /v2/attachments". Omitting role stores an unbound media object.
+ 3. Terminal B, 300 MB direct multipart upload (/v2/media/uploads). The helper runs
+    the whole flow, requires 2xx on every call, and never prints secrets
+    (credentials come from the environment only):
+      STAGING_URL=... WT_SUPER_IDENTIFIER=... WT_SUPER_PASSWORD=... \
+        npx tsx scripts/staging/upload-large.ts --file sample300.mp4
+    (--dry-run prints the plan with no network call and no credentials needed.
+    Use a real ~300 MB mp4/webm sample: complete sniffs the first 8 KiB, so random
+    bytes are rejected.) The flow it performs, also doable by hand with curl:
+      a. POST $STAGING_URL/v2/media/uploads with the session cookie and JSON
+         {filename, contentType, size, sha256, partSha256: [one hex SHA-256 per
+         16 MiB part]} -> require 201 {data: {id, mode, partSize, partCount,
+         parts: [{partNumber, method: PUT, url, headers, size}]}}. A 501 means the
+         Workers profile lacks the bucket-scoped R2 S3 credentials (R2_ACCOUNT_ID,
+         R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME).
+      b. PUT each parts[] target with EXACTLY its returned headers and that slice's
+         bytes; require 2xx for every part; collect each response ETag. Presigned
+         R2 URLs are credential-free (headers empty, send no cookie); mode:api
+         targets take the session cookie plus the returned x-amz-checksum-sha256.
+         In presigned mode the parts bypass the Worker.
+      c. POST $STAGING_URL/v2/media/uploads/<id>/complete with the session cookie
+         and JSON {parts: [{partNumber, etag}]} -> require 201. The helper then
+         DELETEs /v2/media/<fileId> (require 204) so staging keeps no measurement
+         object.
+ 4. Stop the tail. wrangler pretty-prints each event over many lines, so the file
     is concatenated JSON objects, not JSON Lines (line-based jq fails). Parse it
     with the balanced-brace reader (prints method, url, outcome, cpuTime, wallTime):
       node scripts/staging/parse-tail.mjs cpu-tail.json
- 6. Record in the go/no-go sheet: route, size, cpuTime (ms), outcome. Pass: every
-    upload invocation (POST /v2/media, /uploads, /complete) stays under the Free
-    10 ms budget with no error 1102. Any 1102 is a NO-GO on Free (see runbook).
+ 5. Record in the go/no-go sheet: route, size, cpuTime (ms), wallTime (ms), outcome.
+    Pass: every upload invocation — POST /v2/media (90 MB raw), POST /v2/media/uploads
+    (create) AND POST .../complete (300 MB multipart) — stays under the Free 10 ms
+    budget with no error 1102. Any 1102 is a NO-GO on Free (see runbook).
 EOF
 }
 
@@ -103,6 +125,25 @@ else
   echo "+ curl GET and HEAD $BASE/dev/seed (expect 404)"
 fi
 
+# UTC day of the last successful import commit in a walkthrough results.json
+# (the step's `at` timestamp); empty when no such step or timestamp exists.
+import_commit_day() {
+  node -e '
+    try {
+      const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      const commits = (r.steps ?? []).filter((s) =>
+        s.outcome === "pass" && s.method === "POST" &&
+        /^\/v2\/imports\/[^/]+\/commit$/.test(s.path ?? "") &&
+        (s.status === 200 || s.status === 201) && typeof s.at === "string");
+      const last = commits[commits.length - 1];
+      if (last) {
+        const t = Date.parse(last.at);
+        if (!Number.isNaN(t)) console.log(new Date(t).toISOString().slice(0, 10));
+      }
+    } catch {}
+  ' "$1"
+}
+
 MARK_DIR="$REPO_ROOT/walkthrough-out"; MARK="$MARK_DIR/.staging-import-utc-day-$(printf '%s' "$BASE" | sha256sum | cut -c1-12)"; TODAY="$(date -u +%F)"
 WT_MSG="walkthrough already ran today (UTC $TODAY): D1 allows one committed import per UTC day. Rerun after 00:00 UTC, or use --skip-walkthrough."
 if [ "$SKIP_WT" = 1 ]; then
@@ -112,16 +153,25 @@ elif [ "$APPLY" = 1 ] && [ -f "$MARK" ] && [ "$(cat "$MARK")" = "$TODAY" ]; then
 else
   # Credentials are needed only here: the walkthrough actually runs.
   if [ "$APPLY" = 1 ]; then need_env WT_SUPER_IDENTIFIER WT_SUPER_PASSWORD; fi
+  WT_OUT="walkthrough-out/staging-$(date -u +%Y%m%dT%H%M%SZ)"
+  # Captured just before the run: the marker's fallback day (see below).
+  WT_START_DAY="$(date -u +%F)"
   WT_RC=0
   (cd "$REPO_ROOT" && run npm run walkthrough -- --base-url "$BASE" --community "$COMMUNITY" --d1 \
-    --super-credentials-env --allow-destructive --out "walkthrough-out/staging-$(date -u +%Y%m%dT%H%M%SZ)") || WT_RC=$?
+    --super-credentials-env --allow-destructive --out "$WT_OUT") || WT_RC=$?
   if [ "$WT_RC" != 0 ]; then
     info "hint: if another run already committed an import today (UTC $TODAY), the import steps fail by design; read summary.md, and rerun after 00:00 UTC or with --skip-walkthrough"
     die "walkthrough failed (exit $WT_RC)"
   else
-    # Recompute the UTC day: a long walkthrough may have crossed midnight, and
-    # the marker must record the day the import actually committed.
-    if [ "$APPLY" = 1 ]; then mkdir -p "$MARK_DIR"; date -u +%F > "$MARK"; fi
+    # The marker records the UTC day the import COMMITTED, never the end time:
+    # a walkthrough that crosses midnight must not move the marker to the new
+    # day when the commit happened before midnight. Prefer the commit step's
+    # timestamp from results.json; fall back to the walkthrough's start day.
+    if [ "$APPLY" = 1 ]; then
+      mkdir -p "$MARK_DIR"
+      IMPORT_DAY="$(import_commit_day "$REPO_ROOT/$WT_OUT/results.json")"
+      printf '%s\n' "${IMPORT_DAY:-$WT_START_DAY}" > "$MARK"
+    fi
     info "go/no-go needs summary.md to show PASS with every interaction row covered (89/89)"
   fi
 fi

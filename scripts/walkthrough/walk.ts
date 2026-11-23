@@ -54,6 +54,8 @@ export interface StepRecord {
   deferred?: boolean;
   error?: string;
   ms: number;
+  /** ISO timestamp of the response (or the skip): when the step happened. */
+  at: string;
 }
 
 export class StepError extends Error {}
@@ -190,6 +192,7 @@ export class Walk {
       authFailure: spec.authFailure === true,
       ui: [],
       ms: 0,
+      at: new Date().toISOString(),
     };
     if (spec.authFailure && this.options.authSpacingMs) {
       const wait =
@@ -226,6 +229,9 @@ export class Walk {
     }
     if (spec.authFailure) this.lastAuthFailure = Date.now();
     record.ms = Date.now() - started;
+    // When the response arrived: e.g. the UTC day an import commit happened
+    // (smoke.sh reads this to place its daily-import marker).
+    record.at = new Date().toISOString();
     if (failure) {
       record.outcome = 'fail';
       record.error = this.redact(failure);
@@ -288,6 +294,7 @@ export class Walk {
       note: reason,
       deferred,
       ms: 0,
+      at: new Date().toISOString(),
     };
     this.records.push(record);
     this.console(`${label} SKIPPED ${text}: ${reason}`);

@@ -16,14 +16,26 @@ services:
       - uploads_data:/app/uploads
     environment:
       - NODE_ENV=production
+      # V2 (Hono) runtime gate: fails closed on a missing/placeholder value.
+      - HONO_HOST=0.0.0.0
+      - HONO_PORT=3001
+      - HONO_STORAGE_ROOT=/app/uploads
+      - HONO_PUBLIC_ORIGIN=${HONO_PUBLIC_ORIGIN:?HONO_PUBLIC_ORIGIN is required}
+      - HONO_CORS_ORIGINS=${HONO_CORS_ORIGINS:-}
+      - AUTH_SERVER_SECRET=${AUTH_SERVER_SECRET:?AUTH_SERVER_SECRET is required}
+      - BOOTSTRAP_SECRET=${BOOTSTRAP_SECRET:?BOOTSTRAP_SECRET is required}
+      # nginx overwrites X-Forwarded-For/X-Real-IP; trust it for per-IP throttles.
+      - TRUSTED_PROXY=true
+      - TRUSTED_PROXY_HEADER=x-real-ip
+      # Shared legacy config loader (src/shared/config) still requires these.
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
       - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET is required}
       - LOG_LEVEL=warn
       - HOT_RELOAD=false
       # Use PostgreSQL for production
       - DATABASE_URL=${DATABASE_URL_PROD:-postgresql://terrastories:${POSTGRES_PASSWORD}@db:5432/terrastories}
-    # Remove debug port (security)
-    ports: []
+    # Remove published ports (security); nginx reaches the API on the internal network
+    ports: !reset []
     # Resource limits for stability
     deploy:
       resources:
@@ -46,16 +58,17 @@ services:
           '--no-verbose',
           '--tries=1',
           '--spider',
-          'http://127.0.0.1:3000${HEALTH_CHECK_ENDPOINT:-/health}',
+          'http://127.0.0.1:3001${HEALTH_CHECK_ENDPOINT:-/health}',
         ]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
     restart: unless-stopped
-    # Fail closed until #135 supplies tested PostgreSQL migration parity. The compiled
-    # migrator currently refuses PostgreSQL without its dialect-specific journal.
-    command: ['sh', '-c', 'node dist/db/migrate.js && exec node dist/server.js']
+    # Apply the PostgreSQL migration history (fails closed without its journal),
+    # then start the V2 Hono server. Legacy Fastify (dist/server.js) is not started.
+    command:
+      ['sh', '-c', 'node dist/db/migrate.js && exec node dist/hono-server.js']
 
   # =============================================================================
   # DATABASE SERVICE - Production Configuration
@@ -115,7 +128,7 @@ services:
       - NGINX_ENVSUBST_TEMPLATE_DIR=/etc/nginx/templates
       - NGINX_ENVSUBST_TEMPLATE_SUFFIX=.template
       - API_HOST=api
-      - API_PORT=3000
+      - API_PORT=3001
       - TILE_SERVER_HOST=tileserver
       - TILE_SERVER_PORT=8080
     depends_on:

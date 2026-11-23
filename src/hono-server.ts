@@ -78,7 +78,9 @@ const app = createHonoApp({
 });
 const server = serve({
   fetch: app.fetch,
-  hostname: '127.0.0.1',
+  // Loopback by default; container images set HONO_HOST=0.0.0.0 so a published
+  // port or a reverse-proxy sidecar can reach the listener.
+  hostname: process.env.HONO_HOST?.trim() || '127.0.0.1',
   port: runtimeConfig.port,
 });
 

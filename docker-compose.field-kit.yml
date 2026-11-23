@@ -13,6 +13,20 @@ services:
       target: production
     environment:
       - NODE_ENV=field-kit
+      # V2 (Hono) runtime gate. field-kit mode requires https unless the
+      # trusted-LAN plain-HTTP exception is opted into (SPEC-V2 Section 7).
+      - HONO_HOST=0.0.0.0
+      - HONO_PORT=3001
+      - HONO_STORAGE_ROOT=/app/uploads
+      - HONO_PUBLIC_ORIGIN=${HONO_PUBLIC_ORIGIN:?HONO_PUBLIC_ORIGIN is required}
+      - HONO_CORS_ORIGINS=${HONO_CORS_ORIGINS:-}
+      - HONO_ALLOW_PLAIN_HTTP=${HONO_ALLOW_PLAIN_HTTP:-false}
+      - AUTH_SERVER_SECRET=${AUTH_SERVER_SECRET:?AUTH_SERVER_SECRET is required}
+      - BOOTSTRAP_SECRET=${BOOTSTRAP_SECRET:?BOOTSTRAP_SECRET is required}
+      # nginx overwrites X-Forwarded-For/X-Real-IP; trust it for per-IP throttles.
+      - TRUSTED_PROXY=true
+      - TRUSTED_PROXY_HEADER=x-real-ip
+      # Shared legacy config loader (src/shared/config) still requires these.
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
       - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET is required}
       - LOG_LEVEL=warn
@@ -25,9 +39,10 @@ services:
       # Disable remote sync endpoint for offline
       - SYNC_ENDPOINT=
       # Use SQLite for simplicity in field deployment
-      - DATABASE_URL=./data/field-kit.db
-    ports:
-      - '3000:3000'
+      - DATABASE_URL=/app/data/field-kit.sqlite
+    # Replace (not append to) the base 3000 mapping; V2 listens on 3001.
+    ports: !override
+      - '3001:3001'
     # Resource constraints for low-power hardware
     deploy:
       resources:
@@ -51,7 +66,7 @@ services:
           '--no-verbose',
           '--tries=1',
           '--spider',
-          'http://127.0.0.1:3000/health',
+          'http://127.0.0.1:3001/health',
         ]
       interval: 60s
       timeout: 30s
@@ -131,7 +146,7 @@ services:
       - uploads_data:/usr/share/nginx/html/uploads:ro
     environment:
       - API_HOST=api
-      - API_PORT=3000
+      - API_PORT=3001
       - TILE_SERVER_HOST=tileserver
       - TILE_SERVER_PORT=8080
     depends_on:

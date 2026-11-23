@@ -88,6 +88,12 @@ RUN addgroup -g 1001 -S nodejs && \
 # Create app directory
 WORKDIR /app
 
+# V2 (Hono) runtime defaults. The listener binds all interfaces inside the container;
+# publish it only behind the reverse proxy or on a trusted network.
+ENV HONO_HOST=0.0.0.0 \
+    HONO_PORT=3001 \
+    HONO_STORAGE_ROOT=/app/uploads
+
 # Create uploads directory with proper permissions
 RUN mkdir -p uploads && chown -R terrastories:nodejs uploads
 
@@ -103,15 +109,18 @@ RUN mkdir -p data && chown -R terrastories:nodejs data
 # Switch to non-root user
 USER terrastories
 
-# Expose API port
-EXPOSE 3000
+# Expose V2 (Hono) API port
+EXPOSE 3001
 
-# Add health check
+# Add health check (V2 /health answers {"status":"ok"})
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:3000/health || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:3001/health || exit 1
 
 # Use dumb-init to handle signals properly
 ENTRYPOINT ["dumb-init", "--"]
 
-# Start production server directly; package managers are not present at runtime.
-CMD ["node", "dist/server.js"]
+# Apply the dialect-matched migrations, then start the V2 Hono server. The legacy
+# Fastify entrypoint (dist/server.js) is no longer the production command; it
+# remains in the image only for the development target and legacy test jobs.
+# Package managers are not present at runtime.
+CMD ["sh", "-c", "node dist/db/migrate.js && exec node dist/hono-server.js"]

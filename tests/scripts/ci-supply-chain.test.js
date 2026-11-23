@@ -103,10 +103,8 @@ describe('GitHub Actions supply-chain policy', () => {
     expect(docker).not.toMatch(/npm list[^\n]*\|\|\s*echo/);
     expect(docker).toContain('curl --fail --silent --show-error');
     expect(docker).toContain('docker inspect');
-    expect(docker).toContain('health.config.valid');
-    expect(docker).toContain('health.database.connected');
-    expect(supplyChain).toContain('health.config.valid');
-    expect(supplyChain).toContain('health.database.connected');
+    expect(docker).toContain('/v2/bootstrap');
+    expect(supplyChain).toContain('/v2/bootstrap');
   });
 
   it('declares Node 20.19.0 as the minimum runtime (require(esm) unflagged)', () => {
@@ -172,7 +170,7 @@ describe('GitHub Actions supply-chain policy', () => {
     expect(dockerfile).toContain('/usr/local/bin/npm');
     expect(productionCompose).not.toMatch(/\bnpm\b/);
     expect(productionCompose).toContain('node dist/db/migrate.js');
-    expect(productionCompose).toContain('exec node dist/server.js');
+    expect(productionCompose).toContain('exec node dist/hono-server.js');
     expect(dockerfile).toContain('/app/src/db/migrations');
     expect(dockerfile).toContain('./dist/db/migrations');
   });

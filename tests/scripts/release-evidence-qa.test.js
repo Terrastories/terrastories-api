@@ -45,7 +45,7 @@ describe('release artifact reproducibility', () => {
     const migrationRunner = readRepo('src/db/migrate.ts');
 
     expect(productionCompose).toContain('node dist/db/migrate.js');
-    expect(productionCompose).toContain('exec node dist/server.js');
+    expect(productionCompose).toContain('exec node dist/hono-server.js');
     // #161 (issue #135) added a separate PostgreSQL migration history. The
     // runner must use it and must still refuse to fall back to the
     // SQLite/D1 set when it is missing.

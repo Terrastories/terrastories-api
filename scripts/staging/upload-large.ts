@@ -656,8 +656,8 @@ export async function provisionThrowaway(
   const slug = `stg-upload-${randomBytes(4).toString('hex')}`;
   options.log?.(`creating community ${slug}`);
   options.onSlug?.(slug);
-  // Definitive rejection (any 4xx): the community is not ours, nothing to
-  // to report. Ambiguous (fetch error, 5xx, unreadable JSON, invalid 2xx
+  // Definitive rejection (any 4xx except 408/499): the community is not
+  // ours, nothing to report. 408/499 (edge or client timeouts) are ambiguous. Ambiguous (fetch error, 5xx, unreadable JSON, invalid 2xx
   // body): the row may exist, so the caller reports the slug to disable.
   const createStep = async (): Promise<{ id: number }> => {
     let res: Response;
@@ -1036,11 +1036,13 @@ export async function main(
   process.stdout.write(lines.join('\n') + '\n');
   if (res.error) process.stderr.write(res.error + '\n');
   if (res.manualDisableSlug) {
+    // Single-quoted for POSIX shells, so the line can be pasted as-is.
+    const q = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
     const allow = env.STAGING_ALLOW_HOST
-      ? ` STAGING_ALLOW_HOST=${env.STAGING_ALLOW_HOST}`
+      ? ` STAGING_ALLOW_HOST=${q(env.STAGING_ALLOW_HOST)}`
       : '';
     process.stderr.write(
-      `STAGING_URL=${baseUrl}${allow} npx tsx scripts/staging/upload-large.ts --disable-community ${res.manualDisableSlug}${local ? ' --local' : ''}\n`
+      `STAGING_URL=${q(baseUrl)}${allow} npx tsx scripts/staging/upload-large.ts --disable-community ${res.manualDisableSlug}${local ? ' --local' : ''}\n`
     );
   }
   return res.error || !res.communityDisabled ? 1 : 0;

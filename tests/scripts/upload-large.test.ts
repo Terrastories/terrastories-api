@@ -1006,7 +1006,7 @@ describe('uploadViaThrowawayCommunity (fake fetch)', () => {
         const r = await runCli(o);
         expect(r.code).toBe(1);
         expect(r.cmds).toEqual([
-          `STAGING_URL=${BASE} npx tsx scripts/staging/upload-large.ts --disable-community ${r.slug}`,
+          `STAGING_URL='${BASE}' npx tsx scripts/staging/upload-large.ts --disable-community ${r.slug}`,
         ]);
         vi.restoreAllMocks();
         vi.unstubAllGlobals();
@@ -1018,7 +1018,7 @@ describe('uploadViaThrowawayCommunity (fake fetch)', () => {
         STAGING_ALLOW_HOST: 'staging.example.test',
       });
       expect(r.cmds).toEqual([
-        `STAGING_URL=http://127.0.0.1:8787 STAGING_ALLOW_HOST=staging.example.test npx tsx scripts/staging/upload-large.ts --disable-community ${r.slug} --local`,
+        `STAGING_URL='http://127.0.0.1:8787' STAGING_ALLOW_HOST='staging.example.test' npx tsx scripts/staging/upload-large.ts --disable-community ${r.slug} --local`,
       ]);
     });
 
@@ -1360,7 +1360,7 @@ describe('--disable-community and the manual-disable line', () => {
         .filter((l) => l.includes('--disable-community'));
       if (name === 'ambiguous') {
         expect(cmds).toEqual([
-          `STAGING_URL=${BASE} npx tsx scripts/staging/upload-large.ts --disable-community ${slug}`,
+          `STAGING_URL='${BASE}' npx tsx scripts/staging/upload-large.ts --disable-community ${slug}`,
         ]);
       } else {
         expect(cmds).toEqual([]);

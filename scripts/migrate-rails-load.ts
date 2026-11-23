@@ -30,15 +30,22 @@ export function usage(): string {
     'd1            --sql-out <new-dir> [--max-file-bytes <n>]',
     '              Writes a data-only SQL dump in foreign-key order (statements',
     '              under the D1 100 KB limit, files chunked), a sequences file,',
-    '              d1-import.json and r2-upload-manifest.json. Apply the V2',
-    '              migrations to D1 first, then run each file with',
+    '              d1-import.json and r2-upload-manifest.json. The first file',
+    '              asserts the target is empty; every file records itself in',
+    '              _rails_migration_load; verify.sql checks counts and',
+    '              sequences; wipe-and-retry.sql resets a partial import.',
+    '              Apply the V2 migrations to D1 first, then run each file with',
     '              "wrangler d1 execute <db> --remote --file <file>".',
     'r2            --bucket <name> [--endpoint <url>] [--concurrency <n>]',
-    '              Uploads each object over the S3-compatible API and verifies',
+    '              Streams each object over the S3-compatible API (multipart above',
+    '              100 MiB, bounded retries on 5xx/429/network errors) and verifies',
     '              it by HEAD (size and SHA-256 metadata). Credentials come only',
     '              from R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ACCOUNT_ID.',
     '',
-    '--dry-run prints counts only and writes or uploads nothing.',
+    '--dry-run prints counts only and writes or uploads nothing. For d1 it also',
+    'estimates rows written (rows plus index entries) against the Workers Free',
+    'budget of 100,000 per day; a real run refuses above it unless',
+    '--allow-over-budget is given.',
     '',
   ].join('\n');
 }
@@ -58,11 +65,16 @@ const VALUE_FLAGS = new Set([
 export function parseArgs(argv: string[]): ParsedLoadArgs {
   const values: Record<string, string> = {};
   let dryRun = false;
+  let allowOverBudget = false;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index] ?? '';
     if (argument === '--help' || argument === '-h') return { help: true };
     if (argument === '--dry-run') {
       dryRun = true;
+      continue;
+    }
+    if (argument === '--allow-over-budget') {
+      allowOverBudget = true;
       continue;
     }
     if (!VALUE_FLAGS.has(argument)) {
@@ -94,6 +106,7 @@ export function parseArgs(argv: string[]): ParsedLoadArgs {
     target: target as LoadTarget,
     dryRun,
   };
+  if (allowOverBudget) result.allowOverBudget = true;
   if (values['--data-dir'] !== undefined) result.dataDir = values['--data-dir'];
   if (values['--storage-root'] !== undefined) {
     result.storageRoot = values['--storage-root'];
@@ -123,6 +136,9 @@ async function main(): Promise<void> {
     .filter(([, value]) => typeof value === 'number')
     .map(([key, value]) => key + '=' + String(value))
     .join(' ');
+  for (const warning of report.warnings ?? []) {
+    process.stderr.write('WARNING: ' + warning + '\n');
+  }
   process.stdout.write(
     'Rails load ' +
       (report.dryRun ? '(dry run) ' : '') +
@@ -132,6 +148,11 @@ async function main(): Promise<void> {
       counts +
       '\n'
   );
+  if (!report.dryRun) {
+    for (const line of report.instructions ?? []) {
+      process.stdout.write('  ' + line + '\n');
+    }
+  }
 }
 
 if (

@@ -243,11 +243,25 @@ describeWithPostgres('Rails -> V2 load (stage 3)', () => {
       const names = (await readdir(sqlOut)).sort();
       expect(names).toContain('r2-upload-manifest.json');
       expect(names).toContain('d1-import.json');
+      expect(names).toContain('verify.sql');
+      expect(names).toContain('wipe-and-retry.sql');
       const index = JSON.parse(
         await readFile(join(sqlOut, 'd1-import.json'), 'utf8')
-      ) as { files: string[] };
+      ) as { files: string[]; sequencesFileRequired: boolean };
       expect(index.files).toEqual(
-        names.filter((n) => n.endsWith('.sql')).sort()
+        names
+          .filter(
+            (n) =>
+              n.endsWith('.sql') &&
+              n !== 'verify.sql' &&
+              n !== 'wipe-and-retry.sql'
+          )
+          .sort()
+      );
+      expect(index.files[0]).toBe('0000-preflight.sql');
+      expect(index.sequencesFileRequired).toBe(true);
+      expect(index.files.some((n) => n.endsWith('-sqlite-sequence.sql'))).toBe(
+        true
       );
 
       const rebuilt = new Database(':memory:');
@@ -287,6 +301,22 @@ describeWithPostgres('Rails -> V2 load (stage 3)', () => {
       const seq = (db: Database.Database): unknown =>
         db.prepare('SELECT name, seq FROM sqlite_sequence ORDER BY name').all();
       expect(seq(rebuilt)).toEqual(seq(original));
+      // every file recorded itself, and the post-import verification passes
+      expect(
+        (
+          rebuilt
+            .prepare('SELECT file FROM _rails_migration_load ORDER BY file')
+            .all() as Array<{ file: string }>
+        ).map((r) => r.file)
+      ).toEqual([...index.files].sort());
+      const verifySql = await readFile(join(sqlOut, 'verify.sql'), 'utf8');
+      rebuilt.exec(verifySql);
+      // a sequence below its floor makes verification fail
+      rebuilt.exec(
+        "UPDATE sqlite_sequence SET seq = 0 WHERE name = 'attachments'"
+      );
+      expect(() => rebuilt.exec(verifySql)).toThrow(/CHECK constraint/);
+      rebuilt.exec('DROP TABLE IF EXISTS _rails_verify');
       original.close();
       rebuilt.close();
 
@@ -297,6 +327,94 @@ describeWithPostgres('Rails -> V2 load (stage 3)', () => {
       expect(r2.objects.every((o) => o.key.startsWith('communities/'))).toBe(
         true
       );
+    });
+
+    it('refuses a non-empty target, and a partial re-apply is recovered by wipe-and-retry', async () => {
+      const sqlOut = next('d1');
+      await loadTransformOutput({
+        transformDir: outDir,
+        target: 'd1',
+        sqlOut,
+        maxFileBytes: 4000,
+      });
+      const index = JSON.parse(
+        await readFile(join(sqlOut, 'd1-import.json'), 'utf8')
+      ) as { files: string[] };
+      const read = (name: string): Promise<string> =>
+        readFile(join(sqlOut, name), 'utf8');
+      const preflight = await read(index.files[0]!);
+      const firstData = await read(index.files[1]!);
+      const verify = await read('verify.sql');
+      const target = new Database(':memory:');
+      target.pragma('foreign_keys = ON');
+      migrate(drizzle(target), { migrationsFolder });
+
+      // preflight on an empty target passes and records itself
+      target.exec(preflight);
+      // partial apply; a naive re-run is refused (ledger and tables not empty)
+      target.exec(firstData);
+      expect(() => target.exec(preflight)).toThrow(/CHECK constraint/);
+      expect(() => target.exec(firstData)).toThrow();
+      expect(
+        (
+          target
+            .prepare('SELECT file FROM _rails_migration_load ORDER BY file')
+            .all() as Array<{ file: string }>
+        ).map((r) => r.file)
+      ).toEqual(index.files.slice(0, 2));
+      // verification of a partial import fails
+      expect(() => target.exec(verify)).toThrow(/CHECK constraint/);
+
+      // wipe-and-retry restores a clean target; the full run then verifies
+      target.exec(await read('wipe-and-retry.sql'));
+      expect(
+        target
+          .prepare(
+            "SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE '\\_rails\\_%' ESCAPE '\\'"
+          )
+          .get()
+      ).toEqual({ n: 0 });
+      for (const name of index.files) target.exec(await read(name));
+      target.exec(verify);
+      target.close();
+    });
+
+    it('estimates rows written and refuses above the budget unless allowed', async () => {
+      const dry = await loadTransformOutput({
+        transformDir: outDir,
+        target: 'd1',
+        sqlOut: next('d1'),
+        dryRun: true,
+      });
+      expect(dry.estimatedRowsWritten).toBeGreaterThan(dry.rows!);
+      expect(dry.warnings).toEqual([]);
+      const overDry = await loadTransformOutput({
+        transformDir: outDir,
+        target: 'd1',
+        sqlOut: next('d1'),
+        dryRun: true,
+        rowBudget: 10,
+      });
+      expect(overDry.warnings![0]).toMatch(/exceed the Workers Free budget/);
+      const sqlOut = next('d1');
+      await expect(
+        loadTransformOutput({
+          transformDir: outDir,
+          target: 'd1',
+          sqlOut,
+          rowBudget: 10,
+        })
+      ).rejects.toThrow(/--allow-over-budget/);
+      await expect(stat(sqlOut)).rejects.toThrow();
+      const allowed = await loadTransformOutput({
+        transformDir: outDir,
+        target: 'd1',
+        sqlOut,
+        rowBudget: 10,
+        allowOverBudget: true,
+      });
+      expect(allowed.sqlFiles).toBeGreaterThan(2);
+      expect(allowed.instructions!.join(' ')).toContain('wipe-and-retry.sql');
     });
 
     it('refuses an existing output directory and a dry run writes nothing', async () => {

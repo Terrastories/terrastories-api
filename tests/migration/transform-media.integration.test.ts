@@ -69,6 +69,21 @@ const EXTRA_BLOBS = [
     name: 'unattached-media.svg',
     body: '<svg>media row without attachment</svg>',
   },
+  // Not accepted by the runtime upload allowlist / role rule: archived.
+  {
+    id: 123,
+    key: 'extrasvgblob',
+    name: 'speaker-vector.svg',
+    body: '<svg>vector photo</svg>',
+    type: 'image/svg+xml',
+  },
+  {
+    id: 124,
+    key: 'extraaudiopic',
+    name: 'speaker-audio.ogg',
+    body: 'OggS fake audio as a photo',
+    type: 'audio/ogg',
+  },
 ] as const;
 
 interface Run {
@@ -116,7 +131,7 @@ describeWithPostgres('Rails -> V2 media stage (S3)', () => {
             blob.id,
             blob.key,
             blob.name,
-            'image/svg+xml',
+            'type' in blob ? blob.type : 'image/png',
             '{"identified":true}',
             Buffer.byteLength(blob.body),
             md5b64(blob.body),
@@ -135,7 +150,10 @@ describeWithPostgres('Rails -> V2 media stage (S3)', () => {
           // null-community super_admin profile photo
           "(141, 'photo', 'User', 24, 121, '2020-11-02 00:00:00')," +
           // same blob, same community, second relation: one shared file
-          "(142, 'photo', 'Place', 51, 107, '2020-11-02 00:00:00')"
+          "(142, 'photo', 'Place', 51, 107, '2020-11-02 00:00:00')," +
+          // runtime would reject: svg is not allowlisted; audio on a photo role
+          "(143, 'photo', 'Speaker', 41, 123, '2020-11-02 00:00:00')," +
+          "(144, 'photo', 'Speaker', 42, 124, '2020-11-02 00:00:00')"
       );
       await captureRailsToBundle({
         sourceUrl: dbUrl,
@@ -156,6 +174,50 @@ describeWithPostgres('Rails -> V2 media stage (S3)', () => {
       db.close();
     }
   };
+
+  it('archives attachments the runtime upload rules would reject, with a warning', () => {
+    const ids = rows(full, 'SELECT id FROM attachments WHERE id IN (143, 144)');
+    expect(ids).toEqual([]);
+    const archive = new Database(join(full.dir, 'legacy-archive.sqlite'), {
+      readonly: true,
+    });
+    try {
+      expect(
+        archive
+          .prepare(
+            "SELECT source_id, reason FROM archived_rows WHERE table_name = 'active_storage_attachments' AND source_id IN ('143','144') ORDER BY source_id"
+          )
+          .all()
+      ).toEqual([
+        { source_id: '143', reason: 'media_type_not_allowed' },
+        { source_id: '144', reason: 'media_type_not_allowed' },
+      ]);
+    } finally {
+      archive.close();
+    }
+    const warnings = full.manifest.warnings as Array<{
+      code: string;
+      id: string | null;
+    }>;
+    const flagged = warnings
+      .filter((w) => w.code === 'attachment_media_type_not_allowed_archived')
+      .map((w) => w.id)
+      .sort();
+    expect(flagged).toEqual(['143', '144']);
+    const ledger = full.manifest.media.blobs.filter((b) =>
+      ['123', '124'].includes(b.blobId)
+    );
+    expect(ledger.map((b) => [b.disposition, b.archiveReason])).toEqual([
+      ['archive', 'no_accepted_attachment'],
+      ['archive', 'no_accepted_attachment'],
+    ]);
+    expect(
+      rows(
+        full,
+        "SELECT COUNT(*) AS n FROM files WHERE mime_type = 'image/svg+xml'"
+      )
+    ).toEqual([{ n: 0 }]);
+  });
 
   it('maps every Rails attachment role to a V2 owner type, owner id, role and ordinal', () => {
     const attachments = rows(
@@ -278,7 +340,7 @@ describeWithPostgres('Rails -> V2 media stage (S3)', () => {
     }
     const story = files.find((f) => f.original_name === 'story-media.svg')!;
     expect(story).toMatchObject({
-      mime_type: 'image/svg+xml',
+      mime_type: 'image/png',
       community_id: 10,
       metadata: '{"identified":true}',
     });
@@ -364,7 +426,14 @@ describeWithPostgres('Rails -> V2 media stage (S3)', () => {
     // archived objects are never in the runtime media tree
     const keys = await readdir(join(full.dir, 'archive-media'));
     expect(keys.sort()).toEqual(
-      ['extranoattach', 'orphanblob01', 'previewimg01', 'variantblob1'].sort()
+      [
+        'extraaudiopic',
+        'extranoattach',
+        'extrasvgblob',
+        'orphanblob01',
+        'previewimg01',
+        'variantblob1',
+      ].sort()
     );
     const archive = new Database(join(full.dir, 'legacy-archive.sqlite'), {
       readonly: true,

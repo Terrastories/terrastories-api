@@ -23,6 +23,11 @@ import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fsyncPath } from '../rails/fsync.js';
 import type { VerifiedBundle, SourceRow } from './bundle-reader.js';
+import {
+  ATTACHMENT_ROLE_ALLOWED_CATEGORIES,
+  MEDIA_MIME_RULES,
+  normalizeMediaMimeType,
+} from '../../shared/schemas/media-v2.js';
 import { classifyAttachment } from './dispositions.js';
 import {
   parseTimestamp,
@@ -290,6 +295,32 @@ export function planMedia(
           ')'
       );
     }
+    // Same allowlist and role/category rule the runtime upload path enforces
+    // (MEDIA_MIME_RULES, ATTACHMENT_ROLE_ALLOWED_CATEGORIES): an attachment
+    // the runtime would reject is archived with a warning, never imported.
+    if (blobRows.has(blobId)) {
+      const rule =
+        MEDIA_MIME_RULES[
+          normalizeMediaMimeType(blobRows.get(blobId)?.content_type ?? '')
+        ];
+      const allowed: readonly string[] =
+        ATTACHMENT_ROLE_ALLOWED_CATEGORIES[classification.role];
+      if (rule === undefined || !allowed.includes(rule.category)) {
+        finalStatus.active_storage_attachments.set(id, 'archived');
+        archivedRows.push({
+          table: 'active_storage_attachments',
+          id,
+          reason: 'media_type_not_allowed',
+          row,
+        });
+        warn(
+          'attachment_media_type_not_allowed_archived',
+          'active_storage_attachments',
+          id
+        );
+        continue;
+      }
+    }
     canonicalAttachments.push({
       attachmentId: id,
       blobId,
@@ -384,7 +415,7 @@ export function planMedia(
       event('TRANSFORM_DEFAULT:files.original_name');
       warn('blob_filename_missing_defaulted', 'active_storage_blobs', blob.id);
     }
-    let mimeType = (row.content_type ?? '').trim();
+    let mimeType = normalizeMediaMimeType(row.content_type ?? '');
     if (mimeType === '') {
       mimeType = 'application/octet-stream';
       event('TRANSFORM_DEFAULT:files.mime_type');
@@ -693,8 +724,9 @@ export function planMedia(
       );
     }
   }
+  const ledgerByBlob = new Map(ledger.map((entry) => [entry.blobId, entry]));
   for (const blob of pendingBlobs) {
-    const entry = ledger.find((e) => e.blobId === blob.id);
+    const entry = ledgerByBlob.get(blob.id);
     if (!entry || entry.disposition === 'not_selected') {
       throw new Error(
         'Media ledger lost a pending blob (blob id ' + blob.id + ')'

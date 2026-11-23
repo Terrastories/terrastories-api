@@ -5,7 +5,11 @@ on:
     branches: [main]
     paths:
       - 'src/migration/rails/**'
+      - 'src/migration/v2/**'
       - 'scripts/migrate-rails.ts'
+      - 'scripts/migrate-rails-transform.ts'
+      - 'scripts/migrate-rails-load.ts'
+      - 'src/shared/schemas/media-v2.ts'
       - 'scripts/fixtures/gen-rails-fixture.ts'
       - 'tests/migration/**'
       - 'tests/fixtures/rails/**'
@@ -15,7 +19,11 @@ on:
     branches: [main]
     paths:
       - 'src/migration/rails/**'
+      - 'src/migration/v2/**'
       - 'scripts/migrate-rails.ts'
+      - 'scripts/migrate-rails-transform.ts'
+      - 'scripts/migrate-rails-load.ts'
+      - 'src/shared/schemas/media-v2.ts'
       - 'scripts/fixtures/gen-rails-fixture.ts'
       - 'tests/migration/**'
       - 'tests/fixtures/rails/**'

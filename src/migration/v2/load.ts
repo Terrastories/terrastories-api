@@ -14,6 +14,7 @@
  * reports contain counts only.
  */
 import { createHash, createHmac } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import {
   copyFile,
   mkdir,
@@ -24,10 +25,13 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
+import { Readable } from 'node:stream';
 import Database from 'better-sqlite3';
 import { fsyncPath } from '../rails/fsync.js';
 import { sha256OfFile, MEDIA_DIRECTORY } from './media.js';
 import { V2_DATABASE_FILENAME, type TransformManifest } from './transform.js';
+
+type BodyInit = NonNullable<RequestInit['body']>;
 
 export type LoadTarget = 'node-sqlite' | 'd1' | 'r2';
 
@@ -49,6 +53,18 @@ export interface LoadOptions {
   endpoint?: string;
   /** r2: parallel uploads (default 4). */
   concurrency?: number;
+  /** r2: objects larger than this use multipart upload (default 100 MiB). */
+  multipartThresholdBytes?: number;
+  /** r2: multipart part size (default 64 MiB; raised to stay under 10000 parts). */
+  partSizeBytes?: number;
+  /** r2: retry policy for 5xx, 429 and network errors (per request). */
+  retry?: { maxAttempts?: number; baseDelayMs?: number };
+  /** Test seam replacing the backoff sleep. */
+  sleepImpl?: (ms: number) => Promise<void>;
+  /** d1: proceed although the estimated rows written exceed the Free daily budget. */
+  allowOverBudget?: boolean;
+  /** Test seam: rows-written budget (default D1_FREE_DAILY_ROWS_WRITTEN). */
+  rowBudget?: number;
   /** Environment source for R2 credentials (default process.env). */
   env?: Record<string, string | undefined>;
   /** Test seam replacing fetch. */
@@ -65,6 +81,15 @@ export interface LoadReport {
   sqlFiles?: number;
   uploaded?: number;
   alreadyPresent?: number;
+  /** r2: objects sent through multipart upload. */
+  multipart?: number;
+  /** r2: highest number of request body bytes in flight at once. */
+  peakBytesInFlight?: number;
+  /** d1: rows written estimate (rows plus index entries plus ledger). */
+  estimatedRowsWritten?: number;
+  /** Human-readable next steps and warnings; never contain secrets. */
+  instructions?: string[];
+  warnings?: string[];
 }
 
 export interface MediaObject {
@@ -78,6 +103,12 @@ export interface MediaObject {
 /** D1 rejects statements over 100,000 bytes; stay below it. */
 export const D1_MAX_STATEMENT_BYTES = 90_000;
 const D1_DEFAULT_FILE_BYTES = 1024 * 1024;
+/** Workers Free plan: 100,000 D1 rows written per day. */
+export const D1_FREE_DAILY_ROWS_WRITTEN = 100_000;
+export const D1_LEDGER_TABLE = '_rails_migration_load';
+export const R2_MULTIPART_THRESHOLD_BYTES = 100 * 1024 * 1024;
+export const R2_PART_SIZE_BYTES = 64 * 1024 * 1024;
+const R2_MAX_PARTS = 10_000;
 
 async function readManifest(dir: string): Promise<TransformManifest> {
   let text: string;
@@ -168,18 +199,36 @@ export async function verifyTransformOutput(
 
 // ---- node-sqlite ------------------------------------------------------------
 
+/**
+ * Copy through a "<destination>.loading" temporary, verify it, then rename.
+ * A stale temporary from an interrupted run is overwritten (only temporary
+ * files are ever replaced); a final path therefore never holds a partial
+ * object, and an existing final path is never overwritten.
+ */
 async function copyExclusive(
   source: string,
   destination: string,
   expected: { sha256: string; size: number }
 ): Promise<void> {
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
-  await copyFile(source, destination, 1 /* COPYFILE_EXCL */);
-  await fsyncPath(destination);
-  const written = await sha256OfFile(destination);
+  const temporary = destination + '.loading';
+  await copyFile(source, temporary);
+  await fsyncPath(temporary);
+  const written = await sha256OfFile(temporary);
   if (written.sha256 !== expected.sha256 || written.size !== expected.size) {
     throw new Error('A copied file failed SHA-256 verification');
   }
+  let occupied = false;
+  try {
+    await stat(destination);
+    occupied = true;
+  } catch {
+    // free
+  }
+  if (occupied) {
+    throw new Error('A different object already exists at a target key');
+  }
+  await rename(temporary, destination);
 }
 
 async function loadNodeSqlite(
@@ -242,9 +291,7 @@ async function loadNodeSqlite(
   // Database last: it never references a missing object.
   const source = join(dir, V2_DATABASE_FILENAME);
   const digest = await sha256OfFile(source);
-  const temporary = target + '.loading';
-  await copyExclusive(source, temporary, digest);
-  await rename(temporary, target);
+  await copyExclusive(source, target, digest);
   await fsyncPath(dataDir);
   return report;
 }
@@ -326,6 +373,68 @@ export function buildR2Manifest(objects: MediaObject[]): {
   };
 }
 
+const LEDGER_DDL =
+  'CREATE TABLE IF NOT EXISTS ' +
+  D1_LEDGER_TABLE +
+  ' (file TEXT PRIMARY KEY NOT NULL, sha256 TEXT NOT NULL, applied_at INTEGER NOT NULL);\n';
+
+function ledgerInsert(name: string, sha256: string): string {
+  return (
+    'INSERT INTO ' +
+    D1_LEDGER_TABLE +
+    ' (file, sha256, applied_at) VALUES (' +
+    sqlLiteral(name) +
+    ', ' +
+    sqlLiteral(sha256) +
+    ", CAST(strftime('%s', 'now') AS INTEGER) * 1000);\n"
+  );
+}
+
+/** One assertion row: the INSERT violates a CHECK (and the file aborts) when the test is false. */
+function assertion(table: string, name: string, test: string): string {
+  return (
+    'INSERT INTO ' +
+    table +
+    ' (check_name, ok) SELECT ' +
+    sqlLiteral(name) +
+    ', CASE WHEN ' +
+    test +
+    ' THEN 1 ELSE 0 END;\n'
+  );
+}
+
+const CHECK_TABLE_DDL = (table: string): string =>
+  'DROP TABLE IF EXISTS ' +
+  table +
+  ';\nCREATE TABLE ' +
+  table +
+  ' (check_name TEXT NOT NULL, ok INTEGER NOT NULL CHECK (ok = 1));\n';
+
+function loadD1Instructions(
+  files: string[],
+  verify: string,
+  wipe: string
+): string[] {
+  return [
+    'Apply the V2 migrations to the target D1 first, then run each of these files in order: wrangler d1 execute <database> --remote --file <file>. First file: ' +
+      (files[0] ?? '') +
+      '; last file: ' +
+      (files[files.length - 1] ?? '') +
+      '.',
+    'The first file refuses a target whose dump tables are not empty. Every file records itself as its last statement in ' +
+      D1_LEDGER_TABLE +
+      '; list applied files with: SELECT file FROM ' +
+      D1_LEDGER_TABLE +
+      ' ORDER BY file.',
+    'If a file fails, it may have been partially applied. Do not re-run it: run ' +
+      wipe +
+      ' (deletes only the rows this dump writes and drops the ledger) and restart from the first file.',
+    'After the last file run ' +
+      verify +
+      ' with wrangler d1 execute; it fails when a row count, an applied file or a sqlite_sequence floor does not match.',
+  ];
+}
+
 async function loadD1(
   options: LoadOptions,
   objects: MediaObject[]
@@ -334,16 +443,28 @@ async function loadD1(
   const dir = resolve(options.transformDir);
   const out = resolve(options.sqlOut);
   const fileLimit = options.maxFileBytes ?? D1_DEFAULT_FILE_BYTES;
+  // Room for the trailing ledger statement of each file.
+  const LEDGER_RESERVE = 400;
   const database = new Database(join(dir, V2_DATABASE_FILENAME), {
     readonly: true,
     fileMustExist: true,
   });
-  const files: Array<{ name: string; text: string }> = [];
+  const bodies: Array<{ label: string; text: string }> = [];
+  const writtenTables: Array<{ table: string; rows: number }> = [];
+  let sequences: Array<{ name: string; seq: number }> = [];
   let tables = 0;
   let rows = 0;
+  let indexEntries = 0;
   try {
     const header = 'PRAGMA defer_foreign_keys = true;\n';
-    let sequence = 0;
+    const indexCount = (table: string): number =>
+      (
+        database
+          .prepare(
+            "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND tbl_name = ?"
+          )
+          .get(table) as { n: number }
+      ).n;
     for (const table of orderedTables(database)) {
       const columns = (
         database
@@ -398,20 +519,19 @@ async function loadD1(
       if (tableRows === 0) continue;
       tables += 1;
       rows += tableRows;
+      indexEntries += tableRows * indexCount(table);
+      writtenTables.push({ table, rows: tableRows });
       let text = header;
       const flush = (): void => {
         if (text === header) return;
-        sequence += 1;
-        files.push({
-          name: String(sequence).padStart(4, '0') + '-' + table + '.sql',
-          text,
-        });
+        bodies.push({ label: table, text });
         text = header;
       };
       for (const sql of statements) {
         if (
           text !== header &&
-          Buffer.byteLength(text) + Buffer.byteLength(sql) > fileLimit
+          Buffer.byteLength(text) + Buffer.byteLength(sql) + LEDGER_RESERVE >
+            fileLimit
         ) {
           flush();
         }
@@ -419,9 +539,34 @@ async function loadD1(
       }
       flush();
     }
-    const sequences = database
+
+    // sqlite_sequence is required: AUTOINCREMENT tables must not restart
+    // below their highest id.
+    sequences = database
       .prepare('SELECT name, seq FROM sqlite_sequence ORDER BY name')
       .all() as Array<{ name: string; seq: number }>;
+    const autoincrement = (
+      database
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND sql LIKE '%AUTOINCREMENT%' ORDER BY name"
+        )
+        .all() as Array<{ name: string }>
+    ).map((r) => r.name);
+    for (const table of autoincrement) {
+      const top = (
+        database
+          .prepare('SELECT MAX(rowid) AS top FROM ' + quoteIdent(table))
+          .get() as { top: number | null }
+      ).top;
+      if (top === null) continue;
+      const entry = sequences.find((s) => s.name === table);
+      if (!entry || entry.seq < top) {
+        throw new Error(
+          'sqlite_sequence is missing or below the highest id for table ' +
+            table
+        );
+      }
+    }
     if (sequences.length > 0) {
       let text = '';
       for (const entry of sequences) {
@@ -434,16 +579,118 @@ async function loadD1(
           String(entry.seq) +
           ');\n';
       }
-      sequence += 1;
-      files.push({
-        name: String(sequence).padStart(4, '0') + '-sqlite-sequence.sql',
-        text,
-      });
+      bodies.push({ label: 'sqlite-sequence', text });
     }
   } finally {
     database.close();
   }
 
+  // Apply files: the preflight first, then data, each ending in its ledger row.
+  const preflightName = '0000-preflight.sql';
+  let preflight =
+    LEDGER_DDL +
+    CHECK_TABLE_DDL('_rails_preflight') +
+    assertion(
+      '_rails_preflight',
+      'ledger-empty',
+      '(SELECT COUNT(*) FROM ' + D1_LEDGER_TABLE + ') = 0'
+    );
+  for (const { table } of writtenTables) {
+    preflight += assertion(
+      '_rails_preflight',
+      'empty:' + table,
+      '(SELECT COUNT(*) FROM ' + quoteIdent(table) + ') = 0'
+    );
+  }
+  preflight += 'DROP TABLE _rails_preflight;\n';
+  const files: Array<{ name: string; text: string }> = [
+    {
+      name: preflightName,
+      text:
+        preflight +
+        ledgerInsert(
+          preflightName,
+          createHash('sha256').update(preflight, 'utf8').digest('hex')
+        ),
+    },
+  ];
+  bodies.forEach((body, index) => {
+    const name = String(index + 1).padStart(4, '0') + '-' + body.label + '.sql';
+    files.push({
+      name,
+      text:
+        body.text +
+        ledgerInsert(
+          name,
+          createHash('sha256').update(body.text, 'utf8').digest('hex')
+        ),
+    });
+  });
+
+  let verify =
+    CHECK_TABLE_DDL('_rails_verify') +
+    assertion(
+      '_rails_verify',
+      'applied-files',
+      '(SELECT COUNT(*) FROM ' + D1_LEDGER_TABLE + ') = ' + String(files.length)
+    );
+  for (const { table, rows: count } of writtenTables) {
+    verify += assertion(
+      '_rails_verify',
+      'rows:' + table,
+      '(SELECT COUNT(*) FROM ' + quoteIdent(table) + ') = ' + String(count)
+    );
+  }
+  for (const entry of sequences) {
+    verify += assertion(
+      '_rails_verify',
+      'sequence:' + entry.name,
+      'COALESCE((SELECT seq FROM sqlite_sequence WHERE name = ' +
+        sqlLiteral(entry.name) +
+        '), -1) >= ' +
+        String(entry.seq)
+    );
+  }
+  verify += 'DROP TABLE _rails_verify;\n';
+
+  let wipe = 'PRAGMA defer_foreign_keys = true;\n';
+  for (const { table } of [...writtenTables].reverse()) {
+    wipe += 'DELETE FROM ' + quoteIdent(table) + ';\n';
+  }
+  for (const entry of sequences) {
+    wipe +=
+      'DELETE FROM sqlite_sequence WHERE name = ' +
+      sqlLiteral(entry.name) +
+      ';\n';
+  }
+  wipe +=
+    'DROP TABLE IF EXISTS _rails_preflight;\nDROP TABLE IF EXISTS _rails_verify;\nDROP TABLE IF EXISTS ' +
+    D1_LEDGER_TABLE +
+    ';\n';
+  const verifyName = 'verify.sql';
+  const wipeName = 'wipe-and-retry.sql';
+
+  const estimatedRowsWritten =
+    rows + indexEntries + files.length + sequences.length * 2;
+  const warnings: string[] = [];
+  const rowBudget = options.rowBudget ?? D1_FREE_DAILY_ROWS_WRITTEN;
+  const overBudget = estimatedRowsWritten > rowBudget;
+  if (overBudget && !options.allowOverBudget) {
+    const message =
+      'Estimated D1 rows written (' +
+      String(estimatedRowsWritten) +
+      ') exceed the Workers Free budget of ' +
+      String(rowBudget) +
+      ' per day. Use a paid plan, or split the import over several days; pass --allow-over-budget to proceed anyway.';
+    if (!options.dryRun) throw new Error(message);
+    warnings.push(message);
+  }
+
+  const instructions = loadD1Instructions(
+    files.map((f) => f.name),
+    verifyName,
+    wipeName
+  );
   const report: LoadReport = {
     target: 'd1',
     dryRun: options.dryRun === true,
@@ -452,6 +699,9 @@ async function loadD1(
     tables,
     rows,
     sqlFiles: files.length,
+    estimatedRowsWritten,
+    instructions,
+    warnings,
   };
   if (options.dryRun) return report;
 
@@ -464,30 +714,36 @@ async function loadD1(
     }
     throw error;
   }
-  for (const file of files) {
-    await writeFile(join(out, file.name), file.text, {
+  const put = (name: string, text: string): Promise<void> =>
+    writeFile(join(out, name), text, {
       encoding: 'utf8',
       mode: 0o600,
       flag: 'wx',
     });
-  }
-  await writeFile(
-    join(out, 'r2-upload-manifest.json'),
-    JSON.stringify(buildR2Manifest(objects), null, 2) + '\n',
-    { encoding: 'utf8', mode: 0o600, flag: 'wx' }
+  for (const file of files) await put(file.name, file.text);
+  await put(verifyName, verify);
+  await put(wipeName, wipe);
+  await put(
+    'r2-upload-manifest.json',
+    JSON.stringify(buildR2Manifest(objects), null, 2) + '\n'
   );
-  await writeFile(
-    join(out, 'd1-import.json'),
+  await put(
+    'd1-import.json',
     JSON.stringify(
       {
-        formatVersion: 1,
-        note: 'Apply the V2 migrations first, then run each file in order: wrangler d1 execute <database> --remote --file <file>. The sequences file is optional if the target rejects sqlite_sequence writes.',
+        formatVersion: 2,
+        note: 'Apply the V2 migrations first, then run each file in order with wrangler d1 execute <database> --remote --file <file>.',
         files: files.map((f) => f.name),
+        sequencesFileRequired: sequences.length > 0,
+        verify: verifyName,
+        wipeAndRetry: wipeName,
+        ledgerTable: D1_LEDGER_TABLE,
+        estimatedRowsWritten,
+        instructions,
       },
       null,
       2
-    ) + '\n',
-    { encoding: 'utf8', mode: 0o600, flag: 'wx' }
+    ) + '\n'
   );
   for (const name of await readdir(out)) await fsyncPath(join(out, name));
   await fsyncPath(out);
@@ -523,9 +779,21 @@ export interface SignedRequest {
   headers: Record<string, string>;
 }
 
+function rfc3986(value: string): string {
+  return encodeURIComponent(value).replace(
+    /[!'()*]/g,
+    (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase()
+  );
+}
+
+/** SigV4 canonical header value: trimmed, internal whitespace collapsed. */
+function canonicalHeaderValue(value: string): string {
+  return value.trim().replace(/\s+/g, ' ');
+}
+
 /** AWS Signature Version 4 for an R2/S3 object request. */
 export function signR2Request(input: {
-  method: 'PUT' | 'HEAD';
+  method: 'PUT' | 'HEAD' | 'POST' | 'DELETE';
   endpoint: string;
   bucket: string;
   key: string;
@@ -533,10 +801,18 @@ export function signR2Request(input: {
   secretAccessKey: string;
   payloadSha256: string;
   extraHeaders?: Record<string, string>;
+  /** Query parameters (multipart: uploads, uploadId, partNumber). */
+  query?: Record<string, string>;
   now?: Date;
 }): SignedRequest {
   const url = new URL(input.endpoint);
   const path = encodeKeyPath(input.bucket, input.key);
+  const queryPairs = Object.entries(input.query ?? {})
+    .map(([k, v]) => [rfc3986(k), rfc3986(v)] as const)
+    .sort((x, y) =>
+      x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : x[1] < y[1] ? -1 : 1
+    );
+  const canonicalQuery = queryPairs.map(([k, v]) => k + '=' + v).join('&');
   const now = input.now ?? new Date();
   const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
   const dateStamp = amzDate.slice(0, 8);
@@ -553,13 +829,13 @@ export function signR2Request(input: {
   };
   const names = Object.keys(headers).sort();
   const canonicalHeaders = names
-    .map((n) => n + ':' + headers[n]!.trim() + '\n')
+    .map((n) => n + ':' + canonicalHeaderValue(headers[n]!) + '\n')
     .join('');
   const signedHeaders = names.join(';');
   const canonicalRequest = [
     input.method,
     path,
-    '',
+    canonicalQuery,
     canonicalHeaders,
     signedHeaders,
     input.payloadSha256,
@@ -580,7 +856,7 @@ export function signR2Request(input: {
     Object.entries(headers).filter(([name]) => name !== 'host')
   );
   return {
-    url: url.origin + path,
+    url: url.origin + path + (canonicalQuery ? '?' + canonicalQuery : ''),
     headers: {
       ...sendable,
       authorization:
@@ -612,6 +888,47 @@ function r2Credentials(env: Record<string, string | undefined>): {
   return { accessKeyId, secretAccessKey, accountId };
 }
 
+/** Caps the request-body bytes concurrently in flight. */
+class ByteBudget {
+  private used = 0;
+  peak = 0;
+  private waiters: Array<() => void> = [];
+  constructor(private readonly capacity: number) {}
+
+  async acquire(bytes: number): Promise<number> {
+    const want = Math.min(bytes, this.capacity);
+    while (this.used + want > this.capacity) {
+      await new Promise<void>((resolveWait) => this.waiters.push(resolveWait));
+    }
+    this.used += want;
+    if (this.used > this.peak) this.peak = this.used;
+    return want;
+  }
+
+  release(held: number): void {
+    this.used -= held;
+    const waiters = this.waiters;
+    this.waiters = [];
+    for (const wake of waiters) wake();
+  }
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || status === 408 || status >= 500;
+}
+
+async function hashRange(
+  path: string,
+  start: number,
+  end: number
+): Promise<string> {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(path, { start, end })) {
+    hash.update(chunk as Buffer);
+  }
+  return hash.digest('hex');
+}
+
 async function loadR2(
   options: LoadOptions,
   objects: MediaObject[]
@@ -624,6 +941,8 @@ async function loadR2(
     bytes: objects.reduce((sum, o) => sum + o.byteSize, 0),
     uploaded: 0,
     alreadyPresent: 0,
+    multipart: 0,
+    peakBytesInFlight: 0,
   };
   const credentials = r2Credentials(options.env ?? process.env);
   if (options.dryRun) return report;
@@ -633,20 +952,91 @@ async function loadR2(
     'https://' + credentials.accountId + '.r2.cloudflarestorage.com';
   const doFetch = options.fetchImpl ?? fetch;
   const dir = resolve(options.transformDir);
+  const concurrency = Math.max(1, Math.min(options.concurrency ?? 4, 16));
+  const threshold =
+    options.multipartThresholdBytes ?? R2_MULTIPART_THRESHOLD_BYTES;
+  const basePartSize = options.partSizeBytes ?? R2_PART_SIZE_BYTES;
+  const maxAttempts = Math.max(1, options.retry?.maxAttempts ?? 5);
+  const baseDelay = options.retry?.baseDelayMs ?? 250;
+  const sleep =
+    options.sleepImpl ??
+    ((ms: number): Promise<void> =>
+      new Promise((resolveSleep) => setTimeout(resolveSleep, ms)));
+  const budget = new ByteBudget(
+    Math.max(concurrency * basePartSize, threshold)
+  );
+
+  interface Call {
+    method: 'PUT' | 'HEAD' | 'POST' | 'DELETE';
+    key: string;
+    payloadSha256: string;
+    headers?: Record<string, string>;
+    query?: Record<string, string>;
+    /** Fresh body per attempt (streams cannot be replayed). */
+    body?: () => BodyInit;
+    contentLength?: number;
+  }
+
+  /**
+   * One signed request with bounded exponential backoff on network errors,
+   * 429, 408 and 5xx. Other statuses are returned for the caller to judge.
+   * Messages never contain credentials, endpoints or keys.
+   */
+  const send = async (label: string, call: Call): Promise<Response> => {
+    for (let attempt = 1; ; attempt += 1) {
+      const signed = signR2Request({
+        method: call.method,
+        endpoint,
+        bucket,
+        key: call.key,
+        accessKeyId: credentials.accessKeyId,
+        secretAccessKey: credentials.secretAccessKey,
+        payloadSha256: call.payloadSha256,
+        ...(call.headers ? { extraHeaders: call.headers } : {}),
+        ...(call.query ? { query: call.query } : {}),
+      });
+      const headers = { ...signed.headers };
+      if (call.contentLength !== undefined) {
+        headers['content-length'] = String(call.contentLength);
+      }
+      let response: Response | undefined;
+      try {
+        const init: RequestInit & { duplex?: 'half' } = {
+          method: call.method,
+          headers,
+        };
+        if (call.body) {
+          init.body = call.body();
+          init.duplex = 'half';
+        }
+        response = await doFetch(signed.url, init);
+      } catch {
+        response = undefined;
+      }
+      if (response && !isRetryableStatus(response.status)) return response;
+      if (response) {
+        await response.body?.cancel().catch(() => undefined);
+      }
+      if (attempt >= maxAttempts) {
+        throw new Error(
+          response
+            ? 'R2 ' + label + ' failed with status ' + response.status
+            : 'R2 ' +
+              label +
+              ' failed (network error after ' +
+              String(attempt) +
+              ' attempts)'
+        );
+      }
+      await sleep(Math.min(baseDelay * 2 ** (attempt - 1), 8000));
+    }
+  };
 
   const head = async (object: MediaObject): Promise<'match' | 'absent'> => {
-    const signed = signR2Request({
+    const response = await send('HEAD', {
       method: 'HEAD',
-      endpoint,
-      bucket,
       key: object.storageKey,
-      accessKeyId: credentials.accessKeyId,
-      secretAccessKey: credentials.secretAccessKey,
       payloadSha256: sha256Text(''),
-    });
-    const response = await doFetch(signed.url, {
-      method: 'HEAD',
-      headers: signed.headers,
     });
     if (response.status === 404) return 'absent';
     if (!response.ok) {
@@ -661,42 +1051,151 @@ async function loadR2(
     return 'match';
   };
 
+  const objectHeaders = (object: MediaObject): Record<string, string> => ({
+    'content-type': object.mimeType,
+    'x-amz-meta-sha256': object.sha256,
+  });
+
+  const streamOf =
+    (path: string, start?: number, end?: number) => (): BodyInit =>
+      Readable.toWeb(
+        createReadStream(
+          path,
+          start === undefined ? {} : { start, end: end as number }
+        )
+      ) as unknown as BodyInit;
+
+  const putSingle = async (
+    object: MediaObject,
+    path: string
+  ): Promise<void> => {
+    const held = await budget.acquire(object.byteSize);
+    try {
+      const response = await send('PUT', {
+        method: 'PUT',
+        key: object.storageKey,
+        payloadSha256: object.sha256,
+        headers: {
+          ...objectHeaders(object),
+          'x-amz-checksum-sha256': Buffer.from(object.sha256, 'hex').toString(
+            'base64'
+          ),
+        },
+        body: streamOf(path),
+        contentLength: object.byteSize,
+      });
+      if (!response.ok) {
+        throw new Error('R2 PUT failed with status ' + response.status);
+      }
+    } finally {
+      budget.release(held);
+    }
+  };
+
+  const putMultipart = async (
+    object: MediaObject,
+    path: string
+  ): Promise<void> => {
+    const partSize = Math.max(
+      basePartSize,
+      Math.ceil(object.byteSize / R2_MAX_PARTS)
+    );
+    const created = await send('multipart create', {
+      method: 'POST',
+      key: object.storageKey,
+      payloadSha256: sha256Text(''),
+      headers: objectHeaders(object),
+      query: { uploads: '' },
+    });
+    if (!created.ok) {
+      throw new Error(
+        'R2 multipart create failed with status ' + created.status
+      );
+    }
+    const uploadId = /<UploadId>([^<]+)<\/UploadId>/.exec(
+      await created.text()
+    )?.[1];
+    if (!uploadId) throw new Error('R2 multipart create returned no upload id');
+    try {
+      const etags: string[] = [];
+      const count = Math.ceil(object.byteSize / partSize);
+      for (let number = 1; number <= count; number += 1) {
+        const start = (number - 1) * partSize;
+        const end = Math.min(object.byteSize, start + partSize) - 1;
+        const length = end - start + 1;
+        const partSha = await hashRange(path, start, end);
+        const held = await budget.acquire(length);
+        try {
+          const response = await send('multipart part', {
+            method: 'PUT',
+            key: object.storageKey,
+            payloadSha256: partSha,
+            query: { partNumber: String(number), uploadId },
+            body: streamOf(path, start, end),
+            contentLength: length,
+          });
+          if (!response.ok) {
+            throw new Error(
+              'R2 multipart part failed with status ' + response.status
+            );
+          }
+          const etag = response.headers.get('etag');
+          if (!etag) throw new Error('R2 multipart part returned no ETag');
+          etags.push(etag);
+        } finally {
+          budget.release(held);
+        }
+      }
+      const xml =
+        '<CompleteMultipartUpload>' +
+        etags
+          .map(
+            (etag, i) =>
+              '<Part><PartNumber>' +
+              String(i + 1) +
+              '</PartNumber><ETag>' +
+              etag.replace(/&/g, '&amp;').replace(/</g, '&lt;') +
+              '</ETag></Part>'
+          )
+          .join('') +
+        '</CompleteMultipartUpload>';
+      const completed = await send('multipart complete', {
+        method: 'POST',
+        key: object.storageKey,
+        payloadSha256: sha256Text(xml),
+        headers: { 'content-type': 'application/xml' },
+        query: { uploadId },
+        body: () => xml,
+        contentLength: Buffer.byteLength(xml),
+      });
+      if (!completed.ok || /<Error>/.test(await completed.text())) {
+        throw new Error('R2 multipart complete failed');
+      }
+    } catch (error) {
+      // Best effort: free the parts of an abandoned upload.
+      await send('multipart abort', {
+        method: 'DELETE',
+        key: object.storageKey,
+        payloadSha256: sha256Text(''),
+        query: { uploadId },
+      }).catch(() => undefined);
+      throw error;
+    }
+    report.multipart = (report.multipart ?? 0) + 1;
+  };
+
   const upload = async (object: MediaObject): Promise<void> => {
     if ((await head(object)) === 'match') {
       report.alreadyPresent = (report.alreadyPresent ?? 0) + 1;
       return;
     }
-    const body = await readFile(join(dir, MEDIA_DIRECTORY, object.storageKey));
-    if (
-      body.length !== object.byteSize ||
-      createHash('sha256').update(body).digest('hex') !== object.sha256
-    ) {
+    const path = join(dir, MEDIA_DIRECTORY, object.storageKey);
+    const digest = await sha256OfFile(path);
+    if (digest.size !== object.byteSize || digest.sha256 !== object.sha256) {
       throw new Error('A media object changed before upload');
     }
-    const signed = signR2Request({
-      method: 'PUT',
-      endpoint,
-      bucket,
-      key: object.storageKey,
-      accessKeyId: credentials.accessKeyId,
-      secretAccessKey: credentials.secretAccessKey,
-      payloadSha256: object.sha256,
-      extraHeaders: {
-        'content-type': object.mimeType,
-        'x-amz-meta-sha256': object.sha256,
-        'x-amz-checksum-sha256': Buffer.from(object.sha256, 'hex').toString(
-          'base64'
-        ),
-      },
-    });
-    const response = await doFetch(signed.url, {
-      method: 'PUT',
-      headers: signed.headers,
-      body,
-    });
-    if (!response.ok) {
-      throw new Error('R2 PUT failed with status ' + response.status);
-    }
+    if (object.byteSize > threshold) await putMultipart(object, path);
+    else await putSingle(object, path);
     if ((await head(object)) !== 'match') {
       throw new Error('R2 object is missing after upload');
     }
@@ -704,15 +1203,13 @@ async function loadR2(
   };
 
   const queue = [...objects];
-  const workers = Array.from(
-    { length: Math.max(1, Math.min(options.concurrency ?? 4, 16)) },
-    async () => {
-      for (let next = queue.shift(); next; next = queue.shift()) {
-        await upload(next);
-      }
+  const workers = Array.from({ length: concurrency }, async () => {
+    for (let next = queue.shift(); next; next = queue.shift()) {
+      await upload(next);
     }
-  );
+  });
   const results = await Promise.allSettled(workers);
+  report.peakBytesInFlight = budget.peak;
   const failed = results.find((r) => r.status === 'rejected');
   if (failed && failed.status === 'rejected') throw failed.reason;
   return report;

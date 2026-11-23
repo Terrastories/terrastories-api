@@ -17,7 +17,9 @@
 # the created resources cannot diverge. Under --apply it also applies the
 # media bucket's CORS policy and its abort-incomplete-multipart lifecycle
 # rule, then reads both back and refuses if they are not in effect
-# (SPEC-V2 section 6.7); a dry run prints those commands only. Optional:
+# (SPEC-V2 section 6.7), and before deploying verifies that wrangler.jsonc
+# env.staging DB database_id equals terrastories-staging-db's UUID in the
+# guarded account; a dry run prints those commands only. Optional:
 #   OTHER_CRON_TRIGGERS (0) cron triggers already used by other Workers in the
 #                       account (production uses 3; the Free limit is 5)
 # A CLOUDFLARE_API_TOKEN exported for another account breaks wrangler: run
@@ -139,6 +141,14 @@ if grep -q 'REPLACE-WITH-STAGING-D1-ID' wrangler.jsonc; then
   info "after pasting the id and PUBLIC_ORIGIN, rerun: run deploy dry-run below"
   echo "+ npx wrangler deploy --env staging --dry-run"
 else
+  if [ "$APPLY" = 1 ]; then
+    d1_check_list="$(npx wrangler d1 list --json 2>/dev/null)" \
+      || die "wrangler d1 list failed"
+    printf '%s' "$d1_check_list" | guard d1-id "$REPO_ROOT/wrangler.jsonc"
+    info "D1 database_id verified: wrangler.jsonc env.staging DB matches $D1_NAME in account"
+  else
+    echo "+ npx wrangler d1 list --json   (verify env.staging DB database_id matches $D1_NAME)"
+  fi
   run npx wrangler deploy --env staging --dry-run
   run npx wrangler deploy --env staging
 fi

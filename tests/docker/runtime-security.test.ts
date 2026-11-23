@@ -32,6 +32,24 @@ describe('production container security', () => {
     expect(productionStage).not.toContain('3000');
   });
 
+  it('keeps source mounts out of the base Compose file', () => {
+    const base = readFileSync(
+      join(process.cwd(), 'docker-compose.yml'),
+      'utf8'
+    );
+    expect(base).not.toMatch(/\.\/src:\/app\/src/);
+    for (const file of [
+      'config/nginx/nginx.conf',
+      'config/nginx/nginx.field-kit.conf',
+    ]) {
+      const nginx = readFileSync(join(process.cwd(), file), 'utf8');
+      expect(nginx).toContain('client_max_body_size 128M');
+      expect(nginx).toMatch(
+        /location \/v2\/media \{[^}]*proxy_request_buffering off;/
+      );
+    }
+  });
+
   it('runs V2 in the production and field-kit Compose profiles', () => {
     for (const file of [
       'docker-compose.prod.yml',

@@ -47,7 +47,6 @@ services:
         condition: service_healthy
     volumes:
       - uploads_data:/app/uploads
-      - ./src:/app/src:ro # Development only - overridden in production
     networks:
       - terrastories-network
     restart: unless-stopped

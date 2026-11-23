@@ -1,4 +1,6 @@
 import { mkdtemp, readFile, readdir } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -370,6 +372,34 @@ describe('walkthrough safety and options', () => {
       })
     ).rejects.toThrow(/interrupted/);
     expect(walk.records).toEqual([]);
+  });
+
+  it('records the server commit timestamp as serverAt on an import commit step', async () => {
+    const server = createServer((_req, res) => {
+      res.setHeader('content-type', 'application/json');
+      res.end(
+        JSON.stringify({ data: { committedAt: '2026-01-01T23:59:59.900Z' } })
+      );
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    try {
+      const walk = new Walk(
+        `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+        { quiet: true }
+      );
+      walk.chapter('Steward', 'import');
+      await walk.step({
+        who: walk.actor('X', 'steward'),
+        say: 'commit',
+        method: 'POST',
+        path: '/v2/imports/7/commit',
+        expect: 200,
+      });
+      const rec = JSON.parse(JSON.stringify(walk.records[0]));
+      expect(rec.serverAt).toBe('2026-01-01T23:59:59.900Z');
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
   });
 
   it('never sends a Secure cookie over plain HTTP except to localhost', () => {

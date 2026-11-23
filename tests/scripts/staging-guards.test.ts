@@ -18,6 +18,7 @@ import {
   GuardError,
   WORKER_CRONS,
   assertAccountMatches,
+  assertMediaBucket,
   assertStagingConfig,
   listHasName,
   assertCronBudget,
@@ -130,6 +131,29 @@ describe('staging guards', () => {
   });
 });
 
+describe('media bucket pin', () => {
+  const config = {
+    env: {
+      staging: {
+        r2_buckets: [
+          { binding: 'MEDIA', bucket_name: 'terrastories-staging-media' },
+        ],
+      },
+    },
+  };
+  it('accepts the bound bucket only', () => {
+    expect(() =>
+      assertMediaBucket(config, 'terrastories-staging-media')
+    ).not.toThrow();
+    expect(() =>
+      assertMediaBucket(config, 'terrastories-staging-other')
+    ).toThrow(GuardError);
+    expect(() => assertMediaBucket({}, 'terrastories-staging-media')).toThrow(
+      GuardError
+    );
+  });
+});
+
 describe('exact-name matching', () => {
   it('does not treat prefixes or substrings as present', () => {
     const erasure = 'terrastories-staging-erasure-records';
@@ -166,9 +190,13 @@ esac
       encoding: 'utf8',
       env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ...env },
     });
+  const origin = 'https://app.terrastories.test';
 
   it('dry run prints create commands and executes none', () => {
-    const r = run({ CLOUDFLARE_ACCOUNT_ID: ACCOUNT });
+    const r = run({
+      CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
+      STAGING_FRONTEND_ORIGIN: origin,
+    });
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout).toContain(
       '+ npx wrangler d1 create terrastories-staging-db'
@@ -183,6 +211,7 @@ esac
   it('creates the erasure-records bucket and ignores name overrides', () => {
     const r = run({
       CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
+      STAGING_FRONTEND_ORIGIN: origin,
       STAGING_R2_BUCKET: 'terrastories-media',
     });
     expect(r.status, r.stderr).toBe(0);
@@ -801,6 +830,13 @@ exit "\${NPM_RC:-0}"
   writeFileSync(
     join(bin, 'curl'),
     `#!/usr/bin/env bash
+# The R2 CORS preflight (OPTIONS) gets an allowing answer for FAKE_ORIGIN.
+for a in "$@"; do
+  if [ "$a" = OPTIONS ]; then
+    printf 'HTTP/2 204\\r\\naccess-control-allow-origin: %s\\r\\naccess-control-allow-methods: PUT\\r\\naccess-control-allow-headers: x-amz-content-sha256\\r\\n\\r\\n' "\${FAKE_ORIGIN:-}"
+    exit 0
+  fi
+done
 for a in "$@"; do url="$a"; done
 case "$url" in
   */health) printf 200 ;;
@@ -825,7 +861,21 @@ case "$*" in
 esac
 `
   );
-  for (const f of ['npm', 'curl', 'date']) chmodSync(join(bin, f), 0o755);
+  // Fake npx: the R2 part-checksum probe exits with FAKE_PROBE_RC.
+  writeFileSync(
+    join(bin, 'npx'),
+    `#!/usr/bin/env bash
+# Only the probe is faked; guards and everything else run the real npx.
+case "$*" in
+  *verify-r2-part-checksum*)
+    echo "npx $*" >> "\${NPM_LOG}"
+    exit "\${FAKE_PROBE_RC:-0}" ;;
+esac
+PATH="\${PATH#*:}" exec npx "$@"
+`
+  );
+  for (const f of ['npm', 'curl', 'date', 'npx'])
+    chmodSync(join(bin, f), 0o755);
   const LOCAL_URL = 'http://127.0.0.1:9';
   const REMOTE_URL = 'https://terrastories-staging-api.x.workers.dev';
   const run = (
@@ -1115,6 +1165,58 @@ esac
     expect(r.stdout).toMatch(/R2 probe skipped: not verified/);
     expect(r.stdout).toMatch(/summary: R2 part-checksum probe NOT done/);
     expect(r.stdout).not.toMatch(/verify-r2-part-checksum/);
+  });
+
+  const probeEnv = (rc: string) => ({
+    R2_ACCOUNT_ID: 'a'.repeat(32),
+    R2_ACCESS_KEY_ID: 'test-key-id',
+    R2_SECRET_ACCESS_KEY: 'test-secret',
+    R2_BUCKET_NAME: 'terrastories-staging-media',
+    STAGING_FRONTEND_ORIGIN: 'https://app.terrastories-staging.example.org',
+    FAKE_ORIGIN: 'https://app.terrastories-staging.example.org',
+    FAKE_PROBE_RC: rc,
+  });
+
+  it('an apply run with an enforced probe (exit 0) passes after the CORS preflight', () => {
+    const r = run(['--apply', '--skip-walkthrough'], probeEnv('0'), REMOTE_URL);
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(r.stdout).toMatch(/CORS preflight allowed/);
+    expect(r.stdout).toMatch(/summary: R2 part-checksum probe done: enforced/);
+  });
+
+  it('refuses a probe bucket that is not the deployed Worker MEDIA bucket', () => {
+    const r = run(
+      ['--apply', '--skip-walkthrough'],
+      { ...probeEnv('0'), R2_BUCKET_NAME: 'terrastories-staging-other' },
+      REMOTE_URL
+    );
+    expect(r.status).not.toBe(0);
+    expect(r.stderr + r.stdout).toMatch(/not the deployed Worker MEDIA bucket/);
+    expect(r.stdout).not.toMatch(/CORS preflight allowed/);
+  });
+
+  it('refuses R2_ACCOUNT_ID that differs from CLOUDFLARE_ACCOUNT_ID', () => {
+    const r = run(
+      ['--apply', '--skip-walkthrough'],
+      { ...probeEnv('0'), CLOUDFLARE_ACCOUNT_ID: 'b'.repeat(32) },
+      REMOTE_URL
+    );
+    expect(r.status).not.toBe(0);
+    expect(r.stderr + r.stdout).toMatch(/does not match CLOUDFLARE_ACCOUNT_ID/);
+    expect(r.stdout).not.toMatch(/CORS preflight allowed/);
+  });
+
+  it('fails when R2 accepts corrupted part bytes (probe exit 2), never records it', () => {
+    const r = run(['--apply', '--skip-walkthrough'], probeEnv('2'), REMOTE_URL);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr + r.stdout).toMatch(/R2 ACCEPTED corrupted part bytes/);
+    expect(r.stdout).not.toMatch(/recorded, not a failure/);
+  });
+
+  it('fails when the probe is inconclusive (exit 1)', () => {
+    const r = run(['--apply', '--skip-walkthrough'], probeEnv('1'), REMOTE_URL);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr + r.stdout).toMatch(/probe inconclusive \(exit 1\)/);
   });
 
   it('without --skip-r2-probe an apply run still fails closed on missing R2 creds', () => {

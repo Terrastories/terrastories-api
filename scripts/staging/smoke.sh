@@ -36,6 +36,8 @@
 #     (required only when the walkthrough will actually run)
 #   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME  probe
 #     (not required with --skip-r2-probe or --local)
+#   STAGING_FRONTEND_ORIGIN                     origin of the R2 CORS preflight
+#     (not required with --skip-r2-probe or --local)
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -225,7 +227,7 @@ fi
 
 if [ "$LOCAL" = 1 ]; then
   wt_summary
-  info "--local: R2 part-checksum probe and CPU procedure skipped (no S3 endpoint or Free-plan CPU limit on local workerd)"
+  info "--local: R2 CORS preflight, part-checksum probe and CPU procedure skipped (no S3 endpoint or Free-plan CPU limit on local workerd)"
   info "summary: R2 part-checksum probe NOT done (--local); not verified, not a pass"
   exit 0
 fi
@@ -237,15 +239,28 @@ else
   if [ "$APPLY" = 1 ]; then
     need_env R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET_NAME
     guard name "$R2_BUCKET_NAME"
+    # Pin the probe to the bucket the deployed Worker actually writes to.
+    guard media-bucket "$REPO_ROOT/wrangler.jsonc" "$R2_BUCKET_NAME"
+    if [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ] &&
+      [ "${R2_ACCOUNT_ID,,}" != "${CLOUDFLARE_ACCOUNT_ID,,}" ]; then
+      die "R2_ACCOUNT_ID does not match CLOUDFLARE_ACCOUNT_ID (wrong account)"
+    fi
+  fi
+  # Browser preflight for a direct part PUT: the bucket's CORS policy only
+  # counts if the frontend origin is allowed to send it (SPEC-V2 section 6.7).
+  if [ "$APPLY" = 1 ]; then
+    "$STAGING_DIR/cors-preflight.sh" --apply
+  else
+    "$STAGING_DIR/cors-preflight.sh"
   fi
   PROBE_RC=0
   (cd "$REPO_ROOT" && run npx tsx scripts/staging/verify-r2-part-checksum.ts) || PROBE_RC=$?
-  # exit 2 = not enforced (documented outcome, record it); anything else fails.
+  # The upload path relies on R2 rejecting corrupted part bytes (signed
+  # x-amz-content-sha256): exit 2 (accepted) and exit 1 (inconclusive) both fail.
   if [ "$PROBE_RC" = 2 ]; then
-    info "probe: R2 does NOT enforce part checksums (recorded, not a failure)"
-    PROBE_SUMMARY="done: NOT enforced (exit 2, recorded)"
+    die "R2 ACCEPTED corrupted part bytes: the signed payload hash is not enforced (exit 2); cutover is blocked"
   elif [ "$PROBE_RC" != 0 ]; then
-    die "probe inconclusive (exit $PROBE_RC)"
+    die "R2 payload hash probe inconclusive (exit $PROBE_RC)"
   elif [ "$APPLY" = 1 ]; then
     PROBE_SUMMARY="done: enforced (exit 0)"
   else

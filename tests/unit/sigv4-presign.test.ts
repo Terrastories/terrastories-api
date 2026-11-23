@@ -45,7 +45,7 @@ describe('createSigV4Presigner', () => {
     );
   });
 
-  it('signs extra headers and query parameters like an independent derivation', async () => {
+  it('signs x-amz-content-sha256 as a header over UNSIGNED-PAYLOAD (R2 UploadPart 501 regression)', async () => {
     const accessKeyId = createHash('sha256')
       .update('ak')
       .digest('hex')
@@ -56,7 +56,7 @@ describe('createSigV4Presigner', () => {
       { accessKeyId, secretAccessKey, region: 'auto', service: 's3' },
       now
     );
-    const checksum = createHash('sha256').update('part').digest('base64');
+    const checksum = createHash('sha256').update('part').digest('hex');
     const url = new URL(
       await presigner.presign({
         method: 'PUT',
@@ -65,7 +65,7 @@ describe('createSigV4Presigner', () => {
         query: { partNumber: '3', uploadId: 'up/load=id' },
         signedHeaders: {
           'content-length': '16777216',
-          'x-amz-checksum-sha256': checksum,
+          'x-amz-content-sha256': checksum,
         },
         expiresSeconds: 7200,
         now,
@@ -73,7 +73,7 @@ describe('createSigV4Presigner', () => {
     );
     expect(url.pathname).toBe('/bucket/communities/7/media/a%20b%2Bc');
     expect(url.searchParams.get('X-Amz-SignedHeaders')).toBe(
-      'content-length;host;x-amz-checksum-sha256'
+      'content-length;host;x-amz-content-sha256'
     );
     // Independent derivation.
     const scope = '20261123/auto/s3/aws4_request';
@@ -100,8 +100,8 @@ describe('createSigV4Presigner', () => {
       'PUT',
       url.pathname,
       canonicalQuery,
-      `content-length:16777216\nhost:acct.r2.cloudflarestorage.com\nx-amz-checksum-sha256:${checksum}\n`,
-      'content-length;host;x-amz-checksum-sha256',
+      `content-length:16777216\nhost:acct.r2.cloudflarestorage.com\nx-amz-content-sha256:${checksum}\n`,
+      'content-length;host;x-amz-content-sha256',
       'UNSIGNED-PAYLOAD',
     ].join('\n');
     const toSign = [

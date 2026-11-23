@@ -8,10 +8,16 @@ APPLY=0
 die() { echo "ERROR: $*" >&2; exit 1; }
 info() { echo "-- $*"; }
 
+# guard_ok <subcommand> <args...>: run the TypeScript guard and return its
+# verdict (0 ok, non-zero refused) instead of dying, so a script can branch on
+# it — the idempotent "already there?" checks in provision.sh.
+guard_ok() {
+  (cd "$REPO_ROOT" && npx --no-install tsx scripts/staging/guards.ts "$@")
+}
+
 # guard <subcommand> <args...>: run the TypeScript guard, die with its message.
 guard() {
-  (cd "$REPO_ROOT" && npx --no-install tsx scripts/staging/guards.ts "$@") \
-    || die "guard '$1' refused"
+  guard_ok "$@" || die "guard '$1' refused"
 }
 
 # has_name <name>: stdin is a wrangler list; exact-name match (exit 0 = present).

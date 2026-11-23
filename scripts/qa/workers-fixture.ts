@@ -48,8 +48,8 @@ type MediaBucket = Awaited<
  * Persona journeys send direct-upload parts to `PUT /v2/media/uploads/:id/
  * parts/:n`. On Node that route stores the part; on Workers the presigned
  * part URL points at R2's S3 endpoint, which Miniflare does not serve. This
- * wrapper plays that endpoint: it finds the session journal in R2, enforces
- * the signed Content-Length and x-amz-checksum-sha256 the way R2 does, stores
+ * wrapper plays that endpoint: it finds the session journal in R2, checks
+ * the persona fixture’s Node-format checksum and Content-Length, stores
  * the part through the binding and answers with the part's ETag. Everything
  * else (create, complete, abort and the whole Worker) is the real bundle.
  */

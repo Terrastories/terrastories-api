@@ -104,6 +104,7 @@ describe('GitHub Actions supply-chain policy', () => {
     expect(docker).toContain('curl --fail --silent --show-error');
     expect(docker).toContain('docker inspect');
     expect(docker).toContain('/v2/bootstrap');
+    expect(docker).toContain("typeof bootstrap.open !== 'boolean'");
     expect(supplyChain).toContain('/v2/bootstrap');
   });
 

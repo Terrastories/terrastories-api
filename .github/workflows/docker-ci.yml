@@ -68,7 +68,7 @@ jobs:
               HEALTH_JSON="$health_json" BOOTSTRAP_JSON="$bootstrap_json" node --input-type=module <<'NODE'
           const health = JSON.parse(process.env.HEALTH_JSON);
           const bootstrap = JSON.parse(process.env.BOOTSTRAP_JSON);
-          if (!health || health.status !== 'ok' || !bootstrap || typeof bootstrap !== 'object') {
+          if (!health || health.status !== 'ok' || !bootstrap || typeof bootstrap.open !== 'boolean') {
             process.stderr.write('Unhealthy V2 API response\n');
             process.exit(1);
           }

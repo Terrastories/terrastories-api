@@ -522,15 +522,33 @@ export async function findCommunityBySlug(
   fetchImpl: FetchLike,
   baseUrl: string,
   superCookie: string,
-  slug: string
+  slug: string,
+  bounds: { requestTimeoutMs?: number; deadlineAt?: number } = {}
 ): Promise<number | undefined> {
+  // Each list request gets its own abort timer, capped by the overall
+  // deadline, so one stalled request cannot consume a shutdown budget.
+  const signal = (): AbortSignal | undefined => {
+    const left =
+      bounds.deadlineAt === undefined
+        ? undefined
+        : bounds.deadlineAt - Date.now();
+    const ms = Math.min(bounds.requestTimeoutMs ?? Infinity, left ?? Infinity);
+    return Number.isFinite(ms)
+      ? AbortSignal.timeout(Math.max(1, ms))
+      : undefined;
+  };
   try {
     const page = async (
       offset: number
     ): Promise<{ rows: unknown[]; total: number } | undefined> => {
       const res = await fetchImpl(
         `${baseUrl}/v2/admin/communities?limit=${ADMIN_PAGE}&offset=${offset}`,
-        { method: 'GET', headers: { cookie: superCookie }, redirect: 'error' }
+        {
+          method: 'GET',
+          headers: { cookie: superCookie },
+          redirect: 'error',
+          signal: signal(),
+        }
       );
       if (res.status !== 200) return undefined;
       const body = (await res.json().catch(() => null)) as {
@@ -663,6 +681,8 @@ export async function provisionThrowaway(
   }
   if (options.shouldStop?.()) throw new Error('stopped by signal');
   const verifier = await newVerifier(throwaway.adminPassword);
+  // the derivation awaits: a signal may have landed meanwhile
+  if (options.shouldStop?.()) throw new Error('stopped by signal');
   await expectJson(
     // the claimant has no session: no cookie on this call
     await fetchImpl(`${baseUrl}/v2/bootstrap/claim`, {
@@ -689,6 +709,8 @@ export interface ThroughCommunityResult {
   error?: string;
   /** HTTP status of the disable call, when one was made. */
   disableStatus?: number;
+  /** True when the create was confirmed or ambiguous (a row may exist). */
+  communityMayExist?: boolean;
   communityDisabled: boolean;
   mediaDeleted: boolean;
 }
@@ -710,10 +732,19 @@ export interface ThroughCommunityInput {
    */
   onCleanupReady?: (
     cleanup: () => Promise<void>,
-    status: () => { slug?: string; disabled: boolean }
+    status: () => { slug?: string; disabled: boolean; mayExist?: boolean }
   ) => void;
-  /** Ambiguous-create slug lookup retries (default 5 attempts, 1000 ms apart). */
-  lookupRetry?: { attempts: number; delayMs: number };
+  /**
+   * Ambiguous-create slug lookup retries (default 5 attempts, 1000 ms apart,
+   * each list request aborted after 2000 ms, the whole lookup capped at 6000 ms
+   * so the disable PATCH keeps its own 3000 ms inside a 10 s shutdown).
+   */
+  lookupRetry?: {
+    attempts: number;
+    delayMs: number;
+    requestTimeoutMs?: number;
+    budgetMs?: number;
+  };
 }
 
 /**
@@ -756,13 +787,22 @@ export async function uploadViaThrowawayCommunity(
       // is random, so an exact slug match is this run's community. A
       // definitive 4xx rejection never reaches here.
       slug = plannedSlug;
+      const deadlineAt = Date.now() + (retry.budgetMs ?? 6000);
       for (
         let attempt = 0;
         attempt < Math.max(1, retry.attempts);
         attempt += 1
       ) {
-        if (attempt > 0) await new Promise((r) => setTimeout(r, retry.delayMs));
-        id = await findCommunityBySlug(deps.fetch, baseUrl, superCookie, slug);
+        if (Date.now() >= deadlineAt) break;
+        if (attempt > 0)
+          await new Promise((r) =>
+            setTimeout(r, Math.min(retry.delayMs, deadlineAt - Date.now()))
+          );
+        if (Date.now() >= deadlineAt) break;
+        id = await findCommunityBySlug(deps.fetch, baseUrl, superCookie, slug, {
+          requestTimeoutMs: retry.requestTimeoutMs ?? 2000,
+          deadlineAt,
+        });
         if (id !== undefined) break;
       }
       if (id !== undefined) {
@@ -779,6 +819,7 @@ export async function uploadViaThrowawayCommunity(
           headers: jsonHeaders(superCookie),
           body: JSON.stringify({ status: 'disabled' }),
           redirect: 'error',
+          signal: AbortSignal.timeout(3000),
         }
       );
       result.disableStatus = res.status;
@@ -797,9 +838,11 @@ export async function uploadViaThrowawayCommunity(
     stopping = true;
     return (cleanup ??= disableOnce());
   };
+  const mayExist = (): boolean => created !== undefined || createAmbiguous;
   input.onCleanupReady?.(cleanupOnce, () => ({
     slug: created?.slug ?? plannedSlug,
     disabled: result.communityDisabled,
+    mayExist: mayExist(),
   }));
 
   try {
@@ -839,6 +882,7 @@ export async function uploadViaThrowawayCommunity(
     result.error = error instanceof Error ? error.message : String(error);
   } finally {
     await cleanupOnce();
+    result.communityMayExist = mayExist();
   }
   return result;
 }
@@ -963,7 +1007,9 @@ export async function main(
   // SIGINT/SIGTERM: disable the throwaway community (short timeout) before
   // exiting non-zero. SIGKILL cannot be caught and leaves it active.
   let cleanup: (() => Promise<void>) | undefined;
-  let status: (() => { slug?: string; disabled: boolean }) | undefined;
+  let status:
+    | (() => { slug?: string; disabled: boolean; mayExist?: boolean })
+    | undefined;
   const onSignal = (signal: NodeJS.Signals): void => {
     process.stderr.write(`\n${signal}: disabling the throwaway community...\n`);
     const timeout = new Promise<void>((r) => setTimeout(r, 10_000));
@@ -973,7 +1019,7 @@ export async function main(
         process.stderr.write(
           st?.disabled
             ? `exiting; community ${st.slug} disabled\n`
-            : st?.slug
+            : st?.slug && st.mayExist
               ? `exiting; community ${st.slug} may still be active: disable it by hand as the super admin\n`
               : 'exiting; no community was created\n'
         );
@@ -1015,7 +1061,7 @@ export async function main(
     );
   }
   lines.push(
-    `cleanup: media ${res.mediaDeleted ? 'file record deleted (storage removal not verified by the API)' : 'NOT confirmed deleted (see error)'}, community ${res.communityDisabled ? 'disabled' : 'NOT disabled: disable it manually as the super admin'}${res.disableStatus !== undefined ? ` (HTTP ${res.disableStatus})` : ''}`
+    `cleanup: media ${res.mediaDeleted ? 'file record deleted (storage removal not verified by the API)' : 'NOT confirmed deleted (see error)'}, community ${res.communityDisabled ? 'disabled' : res.communityMayExist === false ? 'not created (rejected), nothing to disable' : 'NOT disabled: disable it manually as the super admin'}${res.disableStatus !== undefined ? ` (HTTP ${res.disableStatus})` : ''}`
   );
   process.stdout.write(lines.join('\n') + '\n');
   if (res.error) {

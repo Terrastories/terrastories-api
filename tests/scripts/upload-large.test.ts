@@ -37,7 +37,9 @@ interface Call {
 }
 
 /** A fetch stand-in that records every call and answers from a route fn. */
-function fakeFetch(route: (call: Call) => Response | undefined) {
+function fakeFetch(
+  route: (call: Call) => Response | Promise<Response> | undefined
+) {
   const calls: Call[] = [];
   const impl: FetchLike = async (url, init = {}) => {
     const headers: Record<string, string> = {};
@@ -55,7 +57,7 @@ function fakeFetch(route: (call: Call) => Response | undefined) {
           : undefined,
     };
     calls.push(call);
-    const res = route(call);
+    const res = await route(call);
     if (!res) throw new Error(`unexpected request: ${call.method} ${url}`);
     return res;
   };
@@ -1063,6 +1065,76 @@ describe('uploadViaThrowawayCommunity (fake fetch)', () => {
     const st = status();
     expect(st.disabled).toBe(false);
     expect(st.slug).toMatch(/^stg-upload-[0-9a-f]{8}$/);
+  });
+
+  it('a signal during the password derivation: no bootstrap claim call', async () => {
+    const { calls, impl } = world();
+    let cleanup!: () => Promise<void>;
+    const inner = impl;
+    const wrapped: FetchLike = async (url, init) => {
+      const res = await inner(url, init);
+      // the argon derivation that follows takes far longer than this timer
+      if (url.endsWith('/claim-tokens')) setTimeout(() => void cleanup(), 5);
+      return res;
+    };
+    const res = await uploadViaThrowawayCommunity(
+      { ...input, onCleanupReady: (fn) => (cleanup = fn) },
+      { fetch: wrapped }
+    );
+    expect(res.error).toMatch(/stopped by signal/);
+    expect(calls.some((c) => c.url.endsWith('/bootstrap/claim'))).toBe(false);
+    expect(patches(calls)).toHaveLength(1);
+  });
+
+  it('a signal after a definitive 409: no manual-disable claim; status says no row may exist', async () => {
+    const { calls, impl } = world({ create: 'reject', createStatus: 409 });
+    let cleanup!: () => Promise<void>;
+    let status!: () => { slug?: string; disabled: boolean; mayExist?: boolean };
+    const res = await uploadViaThrowawayCommunity(
+      {
+        ...input,
+        onCleanupReady: (fn, st) => {
+          cleanup = fn;
+          status = st;
+        },
+      },
+      { fetch: impl }
+    );
+    await cleanup();
+    expect(res.communityMayExist).toBe(false);
+    expect(status().mayExist).toBe(false);
+    expect(patches(calls)).toHaveLength(0);
+  });
+
+  it('a stalled slug-lookup request is aborted and the disable still runs', async () => {
+    const calls: string[] = [];
+    const base = world({ create: 'throw', listed: true });
+    const impl: FetchLike = (url, init) => {
+      if (init?.method === 'GET' && url.includes('/admin/communities')) {
+        calls.push('GET');
+        return new Promise<Response>((_, reject) =>
+          init.signal?.addEventListener('abort', () =>
+            reject(new Error('aborted'))
+          )
+        );
+      }
+      return base.impl(url, init);
+    };
+    const res = await uploadViaThrowawayCommunity(
+      {
+        ...input,
+        lookupRetry: {
+          attempts: 2,
+          delayMs: 1,
+          requestTimeoutMs: 30,
+          budgetMs: 200,
+        },
+      },
+      { fetch: impl }
+    );
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    expect(res.communityMayExist).toBe(true);
+    expect(res.communityDisabled).toBe(false);
   });
 
   it('refuses a non-staging URL itself, before any call', async () => {

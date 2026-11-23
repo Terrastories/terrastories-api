@@ -213,8 +213,22 @@ function zipLocalEntryNames(bytes: Uint8Array): string[] {
     const nameEnd = pos + 30 + nameLen;
     if (nameEnd > bytes.length) break;
     names.push(new TextDecoder().decode(bytes.subarray(pos + 30, nameEnd)));
-    if ((flags & 0x08) !== 0) break; // sizes follow the data; cannot skip
-    pos = nameEnd + extraLen + compressedSize;
+    const dataStart = nameEnd + extraLen;
+    if ((flags & 0x08) !== 0) {
+      // Streaming writers set bit 3: sizes live in a trailing data descriptor.
+      // Scan (bounded to the window) for the next local file header.
+      let next = -1;
+      for (let i = dataStart; i + 4 <= bytes.length; i++) {
+        if (view.getUint32(i, true) === 0x04034b50) {
+          next = i;
+          break;
+        }
+      }
+      if (next < 0) break;
+      pos = next;
+      continue;
+    }
+    pos = dataStart + compressedSize;
   }
   return names;
 }

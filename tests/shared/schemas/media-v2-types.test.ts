@@ -3,6 +3,7 @@
  * magic-byte sniffing, categories, and role rules.
  */
 import { describe, it, expect } from 'vitest';
+import { deflateRawSync } from 'node:zlib';
 import {
   ATTACHMENT_ROLE_ALLOWED_CATEGORIES,
   DOCX_MIME,
@@ -54,6 +55,44 @@ const zip = (names: string[]) => {
   }
   return pad(out, 256);
 };
+/** Streaming-writer layout: bit 3 set, sizes 0 in the local header, data descriptor after the data. */
+const zipStreaming = (entries: Array<[string, string]>) => {
+  const out: number[] = [];
+  for (const [name, content] of entries) {
+    const data = deflateRawSync(Buffer.from(content));
+    out.push(0x50, 0x4b, 0x03, 0x04, 20, 0, 0x08, 0, 8, 0, 0, 0, 0, 0);
+    out.push(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0); // crc + sizes unknown
+    out.push(name.length, 0, 0, 0, ...enc(name), ...data);
+    out.push(
+      0x50,
+      0x4b,
+      0x07,
+      0x08,
+      1,
+      2,
+      3,
+      4,
+      data.length,
+      0,
+      0,
+      0,
+      5,
+      0,
+      0,
+      0
+    );
+  }
+  return Uint8Array.from(out);
+};
+const DOCX_STREAMED = zipStreaming([
+  ['_rels/.rels', '<Relationships/>'.repeat(20)],
+  ['[Content_Types].xml', '<Types/>'.repeat(20)],
+  ['word/document.xml', '<w:document/>'.repeat(20)],
+]);
+const XLSX_STREAMED = zipStreaming([
+  ['_rels/.rels', '<Relationships/>'],
+  ['xl/workbook.xml', '<workbook/>'],
+]);
 const DOCX = zip(['[Content_Types].xml', '_rels/.rels', 'word/document.xml']);
 const DOCX_WORD_ONLY = zip(['word/document.xml']);
 const XLSX = zip(['[Content_Types].xml', 'xl/workbook.xml']);
@@ -135,6 +174,7 @@ describe('Rails-parity media types', () => {
     ['application/pdf', 'a.pdf', PDF],
     [DOCX_MIME, 'a.docx', DOCX],
     [DOCX_MIME, 'a.docx', DOCX_WORD_ONLY],
+    [DOCX_MIME, 'a.docx', DOCX_STREAMED],
     ['audio/aac', 'a.aac', ADTS],
     ['audio/aac', 'a.aac', ADTS.subarray(0, 10)],
     ['audio/vnd.dlna.adts', 'a.aac', ADTS],
@@ -150,6 +190,7 @@ describe('Rails-parity media types', () => {
     [DOCX_MIME, 'a.docx', PDF],
     [DOCX_MIME, 'a.docx', XLSX],
     [DOCX_MIME, 'a.docx', PPTX],
+    [DOCX_MIME, 'a.docx', XLSX_STREAMED],
     [DOCX_MIME, 'a.docx', PLAIN_ZIP],
     ['image/heic', 'a.heic', HEIC_MIF1_ONLY],
     ['audio/aac', 'a.aac', ADTS_BAD_SECOND],

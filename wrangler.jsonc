@@ -34,4 +34,36 @@
   // Separate invocation budgets: minute export expiry and minute erasure.
   "triggers": { "crons": ["0 * * * *", "* * * * *", "*/1 * * * *"] },
   "observability": { "enabled": false, "traces": { "enabled": false } },
+  // Staging environment template (scripts/staging/provision.sh, docs/CUTOVER-RUNBOOK.md).
+  // Placeholders only: replace the database_id with the id printed by
+  // `wrangler d1 create terrastories-staging-db` and PUBLIC_ORIGIN with the
+  // deployed workers.dev URL. Every staging resource name starts with
+  // "terrastories-staging-"; provision.sh refuses anything else. Bindings and
+  // vars are NOT inherited from the top level, so they are repeated here.
+  // Workers Free allows 5 cron triggers per account: staging uses 2 (the
+  // duplicate minute entry of the top level is not needed).
+  "env": {
+    "staging": {
+      "name": "terrastories-staging-api",
+      "workers_dev": true,
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "terrastories-staging-db",
+          "database_id": "REPLACE-WITH-STAGING-D1-ID",
+          "migrations_dir": "src/db/migrations",
+        },
+      ],
+      "r2_buckets": [
+        { "binding": "MEDIA", "bucket_name": "terrastories-staging-media" },
+      ],
+      "vars": {
+        "PUBLIC_ORIGIN": "https://terrastories-staging-api.REPLACE-WITH-SUBDOMAIN.workers.dev",
+        "CORS_ORIGINS": "",
+        "R2_BUCKET_NAME": "terrastories-staging-media",
+      },
+      "triggers": { "crons": ["0 * * * *", "* * * * *"] },
+      "observability": { "enabled": false, "traces": { "enabled": false } },
+    },
+  },
 }

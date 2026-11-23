@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -20,6 +21,7 @@ import {
   assertAccountMatches,
   assertMediaBucket,
   assertStagingConfig,
+  assertStagingD1Id,
   listHasName,
   assertCronBudget,
   assertD1Size,
@@ -1223,5 +1225,327 @@ PATH="\${PATH#*:}" exec npx "$@"
     const r = run(['--apply', '--skip-walkthrough'], {}, REMOTE_URL);
     expect(r.status).not.toBe(0);
     expect(r.stderr).toMatch(/R2_ACCOUNT_ID/);
+  });
+});
+
+describe('D1 database_id guard (assertStagingD1Id + CLI)', () => {
+  const makeUuid = (ch: string) =>
+    [8, 4, 4, 4, 12].map((n) => ch.repeat(n)).join('-');
+  const stagingId = makeUuid('1');
+  const prodId = makeUuid('2');
+  const zeroId = makeUuid('0');
+
+  const configWithId = (
+    databaseId: string | undefined,
+    databaseName = 'terrastories-staging-db'
+  ) => ({
+    env: {
+      staging: {
+        d1_databases: [
+          {
+            binding: 'DB',
+            database_name: databaseName,
+            ...(databaseId === undefined ? {} : { database_id: databaseId }),
+          },
+        ],
+      },
+    },
+  });
+
+  const d1List = (entries: unknown) => JSON.stringify(entries);
+
+  it('accepts when terrastories-staging-db uuid equals env.staging DB database_id', () => {
+    const list = d1List([
+      { name: 'terrastories-prod-db', uuid: prodId },
+      { name: 'terrastories-staging-db', uuid: stagingId },
+    ]);
+    expect(() =>
+      assertStagingD1Id(configWithId(stagingId), list)
+    ).not.toThrow();
+    expect(() =>
+      assertStagingD1Id(configWithId(stagingId.toUpperCase()), list)
+    ).not.toThrow();
+  });
+
+  it('refuses a mismatched UUID (e.g. production UUID under staging name) without echoing IDs', () => {
+    const list = d1List([
+      { name: 'terrastories-prod-db', uuid: prodId },
+      { name: 'terrastories-staging-db', uuid: stagingId },
+    ]);
+    let caught: unknown;
+    try {
+      assertStagingD1Id(configWithId(prodId), list);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(GuardError);
+    const msg = (caught as Error).message;
+    expect(msg).toMatch(/does not match/);
+    expect(msg).not.toContain(prodId);
+    expect(msg).not.toContain(stagingId);
+  });
+
+  it('refuses when terrastories-staging-db is absent, lookalike-only, or duplicated', () => {
+    for (const list of [
+      d1List([]),
+      d1List([{ name: 'terrastories-staging-db-old', uuid: stagingId }]),
+      d1List([{ name: 'terrastories-prod-db', uuid: stagingId }]),
+    ]) {
+      expect(() => assertStagingD1Id(configWithId(stagingId), list)).toThrow(
+        /not found/
+      );
+    }
+    expect(() =>
+      assertStagingD1Id(
+        configWithId(stagingId),
+        d1List([
+          { name: 'terrastories-staging-db', uuid: stagingId },
+          { name: 'terrastories-staging-db', uuid: stagingId },
+        ])
+      )
+    ).toThrow(/multiple/);
+  });
+
+  it('refuses placeholder, zero, missing, padded, or malformed config/account UUIDs', () => {
+    const okList = d1List([
+      { name: 'terrastories-staging-db', uuid: stagingId },
+    ]);
+    for (const badId of [
+      'REPLACE-WITH-STAGING-D1-ID',
+      zeroId,
+      '',
+      ` ${stagingId}`,
+      'not-a-uuid',
+      undefined,
+    ]) {
+      expect(() => assertStagingD1Id(configWithId(badId), okList)).toThrow(
+        GuardError
+      );
+    }
+    expect(() => assertStagingD1Id({}, okList)).toThrow(/no env\.staging/);
+    expect(() =>
+      assertStagingD1Id({ env: { staging: { d1_databases: [] } } }, okList)
+    ).toThrow(/no DB binding/);
+    expect(() =>
+      assertStagingD1Id(
+        {
+          env: {
+            staging: {
+              d1_databases: [
+                {
+                  binding: 'DB',
+                  database_name: 'terrastories-staging-db',
+                  database_id: stagingId,
+                },
+                {
+                  binding: 'DB',
+                  database_name: 'terrastories-staging-db',
+                  database_id: stagingId,
+                },
+              ],
+            },
+          },
+        },
+        okList
+      )
+    ).toThrow(/multiple DB bindings/);
+    expect(() =>
+      assertStagingD1Id(configWithId(stagingId, 'terrastories-prod-db'), okList)
+    ).toThrow(/DB binding is not/);
+
+    for (const badList of [
+      '{ not json',
+      '{}',
+      'null',
+      d1List([{ name: 'terrastories-staging-db', uuid: 'not-a-uuid' }]),
+      d1List([{ name: 'terrastories-staging-db', uuid: zeroId }]),
+      d1List([{ name: 'terrastories-staging-db' }]),
+    ]) {
+      expect(() => assertStagingD1Id(configWithId(stagingId), badList)).toThrow(
+        GuardError
+      );
+    }
+  });
+
+  it('guards.ts d1-id CLI reads wrangler JSON on stdin and exits 0/1/2', () => {
+    const work = mkdtempSync(join(tmpdir(), 'd1-id-cli-'));
+    const cfg = join(work, 'wrangler.jsonc');
+    writeFileSync(
+      cfg,
+      readFileSync(join(ROOT, 'wrangler.jsonc'), 'utf8').replace(
+        'REPLACE-WITH-STAGING-D1-ID',
+        stagingId
+      )
+    );
+    const tsx = join(ROOT, 'node_modules/.bin/tsx');
+    const runCli = (args: string[], input: string) =>
+      spawnSync(tsx, ['scripts/staging/guards.ts', ...args], {
+        cwd: ROOT,
+        encoding: 'utf8',
+        input,
+      });
+
+    const ok = runCli(
+      ['d1-id', cfg],
+      d1List([{ name: 'terrastories-staging-db', uuid: stagingId }])
+    );
+    expect(ok.status, ok.stderr).toBe(0);
+
+    const bad = runCli(
+      ['d1-id', cfg],
+      d1List([{ name: 'terrastories-staging-db', uuid: prodId }])
+    );
+    expect(bad.status).toBe(1);
+    expect(bad.stderr).toMatch(/does not match/);
+    expect(bad.stderr).not.toContain(stagingId);
+    expect(bad.stderr).not.toContain(prodId);
+
+    const usage = runCli(['d1-id'], '[]');
+    expect(usage.status).toBe(2);
+    expect(usage.stderr).toContain('d1-id');
+  });
+});
+
+describe('provision.sh D1 database_id deploy guard (fake npx, no network)', () => {
+  const makeUuid = (ch: string) =>
+    [8, 4, 4, 4, 12].map((n) => ch.repeat(n)).join('-');
+  const stagingId = makeUuid('1');
+  const prodId = makeUuid('2');
+  const origin = 'https://app.terrastories.test';
+  const bucket = 'terrastories-staging-media';
+  const erasureBucket = 'terrastories-staging-erasure-records';
+  const corsListOk = `Listing CORS rules for bucket '${bucket}'...\n\nallowed_origins:    ${origin}\nallowed_methods:    PUT\nallowed_headers:    x-amz-content-sha256, content-type\nexposed_headers:    ETag\nmax_age_seconds:    3600\n`;
+  const lifecycleListOk = `Listing lifecycle rules for bucket '${bucket}'...\n\nname:     terrastories-staging-abort-incomplete-multipart\nenabled:  Yes\nprefix:   (all prefixes)\naction:   Abort incomplete multipart uploads after 1 days\n`;
+
+  const setup = (configuredDbId: string, d1ListJson: string) => {
+    const work = mkdtempSync(join(tmpdir(), 'provision-d1-id-'));
+    const repo = join(work, 'repo');
+    const stagingDir = join(repo, 'scripts/staging');
+    const bin = join(work, 'bin');
+    mkdirSync(stagingDir, { recursive: true });
+    mkdirSync(bin);
+    for (const f of ['provision.sh', 'lib.sh', 'guards.ts', 'r2-cors.json']) {
+      copyFileSync(join(ROOT, 'scripts/staging', f), join(stagingDir, f));
+    }
+    chmodSync(join(stagingDir, 'provision.sh'), 0o755);
+    writeFileSync(
+      join(repo, 'wrangler.jsonc'),
+      readFileSync(join(ROOT, 'wrangler.jsonc'), 'utf8').replace(
+        'REPLACE-WITH-STAGING-D1-ID',
+        configuredDbId
+      )
+    );
+    const d1ListFile = join(work, 'd1-list.json');
+    const corsListFile = join(work, 'cors-list.txt');
+    const lifecycleListFile = join(work, 'lifecycle-list.txt');
+    const callsLog = join(work, 'npx.log');
+    writeFileSync(d1ListFile, d1ListJson);
+    writeFileSync(corsListFile, corsListOk);
+    writeFileSync(lifecycleListFile, lifecycleListOk);
+    writeFileSync(
+      join(bin, 'npx'),
+      `#!/usr/bin/env bash
+echo "$@" >> "${callsLog}"
+case "$*" in
+  *whoami*) echo "Account ${ACCOUNT}" ;;
+  *"d1 list"*) cat "${d1ListFile}" ;;
+  *"r2 bucket list"*) printf 'name: %s\\nname: %s\\n' "${bucket}" "${erasureBucket}" ;;
+  *"r2 bucket cors list"*) cat "${corsListFile}" ;;
+  *"r2 bucket lifecycle list"*) cat "${lifecycleListFile}" ;;
+  *tsx*) shift; shift; exec "${ROOT}/node_modules/.bin/tsx" "$@" ;;
+esac
+`
+    );
+    chmodSync(join(bin, 'npx'), 0o755);
+
+    const run = (args: string[] = []) =>
+      spawnSync('bash', [join(stagingDir, 'provision.sh'), ...args], {
+        cwd: repo,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
+          STAGING_FRONTEND_ORIGIN: origin,
+        },
+      });
+    const calls = () =>
+      existsSync(callsLog) ? readFileSync(callsLog, 'utf8') : '';
+    return { run, calls };
+  };
+
+  it('match under --apply: verifies D1 database_id and proceeds to dry-run and real deploy', () => {
+    const { run, calls } = setup(
+      stagingId,
+      JSON.stringify([
+        { name: 'terrastories-prod-db', uuid: prodId },
+        { name: 'terrastories-staging-db', uuid: stagingId },
+      ])
+    );
+    const r = run(['--apply']);
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(r.stdout).toContain('D1 database_id verified');
+    const log = calls();
+    const d1IdPos = log.indexOf('guards.ts d1-id');
+    const dryDeployPos = log.indexOf('wrangler deploy --env staging --dry-run');
+    const realDeployPos = log.indexOf('wrangler deploy --env staging\n');
+    expect(d1IdPos).toBeGreaterThan(-1);
+    expect(dryDeployPos).toBeGreaterThan(d1IdPos);
+    expect(realDeployPos).toBeGreaterThan(dryDeployPos);
+  });
+
+  it('mismatch under --apply: dies before both --dry-run and real deploy', () => {
+    const { run, calls } = setup(
+      prodId,
+      JSON.stringify([
+        { name: 'terrastories-prod-db', uuid: prodId },
+        { name: 'terrastories-staging-db', uuid: stagingId },
+      ])
+    );
+    const r = run(['--apply']);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/does not match/);
+    expect(r.stderr).toMatch(/guard 'd1-id' refused/);
+    expect(r.stderr + r.stdout).not.toContain(prodId);
+    expect(r.stderr + r.stdout).not.toContain(stagingId);
+    expect(calls()).not.toContain('wrangler deploy');
+  });
+
+  it('missing staging DB under --apply: dies before deploy', () => {
+    const { run, calls } = setup(
+      stagingId,
+      JSON.stringify([{ name: 'terrastories-prod-db', uuid: prodId }])
+    );
+    const r = run(['--apply']);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/not found/);
+    expect(calls()).not.toContain('wrangler deploy');
+  });
+
+  it('dry run with a real database_id prints the check and deploy commands only', () => {
+    const { run, calls } = setup(
+      prodId,
+      JSON.stringify([{ name: 'terrastories-staging-db', uuid: stagingId }])
+    );
+    const r = run([]);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain('+ npx wrangler d1 list --json');
+    expect(r.stdout).toContain('+ npx wrangler deploy --env staging --dry-run');
+    expect(r.stdout).toContain('+ npx wrangler deploy --env staging');
+    const log = calls();
+    expect(log).not.toContain('guards.ts d1-id');
+    expect(log).not.toContain('wrangler deploy');
+  });
+
+  it('placeholder database_id keeps existing behavior (skips deploy without d1-id guard)', () => {
+    const { run, calls } = setup('REPLACE-WITH-STAGING-D1-ID', '[]');
+    const r = run(['--apply']);
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(r.stdout).toContain(
+      'wrangler.jsonc still has the placeholder staging database_id: not deploying the Worker'
+    );
+    const log = calls();
+    expect(log).not.toContain('guards.ts d1-id');
+    expect(log).not.toContain('wrangler deploy');
   });
 });

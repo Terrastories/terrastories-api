@@ -7,6 +7,7 @@
 //   node scripts/staging/parse-tail.mjs cpu-tail.jsonl
 //   node scripts/staging/parse-tail.mjs < cpu-tail.jsonl
 import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 
 export function splitJsonObjects(text) {
   const out = [];
@@ -56,9 +57,10 @@ export function tailRows(text) {
   return rows;
 }
 
+// pathToFileURL resolves relative paths and encodes spaces/unicode correctly;
+// 'file://' + argv[1] breaks for relative invocations and special characters.
 const isMain =
-  process.argv[1] &&
-  import.meta.url === new URL('file://' + process.argv[1]).href;
+  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
   const text = readFileSync(process.argv[2] ?? 0, 'utf8');
   console.log(

@@ -46,7 +46,9 @@ while [ $# -gt 0 ]; do
     --allow-over-budget) OVER="--allow-over-budget" ;;
     --skip-r2) SKIP_R2=1 ;;
     --r2-via-wrangler) R2_WRANGLER=1 ;;
-    -h|--help) sed -n '2,32p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    # Print the whole comment header (line 2 up to the first non-comment line),
+    # so growing the header never truncates --help.
+    -h|--help) awk 'NR>1 {if (!/^#/) exit; print}' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
   shift
@@ -72,14 +74,16 @@ load --target d1 --dry-run ${OVER:+"$OVER"}
 r2_via_wrangler() {
   local manifest="$SQL_OUT/r2-upload-manifest.json" listing key size ct src tmp got n=0 up=0 present=0 total
   [ -f "$manifest" ] || die "$manifest missing: run the D1 dump step first"
-  listing="$(node -e 'for (const o of JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).objects) console.log([o.key,o.size,o.contentType,o.sha256].join("\t"))' "$manifest")"
+  # \x1f (unit separator) is not IFS whitespace, so empty fields (e.g. an empty
+  # contentType) keep their position instead of collapsing into the next field.
+  listing="$(node -e 'for (const o of JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).objects) console.log([o.key,o.size,o.contentType,o.sha256].join("\x1f"))' "$manifest")"
   total="$(printf '%s\n' "$listing" | grep -c . || true)"
   # Wrangler cannot set the x-amz-meta-sha256 the S3 loader requires on existing
   # objects, so the two paths must not be mixed: refuse before uploading anything.
   node -e 'const m=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.exit(m.objects.some(o=>o.size>314572800)?1:0)' "$manifest" \
     || die "an object is over 300 MiB: --r2-via-wrangler cannot upload it, and objects it uploads lack the checksum metadata the S3 loader needs; use the S3 path for the whole load"
   tmp="$(mktemp)"; chmod 600 "$tmp"
-  while IFS=$'\t' read -r key size ct sha; do
+  while IFS=$'\x1f' read -r key size ct sha; do
     [ -n "$key" ] || continue
     n=$((n+1))
     src="$TRANSFORM/v2-media/$key"

@@ -74,8 +74,9 @@ Staging uses only `terrastories-staging-*` resources, a workers.dev URL, no DNS 
    export WT_SUPER_IDENTIFIER=... WT_SUPER_PASSWORD=...     # staging super admin, env only
    scripts/staging/smoke.sh --community barbara --apply
    ```
-   Checks `/health` is 200, `/dev/seed` is 404 for GET and HEAD, runs `npm run walkthrough` with `--d1 --super-credentials-env --allow-destructive` (disposable community only), runs the R2 part-checksum probe, and prints the CPU measurement procedure (`scripts/staging/smoke.sh --cpu-procedure`).
-   For a rehearsal on `wrangler dev --local` use `scripts/staging/smoke.sh --local` with `STAGING_URL=http://127.0.0.1:<port>` (loopback only; the R2 probe is skipped).
+   Checks `/health` is 200, `/dev/seed` is 404 for GET and HEAD, runs `npm run walkthrough` with `--d1 --super-credentials-env --allow-destructive` (disposable community only), runs the R2 part-checksum probe, and prints the CPU measurement procedure (`scripts/staging/smoke.sh --cpu-procedure`). `WT_SUPER_IDENTIFIER`/`WT_SUPER_PASSWORD` are required only when the walkthrough will actually run (not with `--skip-walkthrough`, and not when smoke's own marker shows a run today).
+   Without bucket-scoped S3 credentials, add `--skip-r2-probe`: it prints `R2 probe skipped: not verified` and the final summary records the probe as NOT done, never a pass; the go/no-go probe item stays unchecked until the probe actually runs.
+   For a rehearsal on `wrangler dev --local` use `scripts/staging/smoke.sh --local` with `STAGING_URL=http://127.0.0.1:<port>` (loopback only; the R2 probe is skipped and the summary records it as NOT done).
 5. **All communities in staging.** Only if the R2 budget allows (decision A below) or a paid plan is approved. Free R2 holds 10 GB, so 30 GB cannot be staged on Free. If not possible, rehearse the rest as D1-only (`--skip-r2` on `load-community.sh`), accept that media-dependent checks are covered by `barbara` only, and record that in the go/no-go sheet. Rehearse the real full capture timing at least once: its duration is the maintenance-window length.
 6. **Rollback rehearsal on staging**: restore from a Time Travel bookmark (section 9) at least once, with the orphan-sweep hold set first.
 
@@ -101,7 +102,8 @@ Operator notes from the run:
 - Without S3 credentials use `scripts/staging/load-community.sh ... --apply --r2-via-wrangler` (objects over 300 MiB need the S3 path).
 - `wrangler tail <worker> --format json` takes no `--env` (the worker name already includes `staging`) and prints pretty-printed multi-line JSON. Parse it with `node scripts/staging/parse-tail.mjs`.
 - `POST /v2/media` with raw bytes accepts only `role=user_photo`; send no role for the CPU measurement.
-- D1 allows one committed import per UTC day, so a second walkthrough on the same UTC day fails. Use `smoke.sh --skip-walkthrough`, or rerun after 00:00 UTC (smoke prints "walkthrough already ran today" when its own marker for that target shows a run today; a run from another machine is not seen, so use the flag).
+- D1 allows one committed import per UTC day, so a second walkthrough on the same UTC day fails. Use `smoke.sh --skip-walkthrough`, or rerun after 00:00 UTC (smoke prints "walkthrough already ran today" when its own marker for that target shows a run today; a run from another machine is not seen, so use the flag). The marker records the UTC day at write time, so a walkthrough that crosses midnight still blocks a second run on the new day.
+- No bucket-scoped R2 API token yet: run smoke with `--skip-r2-probe`. It prints "R2 probe skipped: not verified" and its summary says the probe is NOT done; that is not a pass and not a recorded result, so the section 5 probe item stays unchecked until the probe runs with real credentials.
 
 ## 4. Decisions to resolve before production
 
@@ -129,7 +131,7 @@ All must be true on the final rehearsal, with evidence attached. A single NO is 
 - [ ] Local workerd rehearsal (optional, before staging): `npm run walkthrough:workers` passes 89/89.
 - [ ] `verify.sql` passed on staging D1 (rows, applied-file count, sequence floors).
 - [ ] Row and object counts reconcile with the Stage-2 manifests (source, bundle, target, archive; `validation-summary.txt` has no unexplained difference).
-- [ ] R2 part-checksum probe result recorded (exit 0 enforced, or exit 2 not enforced: both are acceptable once recorded; exit 1 inconclusive is not).
+- [ ] R2 part-checksum probe result recorded (exit 0 enforced, or exit 2 not enforced: both are acceptable once recorded; exit 1 inconclusive is not). A `--skip-r2-probe` smoke run is NOT a recorded result: its summary says the probe is NOT done and this box stays unchecked.
 - [ ] CPU measurements recorded and under budget: 90 MB raw upload and 300 MB multipart upload, no error 1102 (`scripts/staging/smoke.sh --cpu-procedure`).
 - [ ] Manual-review list resolved and signed off:
   - 92 users with null community: 89 are `role_requires_community` and 3 are `super_admin` contradictions; each has a recorded disposition.

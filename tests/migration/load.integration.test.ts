@@ -97,6 +97,86 @@ describe('migrate:rails:load arguments', () => {
   });
 });
 
+/**
+ * Minimal synthetic Stage-2 output (same pattern as load-r2-multipart.test.ts):
+ * a files table, one verified media object and the manifest ledger. The
+ * AUTOINCREMENT table makes sqlite_sequence exist (loadD1 reads it). The d1
+ * dry run only reads this output, so it needs no Rails source database.
+ */
+async function makeSyntheticOutput(root: string): Promise<string> {
+  const dir = await mkdtemp(join(root, 'out-'));
+  const body = Buffer.from('synthetic media bytes');
+  const sha256 = createHash('sha256').update(body).digest('hex');
+  const key = 'communities/1/media/a';
+  await mkdir(join(dir, 'v2-media', 'communities/1/media'), {
+    recursive: true,
+  });
+  await writeFile(join(dir, 'v2-media', key), body);
+  const db = new Database(join(dir, 'v2.sqlite'));
+  db.exec(
+    'CREATE TABLE files (id TEXT PRIMARY KEY, storage_key TEXT, checksum TEXT, byte_size INTEGER, mime_type TEXT)'
+  );
+  db.exec(
+    'CREATE TABLE attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, file_id TEXT REFERENCES files(id))'
+  );
+  db.prepare('INSERT INTO files VALUES (?, ?, ?, ?, ?)').run(
+    'file-1',
+    key,
+    sha256,
+    body.length,
+    'image/png'
+  );
+  db.prepare('INSERT INTO attachments (file_id) VALUES (?)').run('file-1');
+  db.close();
+  await writeFile(
+    join(dir, 'manifest.json'),
+    JSON.stringify({
+      formatVersion: 1,
+      media: {
+        blobs: [{ blobId: '1', sha256, destinations: [{ fileId: 'file-1' }] }],
+      },
+    })
+  );
+  return dir;
+}
+
+describe('d1 dry run (synthetic output, no Postgres)', () => {
+  it('does not require --sql-out and writes nothing', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'd1-dry-'));
+    const transformDir = await makeSyntheticOutput(root);
+    // Run from an empty temporary cwd so any stray write is observable.
+    const cwd = process.cwd();
+    const empty = await mkdtemp(join(tmpdir(), 'd1-dry-cwd-'));
+    process.chdir(empty);
+    try {
+      const report = await loadTransformOutput({
+        transformDir,
+        target: 'd1',
+        dryRun: true,
+      });
+      expect(report).toMatchObject({ dryRun: true, target: 'd1', objects: 1 });
+      expect(await readdir(empty)).toEqual([]);
+      await expect(
+        loadTransformOutput({ transformDir, target: 'd1' })
+      ).rejects.toThrow(/--sql-out is required/);
+      expect(await readdir(empty)).toEqual([]);
+      // an explicit --sql-out target must not be created by a dry run either
+      const sqlOut = join(empty, 'sql-out');
+      const dry = await loadTransformOutput({
+        transformDir,
+        target: 'd1',
+        dryRun: true,
+        sqlOut,
+      });
+      expect(dry.dryRun).toBe(true);
+      await expect(stat(sqlOut)).rejects.toThrow();
+      expect(await readdir(empty)).toEqual([]);
+    } finally {
+      process.chdir(cwd);
+    }
+  });
+});
+
 describeWithPostgres('Rails -> V2 load (stage 3)', () => {
   let workDir: string;
   let outDir: string;
@@ -123,20 +203,6 @@ describeWithPostgres('Rails -> V2 load (stage 3)', () => {
   }, 120_000);
 
   afterAll(() => undefined);
-
-  describe('d1 dry run', () => {
-    it('does not require --sql-out and writes nothing', async () => {
-      const report = await loadTransformOutput({
-        transformDir: outDir,
-        target: 'd1',
-        dryRun: true,
-      });
-      expect(report).toMatchObject({ dryRun: true, target: 'd1' });
-      await expect(
-        loadTransformOutput({ transformDir: outDir, target: 'd1' })
-      ).rejects.toThrow(/--sql-out is required/);
-    });
-  });
 
   describe('node-sqlite', () => {
     it('dry run reports counts and writes nothing', async () => {

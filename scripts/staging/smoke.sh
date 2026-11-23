@@ -4,7 +4,7 @@
 #
 #   STAGING_URL=https://terrastories-staging-api.<sub>.workers.dev \
 #     scripts/staging/smoke.sh [--apply] [--community SLUG] [--cpu-procedure] [--local]
-#       [--skip-walkthrough]
+#       [--skip-walkthrough] [--skip-r2-probe]
 #
 # Refuses any STAGING_URL whose host is not a staging host (or a production
 # host); STAGING_ALLOW_HOST=<exact host> overrides for a custom staging domain.
@@ -21,16 +21,22 @@
 # another machine is not seen; a walkthrough failure is never reclassified (it
 # could hide a real failed check), it only prints a hint about the daily rule.
 # GET /v2/imports is community-scoped, so it cannot show other runs' imports.
+# --skip-r2-probe: skip the R2 part-checksum probe (e.g. no bucket-scoped S3
+# credentials exist yet). Prints 'R2 probe skipped: not verified' and the final
+# summary records the probe as NOT done, never a pass; the go/no-go probe item
+# stays unchecked until the probe actually runs.
 # --allow-destructive is passed to the walkthrough: it only creates and erases
 # a disposable community, but it is a write run, so it stays staging-only.
 # Env (names only, values never printed):
 #   WT_SUPER_IDENTIFIER, WT_SUPER_PASSWORD      super admin for the walkthrough
+#     (required only when the walkthrough will actually run)
 #   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME  probe
+#     (not required with --skip-r2-probe or --local)
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-COMMUNITY="barbara" CPU_ONLY=0 LOCAL=0 SKIP_WT=0
+COMMUNITY="barbara" CPU_ONLY=0 LOCAL=0 SKIP_WT=0 SKIP_R2_PROBE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --apply) APPLY=1 ;;
@@ -38,7 +44,10 @@ while [ $# -gt 0 ]; do
     --cpu-procedure) CPU_ONLY=1 ;;
     --local) LOCAL=1 ;;
     --skip-walkthrough) SKIP_WT=1 ;;
-    -h|--help) sed -n '2,28p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    --skip-r2-probe) SKIP_R2_PROBE=1 ;;
+    # Print the whole comment header (line 2 up to the first non-comment line),
+    # so growing the header never truncates --help.
+    -h|--help) awk 'NR>1 {if (!/^#/) exit; print}' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
   shift
@@ -94,7 +103,6 @@ else
   echo "+ curl GET and HEAD $BASE/dev/seed (expect 404)"
 fi
 
-if [ "$APPLY" = 1 ]; then need_env WT_SUPER_IDENTIFIER WT_SUPER_PASSWORD; fi
 MARK_DIR="$REPO_ROOT/walkthrough-out"; MARK="$MARK_DIR/.staging-import-utc-day-$(printf '%s' "$BASE" | sha256sum | cut -c1-12)"; TODAY="$(date -u +%F)"
 WT_MSG="walkthrough already ran today (UTC $TODAY): D1 allows one committed import per UTC day. Rerun after 00:00 UTC, or use --skip-walkthrough."
 if [ "$SKIP_WT" = 1 ]; then
@@ -102,6 +110,8 @@ if [ "$SKIP_WT" = 1 ]; then
 elif [ "$APPLY" = 1 ] && [ -f "$MARK" ] && [ "$(cat "$MARK")" = "$TODAY" ]; then
   info "$WT_MSG"
 else
+  # Credentials are needed only here: the walkthrough actually runs.
+  if [ "$APPLY" = 1 ]; then need_env WT_SUPER_IDENTIFIER WT_SUPER_PASSWORD; fi
   WT_RC=0
   (cd "$REPO_ROOT" && run npm run walkthrough -- --base-url "$BASE" --community "$COMMUNITY" --d1 \
     --super-credentials-env --allow-destructive --out "walkthrough-out/staging-$(date -u +%Y%m%dT%H%M%SZ)") || WT_RC=$?
@@ -109,24 +119,41 @@ else
     info "hint: if another run already committed an import today (UTC $TODAY), the import steps fail by design; read summary.md, and rerun after 00:00 UTC or with --skip-walkthrough"
     die "walkthrough failed (exit $WT_RC)"
   else
-    if [ "$APPLY" = 1 ]; then mkdir -p "$MARK_DIR"; echo "$TODAY" > "$MARK"; fi
+    # Recompute the UTC day: a long walkthrough may have crossed midnight, and
+    # the marker must record the day the import actually committed.
+    if [ "$APPLY" = 1 ]; then mkdir -p "$MARK_DIR"; date -u +%F > "$MARK"; fi
     info "go/no-go needs summary.md to show PASS with every interaction row covered (89/89)"
   fi
 fi
 
 if [ "$LOCAL" = 1 ]; then
   info "--local: R2 part-checksum probe and CPU procedure skipped (no S3 endpoint or Free-plan CPU limit on local workerd)"
+  info "summary: R2 part-checksum probe NOT done (--local); not verified, not a pass"
   exit 0
 fi
 
-if [ "$APPLY" = 1 ]; then
-  need_env R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET_NAME
-  guard name "$R2_BUCKET_NAME"
-fi
-(cd "$REPO_ROOT" && run npx tsx scripts/staging/verify-r2-part-checksum.ts) || {
-  rc=$?
+if [ "$SKIP_R2_PROBE" = 1 ]; then
+  info "R2 probe skipped: not verified (--skip-r2-probe)"
+  PROBE_SUMMARY="NOT done (--skip-r2-probe); not verified, not a pass: keep the go/no-go probe item unchecked"
+else
+  if [ "$APPLY" = 1 ]; then
+    need_env R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET_NAME
+    guard name "$R2_BUCKET_NAME"
+  fi
+  PROBE_RC=0
+  (cd "$REPO_ROOT" && run npx tsx scripts/staging/verify-r2-part-checksum.ts) || PROBE_RC=$?
   # exit 2 = not enforced (documented outcome, record it); anything else fails.
-  [ "$rc" = 2 ] && info "probe: R2 does NOT enforce part checksums (recorded, not a failure)" || die "probe inconclusive (exit $rc)"
-}
+  if [ "$PROBE_RC" = 2 ]; then
+    info "probe: R2 does NOT enforce part checksums (recorded, not a failure)"
+    PROBE_SUMMARY="done: NOT enforced (exit 2, recorded)"
+  elif [ "$PROBE_RC" != 0 ]; then
+    die "probe inconclusive (exit $PROBE_RC)"
+  elif [ "$APPLY" = 1 ]; then
+    PROBE_SUMMARY="done: enforced (exit 0)"
+  else
+    PROBE_SUMMARY="NOT done (dry run: command printed only)"
+  fi
+fi
 echo
+info "summary: R2 part-checksum probe $PROBE_SUMMARY"
 cpu_procedure

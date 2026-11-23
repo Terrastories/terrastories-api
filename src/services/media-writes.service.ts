@@ -659,8 +659,18 @@ export class MediaWritesService {
           sha256: expectedSha256,
           ...(contentLength !== undefined ? { contentLength } : {}),
         });
+      } catch (error) {
+        // Cancel unread input while the reader is still attached; releasing
+        // first would make the cancel a no-op and leave the request open.
+        await streamReader.cancel().catch(() => {});
+        await uploadBranch?.cancel().catch(() => {});
+        throw error;
       } finally {
-        streamReader.releaseLock();
+        try {
+          streamReader.releaseLock();
+        } catch {
+          /* already released */
+        }
       }
 
       // Post-put size check: the stored object's real size, not the declared one.

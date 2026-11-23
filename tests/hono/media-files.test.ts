@@ -320,6 +320,26 @@ describe('Slice 9 media upload, metadata, ranged serving, and deletion (#140)', 
     sqlite.close();
   });
 
+  it('allows the x-content-sha256 header in the CORS preflight for browser uploads (#249)', async () => {
+    const preflight = await app.request(
+      `${API_ORIGIN}/v2/media?filename=a.png`,
+      {
+        method: 'OPTIONS',
+        headers: {
+          origin: CLIENT_ORIGIN,
+          'access-control-request-method': 'POST',
+          'access-control-request-headers': 'content-type, x-content-sha256',
+        },
+      }
+    );
+    expect(preflight.status).toBe(204);
+    const allowed = (
+      preflight.headers.get('access-control-allow-headers') ?? ''
+    ).toLowerCase();
+    expect(allowed).toContain('x-content-sha256');
+    expect(allowed).toContain('content-type');
+  });
+
   it('sniffs only MAGIC_SNIFF_BYTES of a first chunk larger than 8 KiB and stores every byte with a matching checksum', async () => {
     // A single multipart body larger than the sniff window: the first stream
     // chunk exceeds MAGIC_SNIFF_BYTES, so the bounded sniff copy and the

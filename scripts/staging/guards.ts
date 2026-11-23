@@ -9,6 +9,7 @@
  *   tsx guards.ts account <expected-id>        reads `wrangler whoami` text on stdin
  *   tsx guards.ts crons <wrangler.jsonc> <env> cron triggers within the free limit
  *   tsx guards.ts d1-size <bytes>              D1 database within the free limit
+ *   tsx guards.ts d1-id <wrangler.jsonc>       stdin: `wrangler d1 list --json` uuid matches env.staging DB database_id
  *   tsx guards.ts config <wrangler.jsonc>      env.staging matches the kit's fixed names
  *   tsx guards.ts url <staging-url> [--local]  URL is a staging origin (--local: loopback http only)
  *   tsx guards.ts origin <origin>              bare frontend origin (scheme://host[:port])
@@ -136,7 +137,11 @@ export function countCrons(config: unknown, env: string): number {
  */
 type StagingEnv = {
   name?: string;
-  d1_databases?: Array<{ binding?: string; database_name?: string }>;
+  d1_databases?: Array<{
+    binding?: string;
+    database_name?: string;
+    database_id?: string;
+  }>;
   r2_buckets?: Array<{ binding?: string; bucket_name?: string }>;
   vars?: Record<string, string>;
   triggers?: { crons?: string[] };
@@ -223,6 +228,105 @@ export function assertD1Size(bytes: number): void {
       'refused: D1 database is ' +
         String(bytes) +
         ' bytes, above 90 percent of the 500 MB free limit'
+    );
+  }
+}
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ZERO_UUID = '00000000-0000-0000-0000-000000000000';
+
+/**
+ * stdin: `wrangler d1 list --json` output from the guarded account.
+ * Verifies that `env.staging` DB `database_id` in wrangler.jsonc equals the
+ * UUID of `terrastories-staging-db` in that account, so a production UUID
+ * pasted under the staging name cannot bind the staging Worker to production
+ * data. Never prints UUIDs or account listings in error messages.
+ */
+export function assertStagingD1Id(config: unknown, d1ListJson: string): void {
+  const staging = (config as { env?: { staging?: StagingEnv } }).env?.staging;
+  if (!staging) {
+    throw new GuardError('refused: wrangler.jsonc has no env.staging');
+  }
+  const dbs = (staging.d1_databases ?? []).filter((d) => d.binding === 'DB');
+  const [db] = dbs;
+  if (!db) {
+    throw new GuardError(
+      'refused: wrangler.jsonc env.staging has no DB binding'
+    );
+  }
+  if (dbs.length > 1) {
+    throw new GuardError(
+      'refused: wrangler.jsonc env.staging has multiple DB bindings'
+    );
+  }
+  if (db.database_name !== STAGING_NAMES.d1) {
+    throw new GuardError(
+      'refused: env.staging DB binding is not ' + STAGING_NAMES.d1
+    );
+  }
+  const configuredId = typeof db.database_id === 'string' ? db.database_id : '';
+  if (!UUID_RE.test(configuredId) || configuredId.toLowerCase() === ZERO_UUID) {
+    throw new GuardError(
+      'refused: wrangler.jsonc env.staging DB database_id is missing or not a valid D1 UUID'
+    );
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(d1ListJson);
+  } catch {
+    throw new GuardError(
+      'refused: wrangler d1 list --json output is not valid JSON'
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new GuardError(
+      'refused: wrangler d1 list --json output must be a JSON array'
+    );
+  }
+
+  const matches = parsed.filter(
+    (entry): entry is Record<string, unknown> =>
+      Boolean(entry) &&
+      typeof entry === 'object' &&
+      !Array.isArray(entry) &&
+      (entry as Record<string, unknown>).name === STAGING_NAMES.d1
+  );
+  const [match] = matches;
+  if (!match) {
+    throw new GuardError(
+      'refused: ' +
+        STAGING_NAMES.d1 +
+        ' was not found in wrangler d1 list --json for this account'
+    );
+  }
+  if (matches.length > 1) {
+    throw new GuardError(
+      'refused: multiple ' +
+        STAGING_NAMES.d1 +
+        ' entries in wrangler d1 list --json'
+    );
+  }
+
+  const accountUuid = match.uuid;
+  if (
+    typeof accountUuid !== 'string' ||
+    !UUID_RE.test(accountUuid) ||
+    accountUuid.toLowerCase() === ZERO_UUID
+  ) {
+    throw new GuardError(
+      'refused: ' +
+        STAGING_NAMES.d1 +
+        ' entry in wrangler d1 list --json has no valid uuid'
+    );
+  }
+
+  if (configuredId.toLowerCase() !== accountUuid.toLowerCase()) {
+    throw new GuardError(
+      'refused: wrangler.jsonc env.staging DB database_id does not match ' +
+        STAGING_NAMES.d1 +
+        ' in this account'
     );
   }
 }
@@ -578,6 +682,11 @@ export function main(argv: string[]): number {
       );
     } else if (cmd === 'd1-size' && rest.length === 1)
       assertD1Size(Number(rest[0]));
+    else if (cmd === 'd1-id' && rest.length === 1)
+      assertStagingD1Id(
+        parseJsonc(readFileSync(rest[0] as string, 'utf8')),
+        readStdin()
+      );
     else if (cmd === 'url' && rest.length === 1)
       assertStagingUrl(rest[0] as string, process.env.STAGING_ALLOW_HOST);
     else if (cmd === 'url' && rest.length === 2 && rest[1] === '--local')
@@ -599,7 +708,7 @@ export function main(argv: string[]): number {
       assertCorsPreflight(rest[0] as string, readStdin());
     else {
       process.stderr.write(
-        'usage: guards.ts name|has-name|account|crons|d1-size|config|url|' +
+        'usage: guards.ts name|has-name|account|crons|d1-size|d1-id|config|url|' +
           'origin|cors-file|cors-policy|media-bucket|lifecycle|preflight ...\n'
       );
       return 2;

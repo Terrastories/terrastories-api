@@ -32,7 +32,7 @@ done
 info "mode: $([ "$APPLY" = 1 ] && echo APPLY || echo DRY-RUN)"
 
 if [ "$APPLY" != 1 ]; then
-  echo "+ curl -sS -i -X OPTIONS https://\$R2_ACCOUNT_ID$S3_HOST_SUFFIX/\$R2_BUCKET_NAME -H \"Origin: \$STAGING_FRONTEND_ORIGIN\" -H \"Access-Control-Request-Method: PUT\" -H \"Access-Control-Request-Headers: $PART_UPLOAD_HEADER\""
+  echo "+ curl -s -i -X OPTIONS https://\$R2_ACCOUNT_ID$S3_HOST_SUFFIX/\$R2_BUCKET_NAME -H \"Origin: \$STAGING_FRONTEND_ORIGIN\" -H \"Access-Control-Request-Method: PUT\" -H \"Access-Control-Request-Headers: $PART_UPLOAD_HEADER\""
   exit 0
 fi
 

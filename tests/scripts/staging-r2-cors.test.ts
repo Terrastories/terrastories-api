@@ -399,6 +399,12 @@ writeFileSync(
   join(bin, 'curl'),
   `#!/usr/bin/env bash
 echo "$@" >> "${curlLog}"
+# FAKE_CURL_FAIL: behave like a DNS failure that names the account-scoped host.
+if [ -n "\${FAKE_CURL_FAIL:-}" ]; then
+  for a in "$@"; do case "$a" in https://*) url="$a" ;; esac; done
+  echo "curl: (6) Could not resolve host: \${url#https://}" >&2
+  exit 6
+fi
 cat "$FAKE_PREFLIGHT"
 `
 );
@@ -525,10 +531,28 @@ describe('cors-preflight.sh (fake curl)', () => {
     const logs = calls();
     const r = preflight({});
     expect(r.status, r.stderr).toBe(0);
-    expect(r.stdout).toContain('curl -sS -i -X OPTIONS');
+    expect(r.stdout).toContain('curl -s -i -X OPTIONS');
     expect(r.stdout).toContain(`Origin: $STAGING_FRONTEND_ORIGIN`);
     expect(r.stdout).toContain(PART_UPLOAD_HEADER);
     expect(logs.curl()).toBe('');
+  });
+
+  it('a failed request never prints the account-scoped host', () => {
+    calls();
+    const r = preflight(
+      {
+        STAGING_FRONTEND_ORIGIN: ORIGIN,
+        R2_ACCOUNT_ID: ACCOUNT,
+        R2_BUCKET_NAME: BUCKET,
+        FAKE_CURL_FAIL: '1',
+      },
+      ['--apply']
+    );
+    expect(r.status).not.toBe(0);
+    expect(r.stderr + r.stdout).toContain(
+      `CORS preflight request to bucket ${BUCKET} failed`
+    );
+    expect(r.stderr + r.stdout).not.toContain(ACCOUNT);
   });
 
   it('passes when the answer allows the part PUT from the origin', () => {

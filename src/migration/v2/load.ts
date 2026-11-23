@@ -19,9 +19,11 @@ import {
   copyFile,
   mkdir,
   readFile,
+  link,
   readdir,
   rename,
   stat,
+  unlink,
   writeFile,
 } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
@@ -208,7 +210,8 @@ export async function verifyTransformOutput(
 async function copyExclusive(
   source: string,
   destination: string,
-  expected: { sha256: string; size: number }
+  expected: { sha256: string; size: number },
+  occupiedMessage = 'A different object already exists at a target key'
 ): Promise<void> {
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
   const temporary = destination + '.loading';
@@ -216,17 +219,34 @@ async function copyExclusive(
   await fsyncPath(temporary);
   const written = await sha256OfFile(temporary);
   if (written.sha256 !== expected.sha256 || written.size !== expected.size) {
+    await unlink(temporary).catch(() => undefined);
     throw new Error('A copied file failed SHA-256 verification');
   }
-  let occupied = false;
+  // Publish without ever replacing an existing target: link() fails with
+  // EEXIST if the destination appeared meanwhile (a server may create the
+  // database while media is copying). Filesystems without hard links fall back
+  // to an existence check followed by rename.
   try {
-    await stat(destination);
-    occupied = true;
-  } catch {
-    // free
+    await link(temporary, destination);
+    await unlink(temporary);
+    return;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EEXIST') {
+      await unlink(temporary).catch(() => undefined);
+      throw new Error(occupiedMessage);
+    }
+    if (code !== 'EPERM' && code !== 'ENOTSUP' && code !== 'EXDEV') {
+      throw error;
+    }
   }
+  const occupied = await stat(destination).then(
+    () => true,
+    () => false
+  );
   if (occupied) {
-    throw new Error('A different object already exists at a target key');
+    await unlink(temporary).catch(() => undefined);
+    throw new Error(occupiedMessage);
   }
   await rename(temporary, destination);
 }
@@ -291,7 +311,12 @@ async function loadNodeSqlite(
   // Database last: it never references a missing object.
   const source = join(dir, V2_DATABASE_FILENAME);
   const digest = await sha256OfFile(source);
-  await copyExclusive(source, target, digest);
+  await copyExclusive(
+    source,
+    target,
+    digest,
+    'Refusing to overwrite an existing database at the target'
+  );
   await fsyncPath(dataDir);
   return report;
 }

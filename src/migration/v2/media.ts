@@ -378,6 +378,7 @@ export function planMedia(
   const files: CanonicalRow[] = [];
   const copies: MediaCopyJob[] = [];
   const fileIdByDestination = new Map<string, string>();
+  const blobFieldsArchived = new Set<string>();
   const destinationsByBlob = new Map<string, LedgerDestination[]>();
   const blobInfo = new Map(pendingBlobs.map((blob) => [blob.id, blob]));
   const orderedForFiles = [...canonicalAttachments].sort(
@@ -435,7 +436,7 @@ export function planMedia(
       } catch {
         // kept verbatim in the archive below
       }
-      if (metadata === null) {
+      if (metadata === null && !blobFieldsArchived.has(blob.id)) {
         warn(
           'blob_metadata_not_json_archived',
           'active_storage_blobs',
@@ -451,12 +452,26 @@ export function planMedia(
       }
     }
     const stamp = parseTimestamp(row.created_at);
-    if (stamp === null) {
-      warn(
-        'blob_created_at_invalid_defaulted',
-        'active_storage_blobs',
-        blob.id
-      );
+    if (!blobFieldsArchived.has(blob.id)) {
+      if (stamp === null) {
+        warn(
+          'blob_created_at_invalid_defaulted',
+          'active_storage_blobs',
+          blob.id
+        );
+      } else if (stamp.subMillisecond) {
+        // Keep the original when millisecond storage loses precision.
+        archivedFields.push({
+          table: 'active_storage_blobs',
+          id: blob.id,
+          column: 'created_at',
+          disposition: 'ARCHIVE',
+          value: row.created_at ?? '',
+        });
+        event('active_storage_blobs.created_at:sub_millisecond_archived');
+      }
+      // A blob shared by several destinations is archived once, not per file.
+      blobFieldsArchived.add(blob.id);
     }
     const createdMs = stamp?.ms ?? 0;
     files.push({
@@ -525,6 +540,15 @@ export function planMedia(
         'active_storage_attachments',
         attachment.attachmentId
       );
+    } else if (stamp.subMillisecond) {
+      archivedFields.push({
+        table: 'active_storage_attachments',
+        id: attachment.attachmentId,
+        column: 'created_at',
+        disposition: 'ARCHIVE',
+        value: attachment.createdAt ?? '',
+      });
+      event('active_storage_attachments.created_at:sub_millisecond_archived');
     }
     attachments.push({
       id: Number(attachment.attachmentId),

@@ -77,6 +77,16 @@ const EXTRA_BLOBS = [
     body: '<svg>vector photo</svg>',
     type: 'image/svg+xml',
   },
+  // One blob shared by two communities, with non-JSON metadata and a
+  // sub-millisecond creation time: archived once per source blob.
+  {
+    id: 125,
+    key: 'extrashared01',
+    name: 'shared-logo.svg',
+    body: '<svg>shared across communities</svg>',
+    metadata: 'not json {',
+    createdAt: '2020-11-01 00:00:00.123456',
+  },
   {
     id: 124,
     key: 'extraaudiopic',
@@ -132,10 +142,10 @@ describeWithPostgres('Rails -> V2 media stage (S3)', () => {
             blob.key,
             blob.name,
             'type' in blob ? blob.type : 'image/png',
-            '{"identified":true}',
+            'metadata' in blob ? blob.metadata : '{"identified":true}',
             Buffer.byteLength(blob.body),
             md5b64(blob.body),
-            '2020-11-01 00:00:00',
+            'createdAt' in blob ? blob.createdAt : '2020-11-01 00:00:00',
             'local',
           ]
         );
@@ -153,7 +163,9 @@ describeWithPostgres('Rails -> V2 media stage (S3)', () => {
           "(142, 'photo', 'Place', 51, 107, '2020-11-02 00:00:00')," +
           // runtime would reject: svg is not allowlisted; audio on a photo role
           "(143, 'photo', 'Speaker', 41, 123, '2020-11-02 00:00:00')," +
-          "(144, 'photo', 'Speaker', 42, 124, '2020-11-02 00:00:00')"
+          "(144, 'photo', 'Speaker', 42, 124, '2020-11-02 00:00:00')," +
+          "(145, 'sponsor_logos', 'Community', 10, 125, '2020-11-02 00:00:00.654321')," +
+          "(146, 'sponsor_logos', 'Community', 11, 125, '2020-11-02 00:00:00')"
       );
       await captureRailsToBundle({
         sourceUrl: dbUrl,
@@ -174,6 +186,48 @@ describeWithPostgres('Rails -> V2 media stage (S3)', () => {
       db.close();
     }
   };
+
+  it("archives a shared blob's fields once and keeps sub-millisecond times", () => {
+    const archive = new Database(join(full.dir, 'legacy-archive.sqlite'), {
+      readonly: true,
+    });
+    try {
+      expect(
+        archive
+          .prepare(
+            "SELECT table_name, source_id, column_name, value FROM archived_fields WHERE (table_name = 'active_storage_blobs' AND source_id = '125' AND column_name IN ('metadata','created_at')) OR (table_name = 'active_storage_attachments' AND source_id = '145' AND column_name = 'created_at') ORDER BY table_name, column_name"
+          )
+          .all()
+      ).toEqual([
+        {
+          table_name: 'active_storage_attachments',
+          source_id: '145',
+          column_name: 'created_at',
+          value: '2020-11-02 00:00:00.654321',
+        },
+        {
+          table_name: 'active_storage_blobs',
+          source_id: '125',
+          column_name: 'created_at',
+          value: '2020-11-01 00:00:00.123456',
+        },
+        {
+          table_name: 'active_storage_blobs',
+          source_id: '125',
+          column_name: 'metadata',
+          value: 'not json {',
+        },
+      ]);
+    } finally {
+      archive.close();
+    }
+    expect(
+      rows(
+        full,
+        "SELECT COUNT(*) AS n FROM files WHERE original_name = 'shared-logo.svg'"
+      )
+    ).toEqual([{ n: 2 }]);
+  });
 
   it('archives attachments the runtime upload rules would reject, with a warning', () => {
     const ids = rows(full, 'SELECT id FROM attachments WHERE id IN (143, 144)');
@@ -292,7 +346,7 @@ describeWithPostgres('Rails -> V2 media stage (S3)', () => {
   it('orders the sponsor trio and story media deterministically', () => {
     const sponsors = rows(
       full,
-      "SELECT id, ordinal FROM attachments WHERE role = 'sponsor_logo' ORDER BY ordinal"
+      "SELECT id, ordinal FROM attachments WHERE role = 'sponsor_logo' AND id < 145 ORDER BY ordinal"
     );
     expect(sponsors).toEqual([
       { id: 108, ordinal: 0 },

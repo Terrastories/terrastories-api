@@ -245,7 +245,7 @@ export function createHonoApp(options: FoundationOptions) {
       origin: (origin) => (corsOrigins.has(origin) ? origin : undefined),
       credentials: true,
       allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-      allowHeaders: ['Content-Type'],
+      allowHeaders: ['Content-Type', 'x-content-sha256'],
     })
   );
   const cookie = {

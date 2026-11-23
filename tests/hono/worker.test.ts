@@ -575,34 +575,97 @@ it('serves the foundation through workerd D1/R2 without Node compatibility', asy
     ).results;
     expect(leftoverLinks).toHaveLength(0);
 
-    // Slice 9 R2 + D1 streaming multipart upload, metadata, Range download, and delete
+    // Slice 9 R2 + D1 raw-body upload (R2-verified SHA-256), metadata, Range download, and delete
     const pngBytes = Uint8Array.from([
       0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
       0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
       0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89,
     ]);
-    const boundary = 'r2WorkerUploadBoundary';
-    const enc = new TextEncoder();
-    const mpHead = enc.encode(
-      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="r2-smoke.png"\r\nContent-Type: image/png\r\n\r\n`
-    );
-    const mpTail = enc.encode(`\r\n--${boundary}--\r\n`);
-    const mpBody = new Uint8Array(
-      mpHead.byteLength + pngBytes.byteLength + mpTail.byteLength
-    );
-    mpBody.set(mpHead, 0);
-    mpBody.set(pngBytes, mpHead.byteLength);
-    mpBody.set(mpTail, mpHead.byteLength + pngBytes.byteLength);
-
-    const r2UpRes = await mf.dispatchFetch('https://worker.test/v2/media', {
-      method: 'POST',
-      headers: {
-        cookie: pubAdminCookie,
-        origin: 'https://worker.test',
-        'content-type': `multipart/form-data; boundary=${boundary}`,
-      },
-      body: mpBody,
+    const rawHeaders = (
+      bytes: Uint8Array,
+      extra: Record<string, string> = {}
+    ) => ({
+      cookie: pubAdminCookie,
+      origin: 'https://worker.test',
+      'content-type': 'image/png',
+      'content-length': String(bytes.byteLength),
+      'x-content-sha256': createHash('sha256').update(bytes).digest('hex'),
+      ...extra,
     });
+    const filesBefore = (
+      await db.prepare('SELECT COUNT(*) AS n FROM files').first<{ n: number }>()
+    )?.n;
+    const objectsBefore = (
+      await bucket.list({ prefix: 'communities/3/media/' })
+    ).objects.length;
+
+    // Checksum mismatch: R2 rejects the put (sha256 option), so there is no
+    // object and no files row (#249).
+    const mismatchRes = await mf.dispatchFetch(
+      'https://worker.test/v2/media?filename=bad-sum.png',
+      {
+        method: 'POST',
+        headers: rawHeaders(pngBytes, { 'x-content-sha256': 'ab'.repeat(32) }),
+        body: pngBytes,
+      }
+    );
+    expect(mismatchRes.status).toBe(422);
+    // Type sniff: PNG-declared bytes that are not a PNG are rejected before put.
+    const notPng = new TextEncoder().encode('definitely not an image');
+    const sniffRes = await mf.dispatchFetch(
+      'https://worker.test/v2/media?filename=fake.png',
+      { method: 'POST', headers: rawHeaders(notPng), body: notPng }
+    );
+    expect(sniffRes.status).toBe(400);
+    // Chunked upload without Content-Length: rejected before any body byte is read.
+    const noLenRes = await mf.dispatchFetch(
+      'https://worker.test/v2/media?filename=nolen.png',
+      {
+        method: 'POST',
+        headers: Object.fromEntries(
+          Object.entries(rawHeaders(pngBytes)).filter(
+            ([k]) => k !== 'content-length'
+          )
+        ),
+        body: new ReadableStream({
+          start(c) {
+            c.enqueue(pngBytes);
+            c.close();
+          },
+        }),
+        duplex: 'half',
+      } as RequestInit
+    );
+    expect(noLenRes.status).toBe(411);
+    // Missing digest header.
+    const noSumRes = await mf.dispatchFetch(
+      'https://worker.test/v2/media?filename=nosum.png',
+      {
+        method: 'POST',
+        headers: Object.fromEntries(
+          Object.entries(rawHeaders(pngBytes)).filter(
+            ([k]) => k !== 'x-content-sha256'
+          )
+        ),
+        body: pngBytes,
+      }
+    );
+    expect(noSumRes.status).toBe(400);
+    expect(
+      (
+        await db
+          .prepare('SELECT COUNT(*) AS n FROM files')
+          .first<{ n: number }>()
+      )?.n
+    ).toBe(filesBefore);
+    expect(
+      (await bucket.list({ prefix: 'communities/3/media/' })).objects.length
+    ).toBe(objectsBefore);
+
+    const r2UpRes = await mf.dispatchFetch(
+      'https://worker.test/v2/media?filename=r2-smoke.png',
+      { method: 'POST', headers: rawHeaders(pngBytes), body: pngBytes }
+    );
     expect(r2UpRes.status).toBe(201);
     const r2UpBody = (await r2UpRes.json()) as {
       data: { id: string; checksum: string; byteSize: number };

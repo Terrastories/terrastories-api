@@ -2,6 +2,7 @@
  * Focused contract, staging-isolation, D1 budget/batch, security, and
  * negative tests for Slice 12 `POST /v2/imports/preview` (#123, #197).
  */
+import { assertPutSha256, rawUploadRequest } from '../helpers/raw-upload.js';
 import {
   describe,
   it,
@@ -121,11 +122,13 @@ function createListableMemoryStorage(): {
         merged.set(c, pos);
         pos += c.byteLength;
       }
+      assertPutSha256(merged, opts?.sha256);
       store.set(storageKey, {
         bytes: merged,
         contentType: opts.contentType,
         uploaded: new Date('2026-06-01T12:00:00.000Z'),
       });
+      return { size: total };
     },
     async delete(storageKey) {
       store.delete(storageKey);
@@ -503,28 +506,23 @@ describe('Slice 12 POST /v2/imports/preview (#123, #197)', () => {
     );
 
     // Upload one authorized existing own-community media file and one foreign file.
-    const upOwnMultipart = buildImportMultipart({
-      csvFilename: 'not-used.csv',
-      includeCsv: false,
-      mediaParts: [
-        {
-          fieldName: 'file',
-          filename: 'existing-own.png',
-          contentType: 'image/png',
-          bytes: PNG_BYTES,
-        },
-      ],
+    const upOwnMultipart = rawUploadRequest({
+      filename: 'existing-own.png',
+      contentType: 'image/png',
+      bytes: PNG_BYTES,
     });
-    const upOwn = await app.request(`${API_ORIGIN}/v2/media`, {
-      method: 'POST',
-      headers: {
-        cookie: cookies.editor,
-        origin: CLIENT_ORIGIN,
-        'content-type': upOwnMultipart.contentTypeHeader,
-      },
-      body: upOwnMultipart.body,
-      duplex: 'half',
-    } as RequestInit);
+    const upOwn = await app.request(
+      `${API_ORIGIN}/v2/media${upOwnMultipart.search}`,
+      {
+        method: 'POST',
+        headers: {
+          ...upOwnMultipart.headers,
+          cookie: cookies.editor,
+          origin: CLIENT_ORIGIN,
+        },
+        body: upOwnMultipart.body,
+      }
+    );
     expect(upOwn.status).toBe(201);
     existingOwnFileId = MediaUploadResponseSchema.parse(await upOwn.json()).data
       .id;

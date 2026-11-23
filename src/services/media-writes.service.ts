@@ -16,16 +16,14 @@ import {
   MAX_MEDIA_UPLOAD_BYTES,
   MAX_METADATA_JSON_LENGTH,
   validateMediaHeaderBytes,
-  type MediaMimeRule,
 } from '../shared/schemas/media-v2.js';
-import {
-  MultipartStreamError,
-  parseMultipartMediaStream,
-} from '../shared/utils/multipart-stream.js';
-import { StreamingSha256 } from '../shared/utils/sha256-stream.js';
 import { streamAuthorizedMediaResponse } from '../shared/utils/media-stream-response.js';
 import type { FoundationUser } from '../repositories/hono-foundation.repository.js';
-import type { FoundationStorage } from './hono-foundation.service.js';
+import {
+  StorageChecksumMismatchError,
+  StorageLengthRequiredError,
+  type FoundationStorage,
+} from './hono-foundation.service.js';
 import {
   FORBIDDEN_BODY,
   INTERNAL_ERROR_BODY,
@@ -41,7 +39,7 @@ import { isDatabaseIdString } from '../shared/types/public.js';
 
 export type MediaWriteResult<T> =
   | CommunityWriteResult<T>
-  | { status: 413 | 415; body: V2ErrorResponse };
+  | { status: 411 | 413 | 415; body: V2ErrorResponse };
 import {
   makeValidationErrorBody,
   type V2ValidationErrorResponse,
@@ -261,7 +259,7 @@ export class MediaWritesService {
           ok: false,
           status: 400,
           body: makeValidationErrorBody([
-            { path: key, message: 'Unrecognized form field' },
+            { path: key, message: 'Unrecognized upload parameter' },
           ]),
         };
       }
@@ -405,8 +403,13 @@ export class MediaWritesService {
 
   async uploadMedia(input: {
     actor: FoundationUser;
+    /** Declared media type of the raw body. */
     contentTypeHeader: string | undefined;
     contentLengthHeader: string | undefined;
+    /** Client-computed lowercase/uppercase hex SHA-256 of the body bytes. */
+    checksumHeader: string | undefined;
+    /** Upload parameters: filename, role, ownerType, ownerId, metadata. */
+    params: URLSearchParams;
     body: ReadableStream<Uint8Array> | null;
     origin: string;
   }): Promise<MediaWriteResult<z.infer<typeof MediaUploadResponseSchema>>> {
@@ -433,28 +436,85 @@ export class MediaWritesService {
       return { status: 403, body: FORBIDDEN_BODY };
     }
 
+    let contentLength: number | undefined;
     if (input.contentLengthHeader !== undefined) {
-      const contentLength = Number(input.contentLengthHeader);
-      if (
-        Number.isFinite(contentLength) &&
-        contentLength > MAX_MEDIA_UPLOAD_BYTES
-      ) {
+      const parsedLength = Number(input.contentLengthHeader);
+      if (Number.isSafeInteger(parsedLength) && parsedLength >= 0) {
+        contentLength = parsedLength;
+      }
+      if (parsedLength > MAX_MEDIA_UPLOAD_BYTES) {
         return { status: 413, body: { error: 'Request too large' } };
       }
     }
 
-    interface StreamedFileUpload {
-      fileId: string;
-      storageKey: string;
-      mimeType: string;
-      rule: MediaMimeRule;
-      originalName: string;
-      byteSize: number;
-      checksum: string;
+    // Upload parameters arrive up front (query + headers), so authorization and
+    // binding are decided before any byte is read or stored.
+    const fields = new Map<string, string>();
+    for (const [key, value] of input.params) {
+      if (fields.has(key)) {
+        return {
+          status: 400,
+          body: makeValidationErrorBody([
+            { path: key, message: 'Duplicate upload parameter' },
+          ]),
+        };
+      }
+      fields.set(key, value);
+    }
+    const binding = this.parseUploadBindingFields(actor, fields);
+    if (!binding.ok) {
+      if (binding.status === 403) {
+        await this.auditDecision({
+          communityId: actor.communityId,
+          actorId: actor.id,
+          action: 'media.upload',
+          resourceIds: [actor.id],
+          outcome: 'denied',
+        });
+      }
+      return { status: binding.status, body: binding.body };
     }
 
-    let streamedUpload: StreamedFileUpload | null = null;
-    let partialStorageKey: string | null = null;
+    const filename = fields.get('filename');
+    if (!filename || filename.trim() === '') {
+      return {
+        status: 400,
+        body: makeValidationErrorBody([
+          { path: 'filename', message: 'Filename is required' },
+        ]),
+      };
+    }
+    const expectedSha256 = input.checksumHeader?.trim().toLowerCase();
+    if (!expectedSha256 || !/^[0-9a-f]{64}$/.test(expectedSha256)) {
+      return {
+        status: 400,
+        body: makeValidationErrorBody([
+          {
+            path: 'x-content-sha256',
+            message: 'x-content-sha256 must be a 64-character hex SHA-256',
+          },
+        ]),
+      };
+    }
+    if (!input.body || contentLength === 0) {
+      return {
+        status: 400,
+        body: makeValidationErrorBody([
+          { path: 'file', message: 'Uploaded file must not be empty' },
+        ]),
+      };
+    }
+
+    // Native-stream storage (R2 on Workers) takes the request body without any
+    // per-chunk JavaScript: require a valid Content-Length before reading a byte,
+    // tee the native body, sniff 8 KiB off one branch, and hand the other
+    // branch straight to storage (#249 CPU budget).
+    const nativeStream = this.storage.nativeStreamPut === true;
+    if (nativeStream && contentLength === undefined) {
+      return { status: 411, body: { error: 'Content-Length required' } };
+    }
+
+    let storageKey: string | null = null;
 
     const cleanupPartialStorage = async (key: string | null) => {
       if (!key) return;
@@ -464,213 +524,171 @@ export class MediaWritesService {
       await this.cleanup.deleteStorageBestEffort(key, 'upload_rollback');
     };
 
+    let uploadBranch: ReadableStream<Uint8Array> | null = null;
+    let sniffSource: ReadableStream<Uint8Array> = input.body;
+    if (nativeStream) {
+      const [sniffBranch, passBranch] = input.body.tee();
+      sniffSource = sniffBranch;
+      uploadBranch = passBranch;
+    }
+    const streamReader = sniffSource.getReader();
     try {
-      const parsed = await parseMultipartMediaStream<StreamedFileUpload>(
-        input.body,
-        input.contentTypeHeader,
-        MAX_MEDIA_UPLOAD_BYTES,
-        async (part) => {
-          // If restricted caller sent role/owner fields before `file`, fail fast
-          // before touching storage.
-          if (part.fieldsSoFar.size > 0) {
-            for (const key of part.fieldsSoFar.keys()) {
-              if (!ALLOWED_UPLOAD_FIELDS.has(key)) {
-                throw new EarlyUploadRejectionError(
-                  400,
-                  makeValidationErrorBody([
-                    { path: key, message: 'Unrecognized form field' },
-                  ])
-                );
-              }
-            }
-            const preRole = part.fieldsSoFar.get('role');
-            const requiresUserPhoto =
-              actor.role === 'super_admin' ||
-              actor.communityId === null ||
-              actor.role === 'viewer' ||
-              actor.role === 'member';
-            if (
-              requiresUserPhoto &&
-              preRole !== undefined &&
-              preRole !== 'user_photo'
-            ) {
-              throw new EarlyUploadRejectionError(403, FORBIDDEN_BODY);
-            }
-          }
-
-          if (!part.filename || part.filename.trim() === '') {
-            throw new EarlyUploadRejectionError(
-              400,
-              makeValidationErrorBody([
-                { path: 'file', message: 'Filename is required' },
-              ])
-            );
-          }
-
-          const streamReader = part.stream.getReader();
-          const initialChunks: Uint8Array[] = [];
-          let initialLen = 0;
-
-          try {
-            while (initialLen < MAGIC_SNIFF_BYTES) {
-              const { done, value } = await streamReader.read();
-              if (done) break;
-              if (value && value.byteLength > 0) {
-                initialChunks.push(value);
-                initialLen += value.byteLength;
-              }
-            }
-          } catch (error) {
-            streamReader.releaseLock();
-            throw error;
-          }
-
-          if (initialLen === 0) {
-            streamReader.releaseLock();
-            throw new EarlyUploadRejectionError(
-              400,
-              makeValidationErrorBody([
-                { path: 'file', message: 'Uploaded file must not be empty' },
-              ])
-            );
-          }
-
-          // Sniff from a copy bounded by MAGIC_SNIFF_BYTES; the original
-          // chunks are streamed through unchanged, so a large first chunk is
-          // never duplicated in memory (§5 Workers limits).
-          const headerBytes = new Uint8Array(
-            Math.min(initialLen, MAGIC_SNIFF_BYTES)
-          );
-          let copyPos = 0;
-          for (const chunk of initialChunks) {
-            if (copyPos >= headerBytes.byteLength) break;
-            const take = Math.min(
-              chunk.byteLength,
-              headerBytes.byteLength - copyPos
-            );
-            headerBytes.set(chunk.subarray(0, take), copyPos);
-            copyPos += take;
-          }
-
-          const headerCheck = await validateMediaHeaderBytes({
-            headerBytes,
-            declaredMime: part.contentType,
-            filename: part.filename,
-          });
-          if (!headerCheck.ok) {
-            streamReader.releaseLock();
-            await part.stream.cancel().catch(() => {});
-            throw new EarlyUploadRejectionError(
-              400,
-              makeValidationErrorBody([
-                { path: 'file', message: headerCheck.message },
-              ])
-            );
-          }
-
-          if (initialLen > headerCheck.rule.maxBytes) {
-            streamReader.releaseLock();
-            await part.stream.cancel().catch(() => {});
-            throw new EarlyUploadRejectionError(413, {
-              error: 'File exceeds maximum allowed size for media type',
-            });
-          }
-
-          const fileId = crypto.randomUUID();
-          const storageKey =
-            actor.communityId !== null
-              ? `communities/${actor.communityId}/media/${fileId}`
-              : `users/${actor.id}/media/${fileId}`;
-          partialStorageKey = storageKey;
-
-          const hasher = new StreamingSha256();
-          let byteSize = initialLen;
-          for (const chunk of initialChunks) hasher.update(chunk);
-          let initialIndex = 0;
-
-          const hashedStream = new ReadableStream<Uint8Array>({
-            async pull(controller) {
-              if (initialIndex < initialChunks.length) {
-                controller.enqueue(initialChunks[initialIndex]!);
-                initialChunks[initialIndex] = new Uint8Array(0);
-                initialIndex += 1;
-                return;
-              }
-              try {
-                const { done, value } = await streamReader.read();
-                if (done) {
-                  controller.close();
-                  return;
-                }
-                if (value && value.byteLength > 0) {
-                  byteSize += value.byteLength;
-                  if (byteSize > headerCheck.rule.maxBytes) {
-                    const err = new UploadCategoryLimitError(
-                      'File exceeds maximum allowed size for media type'
-                    );
-                    controller.error(err);
-                    return;
-                  }
-                  hasher.update(value);
-                  controller.enqueue(value);
-                }
-              } catch (error) {
-                controller.error(error);
-              }
-            },
-            async cancel() {
-              await streamReader.cancel().catch(() => {});
-            },
-          });
-
-          try {
-            await this.storage.put!(storageKey, hashedStream, {
-              contentType: headerCheck.mimeType,
-            });
-          } finally {
-            streamReader.releaseLock();
-          }
-
-          const result: StreamedFileUpload = {
-            fileId,
-            storageKey,
-            mimeType: headerCheck.mimeType,
-            rule: headerCheck.rule,
-            originalName: headerCheck.originalName,
-            byteSize,
-            checksum: hasher.digestHex(),
-          };
-          streamedUpload = result;
-          part.finish(result);
+      // Sniff only the first MAGIC_SNIFF_BYTES for type detection; every other
+      // byte is passed through to storage unread (no TypeScript hashing/parsing).
+      const initialChunks: Uint8Array[] = [];
+      let initialLen = 0;
+      while (initialLen < MAGIC_SNIFF_BYTES) {
+        const { done, value } = await streamReader.read();
+        if (done) break;
+        if (value && value.byteLength > 0) {
+          initialChunks.push(value);
+          initialLen += value.byteLength;
         }
-      );
-
-      const binding = this.parseUploadBindingFields(actor, parsed.fields);
-      if (!binding.ok) {
-        await cleanupPartialStorage(parsed.fileResult.storageKey);
-        if (binding.status === 403) {
-          await this.auditDecision({
-            communityId: actor.communityId,
-            actorId: actor.id,
-            action: 'media.upload',
-            resourceIds: [parsed.fileResult.fileId],
-            outcome: 'denied',
-          });
-        }
-        return { status: binding.status, body: binding.body };
+      }
+      if (initialLen === 0) {
+        throw new EarlyUploadRejectionError(
+          400,
+          makeValidationErrorBody([
+            { path: 'file', message: 'Uploaded file must not be empty' },
+          ])
+        );
       }
 
+      const headerBytes = new Uint8Array(
+        Math.min(initialLen, MAGIC_SNIFF_BYTES)
+      );
+      let copyPos = 0;
+      for (const chunk of initialChunks) {
+        if (copyPos >= headerBytes.byteLength) break;
+        const take = Math.min(
+          chunk.byteLength,
+          headerBytes.byteLength - copyPos
+        );
+        headerBytes.set(chunk.subarray(0, take), copyPos);
+        copyPos += take;
+      }
+
+      const headerCheck = await validateMediaHeaderBytes({
+        headerBytes,
+        declaredMime: input.contentTypeHeader ?? '',
+        filename,
+      });
+      if (!headerCheck.ok) {
+        throw new EarlyUploadRejectionError(
+          400,
+          makeValidationErrorBody([
+            { path: 'file', message: headerCheck.message },
+          ])
+        );
+      }
       if (
         binding.userPhotoTargetUserId !== null &&
-        parsed.fileResult.rule.category !== 'image'
+        headerCheck.rule.category !== 'image'
       ) {
-        await cleanupPartialStorage(parsed.fileResult.storageKey);
-        return {
-          status: 400,
-          body: makeValidationErrorBody([
+        throw new EarlyUploadRejectionError(
+          400,
+          makeValidationErrorBody([
             { path: 'file', message: 'user_photo requires an image file' },
-          ]),
-        };
+          ])
+        );
+      }
+      const maxBytes = headerCheck.rule.maxBytes;
+      if (initialLen > maxBytes || (contentLength ?? 0) > maxBytes) {
+        throw new EarlyUploadRejectionError(413, {
+          error: 'File exceeds maximum allowed size for media type',
+        });
+      }
+
+      const fileId = crypto.randomUUID();
+      storageKey =
+        actor.communityId !== null
+          ? `communities/${actor.communityId}/media/${fileId}`
+          : `users/${actor.id}/media/${fileId}`;
+
+      if (nativeStream) {
+        // Sniff branch is done; cancelling it drops its buffering and leaves the
+        // other native branch flowing to storage.
+        await streamReader.cancel().catch(() => {});
+      }
+      // JS pass-through (Node): only chunk *lengths* are inspected (for the size
+      // cap when Content-Length is absent); chunk contents are never read.
+      const buildPassThrough = (): ReadableStream<Uint8Array> => {
+        let byteSize = initialLen;
+        let initialIndex = 0;
+        return new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            if (initialIndex < initialChunks.length) {
+              controller.enqueue(initialChunks[initialIndex]!);
+              initialChunks[initialIndex] = new Uint8Array(0);
+              initialIndex += 1;
+              return;
+            }
+            try {
+              const { done, value } = await streamReader.read();
+              if (done) {
+                controller.close();
+                return;
+              }
+              if (value && value.byteLength > 0) {
+                byteSize += value.byteLength;
+                if (byteSize > maxBytes) {
+                  controller.error(
+                    new UploadCategoryLimitError(
+                      'File exceeds maximum allowed size for media type'
+                    )
+                  );
+                  return;
+                }
+                controller.enqueue(value);
+              }
+            } catch (error) {
+              controller.error(error);
+            }
+          },
+          async cancel() {
+            await streamReader.cancel().catch(() => {});
+          },
+        });
+      };
+      const passThrough = uploadBranch ?? buildPassThrough();
+
+      let stored: { size: number };
+      try {
+        stored = await this.storage.put!(storageKey, passThrough, {
+          contentType: headerCheck.mimeType,
+          sha256: expectedSha256,
+          ...(contentLength !== undefined ? { contentLength } : {}),
+        });
+      } catch (error) {
+        // Cancel unread input while the reader is still attached; releasing
+        // first would make the cancel a no-op and leave the request open.
+        await streamReader.cancel().catch(() => {});
+        await uploadBranch?.cancel().catch(() => {});
+        throw error;
+      } finally {
+        try {
+          streamReader.releaseLock();
+        } catch {
+          /* already released */
+        }
+      }
+
+      // Post-put size check: the stored object's real size, not the declared one.
+      if (stored.size > maxBytes) {
+        throw new UploadCategoryLimitError(
+          'File exceeds maximum allowed size for media type'
+        );
+      }
+      if (
+        stored.size <= 0 ||
+        (contentLength !== undefined && stored.size !== contentLength)
+      ) {
+        throw new EarlyUploadRejectionError(
+          400,
+          makeValidationErrorBody([
+            { path: 'file', message: 'Body does not match Content-Length' },
+          ])
+        );
       }
 
       // §6.7 reuse rule: a direct upload binds brand-new bytes to the target
@@ -680,41 +698,39 @@ export class MediaWritesService {
       const reuse = await this.repository.authorizeAttachReuse({
         actor,
         communityId: actor.communityId,
-        file: {
-          id: parsed.fileResult.fileId,
-          uploadedBy: actor.id,
-        },
+        file: { id: fileId, uploadedBy: actor.id },
       });
       if (!reuse.ok) {
         throw new ReusedMediaRejectionError();
       }
 
       const dbOutcome = await this.repository.createUploadedMedia({
-        fileId: parsed.fileResult.fileId,
+        fileId,
         actor,
-        storageKey: parsed.fileResult.storageKey,
-        originalName: parsed.fileResult.originalName,
-        mimeType: parsed.fileResult.mimeType,
-        byteSize: parsed.fileResult.byteSize,
-        checksum: parsed.fileResult.checksum,
+        storageKey,
+        originalName: headerCheck.originalName,
+        mimeType: headerCheck.mimeType,
+        byteSize: stored.size,
+        // Verified by storage against the client digest before the row exists.
+        checksum: expectedSha256,
         metadata: binding.metadata,
         userPhotoTargetUserId: binding.userPhotoTargetUserId,
       });
 
       if (dbOutcome.status === 'forbidden') {
-        await cleanupPartialStorage(parsed.fileResult.storageKey);
+        await cleanupPartialStorage(storageKey);
         await this.auditDecision({
           communityId: actor.communityId,
           actorId: actor.id,
           action: 'media.upload',
-          resourceIds: [parsed.fileResult.fileId],
+          resourceIds: [fileId],
           outcome: 'denied',
         });
         return { status: 403, body: FORBIDDEN_BODY };
       }
 
       if (dbOutcome.status === 'invalid_target') {
-        await cleanupPartialStorage(parsed.fileResult.storageKey);
+        await cleanupPartialStorage(storageKey);
         return { status: 404, body: NOT_FOUND_BODY };
       }
 
@@ -744,10 +760,14 @@ export class MediaWritesService {
       }
       return { status: 201, body: responsePayload.data };
     } catch (error) {
-      const cleanupKey = streamedUpload
-        ? (streamedUpload as StreamedFileUpload).storageKey
-        : partialStorageKey;
-      await cleanupPartialStorage(cleanupKey);
+      await streamReader.cancel().catch(() => {});
+      await uploadBranch?.cancel().catch(() => {});
+      try {
+        streamReader.releaseLock();
+      } catch {
+        /* already released */
+      }
+      await cleanupPartialStorage(storageKey);
 
       if (error instanceof EarlyUploadRejectionError) {
         if (error.status === 403) {
@@ -779,22 +799,19 @@ export class MediaWritesService {
       if (error instanceof UploadCategoryLimitError) {
         return { status: 413, body: { error: 'Request too large' } };
       }
-      if (error instanceof MultipartStreamError) {
-        if (error.code === 'invalid_content_type') {
-          return {
-            status: 415,
-            body: { error: 'Expected multipart/form-data' },
-          };
-        }
-        if (error.code === 'payload_too_large') {
-          return { status: 413, body: { error: 'Request too large' } };
-        }
+      if (error instanceof StorageChecksumMismatchError) {
         return {
-          status: 400,
+          status: 422,
           body: makeValidationErrorBody([
-            { path: 'file', message: error.message },
+            {
+              path: 'x-content-sha256',
+              message: 'Body does not match x-content-sha256',
+            },
           ]),
         };
+      }
+      if (error instanceof StorageLengthRequiredError) {
+        return { status: 411, body: { error: 'Content-Length required' } };
       }
       return { status: 500, body: INTERNAL_ERROR_BODY };
     }

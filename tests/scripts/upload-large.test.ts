@@ -19,6 +19,7 @@ import {
   planParts,
   runUpload,
   sha256Hex,
+  uploadViaThrowawayCommunity,
   type FetchLike,
 } from '../../scripts/staging/upload-large.js';
 import { PNG_BYTES } from '../../scripts/walkthrough/client.js';
@@ -664,5 +665,154 @@ describe('upload-large CLI', () => {
     expect(await main(['--file', file], {})).toBe(2);
     expect(err.join('')).toMatch(/STAGING_URL is required/);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('uploadViaThrowawayCommunity (fake fetch)', () => {
+  const SUPER = 'ts_session=super-cookie-value';
+  const ADMIN = 'ts_session=admin-cookie-value';
+  const salt = Buffer.from('0123456789abcdef').toString('base64');
+  const argonAnswer = {
+    algorithm: 'client-argon2id+sha256',
+    salt,
+    params: { memoryKiB: 19 * 1024, iterations: 2, parallelism: 1 },
+  };
+
+  function world(opts: { putStatus?: number; disableStatus?: number } = {}) {
+    return fakeFetch((call) => {
+      const u = call.url.replace(BASE, '');
+      if (call.method === 'POST' && u === '/v2/admin/communities')
+        return Response.json({ data: { id: 42, slug: 'x' } }, { status: 201 });
+      if (u === '/v2/admin/communities/42/claim-tokens')
+        return Response.json(
+          { data: { token: 'claim-token-secret' } },
+          { status: 201 }
+        );
+      if (u === '/v2/bootstrap/claim')
+        return Response.json({ data: {} }, { status: 201 });
+      if (u === '/v2/auth/prelogin') return Response.json(argonAnswer);
+      if (u === '/v2/auth/login') {
+        const res = Response.json({ user: { id: 7 } });
+        res.headers.append(
+          'set-cookie',
+          'ts_session=admin-cookie-value; Path=/; HttpOnly'
+        );
+        return res;
+      }
+      if (call.method === 'POST' && u === '/v2/media/uploads')
+        return sessionResponse([partTarget()]);
+      if (call.method === 'PUT')
+        return new Response(null, {
+          status: opts.putStatus ?? 200,
+          headers: { ETag: '"e1"' },
+        });
+      if (u === '/v2/media/uploads/sess-1/complete')
+        return Response.json({ data: { id: 'media-1' } }, { status: 201 });
+      if (call.method === 'DELETE' && u === '/v2/media/media-1')
+        return new Response(null, { status: 204 });
+      if (call.method === 'DELETE' && u === '/v2/media/uploads/sess-1')
+        return new Response(null, { status: 204 });
+      if (call.method === 'PATCH' && u === '/v2/admin/communities/42/status')
+        return new Response(null, { status: opts.disableStatus ?? 200 });
+      return undefined;
+    });
+  }
+
+  const input = {
+    baseUrl: BASE,
+    superCookie: SUPER,
+    file: { name: 's.mp4', contentType: 'video/mp4', bytes: PNG_BYTES },
+  };
+
+  it('provisions a stg-upload-* community and admin, uploads as the admin, disables the community as super', async () => {
+    const { calls, impl } = world();
+    const lines: string[] = [];
+    const res = await uploadViaThrowawayCommunity(input, {
+      fetch: impl,
+      log: (l) => lines.push(l),
+    });
+    expect(res.error).toBeUndefined();
+    expect(res.community?.slug).toMatch(/^stg-upload-[0-9a-f]{8}$/);
+    expect(res.mediaDeleted).toBe(true);
+    expect(res.communityDisabled).toBe(true);
+    expect(res.disableStatus).toBe(200);
+    expect(res.outcome?.mediaId).toBe('media-1');
+    const seq = calls.map(
+      (c) => `${c.method} ${c.url.replace(BASE, '').split('?')[0]}`
+    );
+    expect(seq.slice(0, 3)).toEqual([
+      'POST /v2/admin/communities',
+      'POST /v2/admin/communities/42/claim-tokens',
+      'POST /v2/bootstrap/claim',
+    ]);
+    expect(seq.at(-1)).toBe('PATCH /v2/admin/communities/42/status');
+    expect(JSON.parse(String(calls[0]!.body)).slug).toBe(res.community!.slug);
+    // super cookie only on super calls; the claim call carries no cookie
+    expect(calls[0]!.headers.cookie).toBe(SUPER);
+    expect(calls[1]!.headers.cookie).toBe(SUPER);
+    expect(calls[2]!.headers.cookie).toBeUndefined();
+    expect(calls.at(-1)!.headers.cookie).toBe(SUPER);
+    // the upload runs as the throwaway admin
+    for (const c of calls.filter((x) => x.url.startsWith(`${BASE}/v2/media`)))
+      expect(c.headers.cookie).toBe(ADMIN);
+    expect(JSON.parse(String(calls.at(-1)!.body))).toEqual({
+      status: 'disabled',
+    });
+  });
+
+  it('still disables the community when the upload fails, and aborts the session', async () => {
+    const { calls, impl } = world({ putStatus: 403 });
+    const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
+    expect(res.error).toMatch(/part 1 PUT answered 403/);
+    expect(res.mediaDeleted).toBe(false);
+    expect(res.communityDisabled).toBe(true);
+    expect(calls.some((c) => c.url.endsWith('/complete'))).toBe(false);
+    expect(
+      calls.some(
+        (c) =>
+          c.method === 'DELETE' && c.url.endsWith('/v2/media/uploads/sess-1')
+      )
+    ).toBe(true);
+    expect(calls.at(-1)!.method).toBe('PATCH');
+  });
+
+  it('reports a failed disable instead of hiding it', async () => {
+    const { impl } = world({ disableStatus: 500 });
+    const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
+    expect(res.communityDisabled).toBe(false);
+    expect(res.disableStatus).toBe(500);
+  });
+
+  it('does not try to disable when the community was never created', async () => {
+    const { calls, impl } = fakeFetch(
+      () => new Response(null, { status: 403 })
+    );
+    const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
+    expect(res.error).toMatch(/POST \/v2\/admin\/communities answered 403/);
+    expect(calls.some((c) => c.method === 'PATCH')).toBe(false);
+  });
+
+  it('never leaks cookies, claim token, password or derived key into the log', async () => {
+    const { calls, impl } = world();
+    const lines: string[] = [];
+    await uploadViaThrowawayCommunity(input, {
+      fetch: impl,
+      log: (l) => lines.push(l),
+    });
+    const log = lines.join('\n');
+    for (const secret of [
+      'super-cookie-value',
+      'admin-cookie-value',
+      'claim-token-secret',
+      'X-Amz-Signature',
+    ])
+      expect(log).not.toContain(secret);
+    const claim = JSON.parse(
+      String(calls.find((c) => c.url.endsWith('/bootstrap/claim'))!.body)
+    );
+    expect(log).not.toContain(claim.password.derivedKey);
+    expect(JSON.stringify(calls.map((c) => c.body ?? '')).includes('wt-')).toBe(
+      false
+    );
   });
 });

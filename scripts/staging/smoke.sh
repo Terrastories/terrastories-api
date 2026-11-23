@@ -86,13 +86,18 @@ Worker CPU measurement (manual; Workers Free budget is about 10 ms per invocatio
       /v2/attachments". Omitting role stores an unbound media object.
  3. Terminal B, 300 MB direct multipart upload (/v2/media/uploads). The helper runs
     the whole flow, requires 2xx on every call, and never prints secrets
-    (credentials come from the environment only):
+    (credentials come from the environment only). Direct upload authorizes by the
+    actor's role in a community and the super admin has none (403), so the helper
+    signs in as the super admin only to create a throwaway community
+    "stg-upload-<random>" and a throwaway community admin (random password, memory
+    only), uploads as that admin, deletes the media, and always disables the
+    community afterwards (it cannot be deleted once claimed):
       STAGING_URL=... WT_SUPER_IDENTIFIER=... WT_SUPER_PASSWORD=... \
         npx tsx scripts/staging/upload-large.ts --file sample300.mp4
     (--dry-run prints the plan with no network call and no credentials needed.
     Use a real ~300 MB mp4/webm sample: complete sniffs the first 8 KiB, so random
     bytes are rejected.) The flow it performs, also doable by hand with curl:
-      a. POST $STAGING_URL/v2/media/uploads with the session cookie and JSON
+      a. POST $STAGING_URL/v2/media/uploads with the admin session cookie and JSON
          {filename, contentType, size, sha256, partSha256: [one hex SHA-256 per
          16 MiB part]} -> require 201 {data: {id, mode, partSize, partCount,
          parts: [{partNumber, method: PUT, url, headers, size}]}}. A 501 means the

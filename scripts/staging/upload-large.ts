@@ -5,6 +5,12 @@
  * call. Credentials come from the environment only and are never printed;
  * presigned part URLs (which carry write capabilities) are never printed.
  *
+ * Direct upload authorizes by the actor's role IN a community, so a super
+ * admin (who has no membership) gets 403. The helper therefore signs in as the
+ * super admin only to provision a throwaway community ("stg-upload-<random>")
+ * with a throwaway community admin (random password, memory only), uploads as
+ * that admin, deletes the media, and ALWAYS disables the community again.
+ *
  *   STAGING_URL=https://terrastories-staging-api.<sub>.workers.dev \
  *   WT_SUPER_IDENTIFIER=... WT_SUPER_PASSWORD=... \
  *     npx tsx scripts/staging/upload-large.ts --file sample300.mp4
@@ -14,17 +20,23 @@
  *   --local          rehearsal against a loopback workerd (http://127.0.0.1:...)
  *   --content-type   declared MIME type (default video/mp4)
  *
- * The super admin uploads an UNBOUND media object (no role) and the helper
+ * The throwaway admin uploads an UNBOUND media object (no role) and the helper
  * deletes it again after completion, so staging keeps no measurement object.
+ * The community cannot be deleted once claimed; it stays behind disabled.
  * On Workers the create call answers 501 unless the bucket-scoped R2 S3
  * credentials are configured (SPEC-V2 section 6.7).
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { GuardError, STAGING_PREFIX, assertStagingUrl } from './guards.js';
-import { loginMaterial, type PreloginAnswer } from '../walkthrough/kdf.js';
+import {
+  loginMaterial,
+  newVerifier,
+  randomPassword,
+  type PreloginAnswer,
+} from '../walkthrough/kdf.js';
 
 /** The API's default and minimum part size (16 MiB); maximum is 64 MiB. */
 export const DEFAULT_PART_SIZE = 16 * 1024 * 1024;
@@ -165,6 +177,10 @@ export interface UploadOutcome {
   createMs: number;
   completeMs: number;
   deleteMs: number;
+  createStatus: number;
+  partStatuses: number[];
+  completeStatus: number;
+  deleteStatus: number;
 }
 
 const jsonHeaders = (cookie: string): Record<string, string> => ({
@@ -266,6 +282,7 @@ export async function runUpload(
       assertPartTarget(target.url, baseUrl, session.mode);
     }
     const etags: Array<{ partNumber: number; etag: string }> = [];
+    const partStatuses: number[] = [];
     for (const target of targets) {
       const plan = plans[target.partNumber - 1];
       if (!plan || target.size !== plan.size) {
@@ -309,6 +326,7 @@ export async function runUpload(
         throw new Error(`part ${target.partNumber}: no ETag in the response`);
       }
       etags.push({ partNumber: target.partNumber, etag });
+      partStatuses.push(res.status);
       log(
         `part ${target.partNumber}/${targets.length} ${res.status} (${plan.size} bytes, ${Date.now() - start} ms)`
       );
@@ -361,6 +379,10 @@ export async function runUpload(
       createMs,
       completeMs,
       deleteMs,
+      createStatus: created.status,
+      partStatuses,
+      completeStatus: done.status,
+      deleteStatus: removed.status,
     };
   } catch (error) {
     // Before completion the session still owns staged bytes: abort it so the
@@ -390,7 +412,7 @@ async function abortSession(
 }
 
 /**
- * Sign in as the super admin (prelogin -> client stretching -> login) and
+ * Sign in as any user (prelogin -> client stretching -> login) and
  * return the ts_session cookie as a Cookie header value ("ts_session=...").
  * The password, derived key and cookie are held in memory only; errors name
  * routes and statuses, never values.
@@ -443,13 +465,189 @@ export async function loginSuper(
   throw new Error('login succeeded but no ts_session cookie was set');
 }
 
+export interface Throwaway {
+  id: number;
+  slug: string;
+  adminIdentifier: string;
+  /** Held in memory only; never logged. */
+  adminPassword: string;
+}
+
+async function expectJson(
+  res: Response,
+  route: string,
+  expected: number[]
+): Promise<Record<string, unknown>> {
+  if (!expected.includes(res.status)) {
+    throw new Error(
+      `${route} answered ${res.status} (expected ${expected.join(' or ')})`
+    );
+  }
+  return ((await res.json().catch(() => null)) ?? {}) as Record<
+    string,
+    unknown
+  >;
+}
+
+/**
+ * As the super admin: create the throwaway community, issue a claim token and
+ * claim it as a new community admin with a random password (the same route
+ * the persona walkthrough uses). The community is returned as soon as it
+ * exists so cleanup can disable it even if a later step fails.
+ */
+export async function provisionThrowaway(
+  fetchImpl: FetchLike,
+  baseUrl: string,
+  superCookie: string,
+  onCreated: (t: Throwaway) => void
+): Promise<Throwaway> {
+  const slug = `stg-upload-${randomBytes(4).toString('hex')}`;
+  const made = await expectJson(
+    await fetchImpl(`${baseUrl}/v2/admin/communities`, {
+      method: 'POST',
+      headers: jsonHeaders(superCookie),
+      body: JSON.stringify({ slug }),
+      redirect: 'error',
+    }),
+    'POST /v2/admin/communities',
+    [201]
+  );
+  const id = (made.data as { id?: unknown } | undefined)?.id;
+  if (typeof id !== 'number') {
+    throw new Error('create community answered 201 but returned no id');
+  }
+  const throwaway: Throwaway = {
+    id,
+    slug,
+    adminIdentifier: `${slug}-admin`,
+    adminPassword: randomPassword(),
+  };
+  onCreated(throwaway);
+  const tokenBody = await expectJson(
+    await fetchImpl(`${baseUrl}/v2/admin/communities/${id}/claim-tokens`, {
+      method: 'POST',
+      headers: jsonHeaders(superCookie),
+      body: JSON.stringify({ ttlSeconds: 3600 }),
+      redirect: 'error',
+    }),
+    'POST /v2/admin/communities/:id/claim-tokens',
+    [201]
+  );
+  const token = (tokenBody.data as { token?: unknown } | undefined)?.token;
+  if (typeof token !== 'string' || !token) {
+    throw new Error('claim token answered 201 but returned no token');
+  }
+  const verifier = await newVerifier(throwaway.adminPassword);
+  await expectJson(
+    // the claimant has no session: no cookie on this call
+    await fetchImpl(`${baseUrl}/v2/bootstrap/claim`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        token,
+        username: throwaway.adminIdentifier,
+        email: `${slug}-admin@upload.example.test`,
+        displayName: `Upload admin (${slug})`,
+        password: verifier,
+      }),
+      redirect: 'error',
+    }),
+    'POST /v2/bootstrap/claim',
+    [200, 201]
+  );
+  return throwaway;
+}
+
+export interface ThroughCommunityResult {
+  community?: { slug: string };
+  outcome?: UploadOutcome;
+  error?: string;
+  /** HTTP status of the disable call, when one was made. */
+  disableStatus?: number;
+  communityDisabled: boolean;
+  mediaDeleted: boolean;
+}
+
+/**
+ * Provision a throwaway community + admin as the super admin, run the upload
+ * as that admin, then ALWAYS (finally) disable the community as the super
+ * admin. Never throws: failures land in `error` so the caller can print the
+ * cleanup outcome. Nothing here prints a password or cookie.
+ */
+export async function uploadViaThrowawayCommunity(
+  input: {
+    baseUrl: string;
+    superCookie: string;
+    file: UploadFile;
+    partSize?: number;
+  },
+  deps: UploadDeps
+): Promise<ThroughCommunityResult> {
+  const { baseUrl, superCookie } = input;
+  const result: ThroughCommunityResult = {
+    communityDisabled: false,
+    mediaDeleted: false,
+  };
+  const log = deps.log ?? ((): void => {});
+  let created: Throwaway | undefined;
+  try {
+    const t = await provisionThrowaway(
+      deps.fetch,
+      baseUrl,
+      superCookie,
+      (c) => {
+        created = c;
+        result.community = { slug: c.slug };
+      }
+    );
+    log(`community ${t.slug} created and claimed by a throwaway admin`);
+    const cookie = await loginSuper(
+      deps.fetch,
+      baseUrl,
+      t.adminIdentifier,
+      t.adminPassword
+    );
+    log('signed in as the throwaway admin (cookie held in memory)');
+    result.outcome = await runUpload(
+      { baseUrl, cookie, file: input.file, partSize: input.partSize },
+      deps
+    );
+    result.mediaDeleted = true;
+  } catch (error) {
+    result.error = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (created) {
+      try {
+        const res = await deps.fetch(
+          `${baseUrl}/v2/admin/communities/${created.id}/status`,
+          {
+            method: 'PATCH',
+            headers: jsonHeaders(superCookie),
+            body: JSON.stringify({ status: 'disabled' }),
+            redirect: 'error',
+          }
+        );
+        result.disableStatus = res.status;
+        result.communityDisabled = res.ok;
+      } catch {
+        result.communityDisabled = false;
+      }
+    }
+  }
+  return result;
+}
+
 const USAGE = `Usage: STAGING_URL=... WT_SUPER_IDENTIFIER=... WT_SUPER_PASSWORD=... \\
   npx tsx scripts/staging/upload-large.ts --file <path> [options]
   --file <path>        media file to upload (a real mp4/webm sample, ~300 MB)
   --dry-run            print the upload plan; no network call, no credentials
   --local              loopback workerd rehearsal (http://127.0.0.1:<port>)
   --content-type <t>   declared MIME type (default video/mp4)
-Credentials are read from the environment only and never printed.`;
+The super admin has no community role, so the helper creates a throwaway
+community "stg-upload-<random>" with a throwaway admin (random password, memory
+only), uploads as that admin, deletes the media, and always disables the
+community afterwards. Credentials are read from the environment only and never
+printed.`;
 
 export async function main(
   argv: string[],
@@ -513,7 +711,7 @@ export async function main(
           (p) =>
             `  part ${p.partNumber}: offset ${p.offset}, ${p.size} bytes, sha256 ${body.partSha256[p.partNumber - 1]}`
         ),
-        `plan: POST /v2/media/uploads -> PUT each returned part target (exact headers) -> POST /v2/media/uploads/<id>/complete -> DELETE /v2/media/<fileId>`,
+        `plan: as the super admin create a stg-upload-* community and a throwaway admin, sign in as that admin, then POST /v2/media/uploads -> PUT each returned part target (exact headers) -> POST /v2/media/uploads/<id>/complete -> DELETE /v2/media/<fileId> -> disable the community`,
         `every call must answer 2xx; record cpuTime/wallTime of create AND complete from wrangler tail (parse-tail.mjs)`,
       ].join('\n') + '\n'
     );
@@ -544,23 +742,40 @@ export async function main(
   const log = (line: string): void => {
     process.stdout.write(`-- ${line}\n`);
   };
+  let superCookie: string;
   try {
-    const cookie = await loginSuper(fetch, baseUrl, identifier, password);
-    log('signed in (session cookie held in memory, never printed)');
-    const outcome = await runUpload(
-      { baseUrl, cookie, file: { name, contentType, bytes } },
-      { fetch, log }
-    );
-    log(
-      `done: ${outcome.partCount} parts, mode ${outcome.mode}; wall ms create=${outcome.createMs} complete=${outcome.completeMs} delete=${outcome.deleteMs} (CPU times come from wrangler tail)`
-    );
-    return 0;
+    superCookie = await loginSuper(fetch, baseUrl, identifier, password);
   } catch (error) {
     process.stderr.write(
       `${error instanceof Error ? error.message : String(error)}\n`
     );
     return 1;
   }
+  log('signed in as the super admin (cookie held in memory, never printed)');
+  const res = await uploadViaThrowawayCommunity(
+    { baseUrl, superCookie, file: { name, contentType, bytes } },
+    { fetch, log }
+  );
+  const o = res.outcome;
+  const lines = [
+    `community: ${res.community?.slug ?? '(not created)'}`,
+    `bytes: ${bytes.byteLength}, parts: ${o?.partCount ?? plans.length}, file id: ${o?.mediaId ?? '(none)'}`,
+  ];
+  if (o) {
+    lines.push(
+      `http: create ${o.createStatus}, parts ${o.partStatuses.join('/')}, complete ${o.completeStatus}, delete ${o.deleteStatus}; mode ${o.mode}`,
+      `wall ms: create=${o.createMs} complete=${o.completeMs} delete=${o.deleteMs} (CPU times come from wrangler tail)`
+    );
+  }
+  lines.push(
+    `cleanup: media ${res.mediaDeleted ? 'deleted' : 'NOT confirmed deleted (see error)'}, community ${res.communityDisabled ? 'disabled' : 'NOT disabled: disable it manually as the super admin'}${res.disableStatus !== undefined ? ` (HTTP ${res.disableStatus})` : ''}`
+  );
+  process.stdout.write(lines.join('\n') + '\n');
+  if (res.error) {
+    process.stderr.write(res.error + '\n');
+    return 1;
+  }
+  return res.communityDisabled ? 0 : 1;
 }
 
 if (

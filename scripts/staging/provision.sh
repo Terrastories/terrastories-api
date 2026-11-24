@@ -20,8 +20,13 @@
 # (SPEC-V2 section 6.7), and before deploying verifies that wrangler.jsonc
 # env.staging DB database_id equals terrastories-staging-db's UUID in the
 # guarded account; a dry run prints those commands only. Optional:
+#   WORKERS_PLAN        (free) target Workers plan: 'free' or 'paid' (default
+#                       free; anything else refuses). Governs config limits
+#                       validation, cron budget (5 on Free, 1000 on Paid), and
+#                       D1 size headroom (90% of 500 MB on Free, 10 GB on Paid).
 #   OTHER_CRON_TRIGGERS (0) cron triggers already used by other Workers in the
-#                       account (production uses 3; the Free limit is 5)
+#                       account (production uses 3; limit is 5 on Free, 1000 on
+#                       Paid)
 # A CLOUDFLARE_API_TOKEN exported for another account breaks wrangler: run
 # with 'env -u CLOUDFLARE_API_TOKEN' (the account guard checks whoami).
 set -euo pipefail
@@ -37,6 +42,9 @@ for arg in "$@"; do
     *) die "unknown argument: $arg" ;;
   esac
 done
+
+resolve_workers_plan
+PLAN="$WORKERS_PLAN_RESOLVED"
 
 D1_NAME="terrastories-staging-db"
 BUCKET="terrastories-staging-media"
@@ -57,12 +65,12 @@ if [ -e "$WRANGLER_REDIRECT" ] || [ -L "$WRANGLER_REDIRECT" ]; then
 fi
 
 guard name "$D1_NAME" "$BUCKET" "$ERASURE_BUCKET" "$WORKER" "$LIFECYCLE_RULE"
-guard config "$WRANGLER_CONFIG"
+guard config "$WRANGLER_CONFIG" "$PLAN"
 check_account
-guard crons "$WRANGLER_CONFIG" staging "${OTHER_CRON_TRIGGERS:-0}"
+guard crons "$WRANGLER_CONFIG" staging "${OTHER_CRON_TRIGGERS:-0}" "$PLAN"
 need_env STAGING_FRONTEND_ORIGIN
 guard origin "$STAGING_FRONTEND_ORIGIN"
-info "mode: $([ "$APPLY" = 1 ] && echo APPLY || echo DRY-RUN)"
+info "mode: $([ "$APPLY" = 1 ] && echo APPLY || echo DRY-RUN) plan: $PLAN"
 
 cd "$REPO_ROOT"
 
@@ -73,6 +81,14 @@ r2_list="$(npx wrangler r2 bucket list 2>/dev/null)" || die "wrangler r2 bucket 
 
 if printf '%s' "$d1_list" | has_name "$D1_NAME"; then
   info "D1 $D1_NAME exists: skipping create"
+  if [ "$APPLY" = 1 ]; then
+    d1_info="$(npx wrangler d1 info "$D1_NAME" --json --config "$WRANGLER_CONFIG" 2>/dev/null)" \
+      || die "wrangler d1 info failed"
+    printf '%s' "$d1_info" | guard d1-size --json "$PLAN"
+    info "D1 size verified within $PLAN plan headroom"
+  else
+    echo "+ npx wrangler d1 info $D1_NAME --json --config \"$WRANGLER_CONFIG\"   (verify D1 size within $PLAN plan headroom)"
+  fi
 else
   run npx wrangler d1 create "$D1_NAME"
   info "paste the printed database_id into wrangler.jsonc env.staging.d1_databases[0]"

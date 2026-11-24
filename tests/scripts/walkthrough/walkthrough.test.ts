@@ -442,6 +442,18 @@ describe('walkthrough safety and options', () => {
     expect(
       parseArgs(['--base-url', 'http://x', '--persona', 'viewer']).persona
     ).toBe('viewer');
+    expect(parseArgs(['--base-url', 'http://x']).workersPlan).toBe('free');
+    expect(
+      parseArgs(['--base-url', 'http://x', '--workers-plan', 'paid'])
+        .workersPlan
+    ).toBe('paid');
+    expect(
+      parseArgs(['--base-url', 'http://x', '--workers-plan', 'free'])
+        .workersPlan
+    ).toBe('free');
+    expect(() =>
+      parseArgs(['--base-url', 'http://x', '--workers-plan', 'pro'])
+    ).toThrow(/--workers-plan/);
     expect(parseArgs(['--admin-credentials-env']).adminEnv).toBe('WT_ADMIN');
     expect(
       parseArgs(['--admin-credentials-env', 'MINE', '--allow-destructive'])
@@ -461,6 +473,48 @@ describe('walkthrough safety and options', () => {
     expect([...selectPersonas('steward')].sort()).toEqual(['steward', 'super']);
     expect(selectPersonas('all').size).toBe(8);
   });
+
+  it('skips Free-only D1 daily-import 429 assertions with a note when --workers-plan paid is set', async () => {
+    const app = await startLocalApp();
+    try {
+      const dir = await outDir();
+      const lines: string[] = [];
+      const result = await runWalkthrough(
+        {
+          baseUrl: app.baseUrl,
+          community: app.community,
+          superIdentifier: app.superAdmin.identifier,
+          superPassword: app.superAdmin.password,
+          setupFromBootstrap: false,
+          allowDestructive: false,
+          d1: true,
+          workersPlan: 'paid',
+        },
+        {
+          persona: 'editor',
+          outDir: dir,
+          quiet: true,
+          onLine: (line) => lines.push(line),
+        }
+      );
+      expect(result.walk.records.filter((r) => r.outcome === 'fail')).toEqual(
+        []
+      );
+      expect(
+        result.walk.records.filter(
+          (r) => r.negative && r.expected?.includes(429)
+        )
+      ).toEqual([]);
+      const skip = result.walk.records.find(
+        (r) => r.outcome === 'skip' && r.note?.includes('not plan-switched yet')
+      );
+      expect(skip).toBeDefined();
+      expect(lines.join('\n')).toContain('SKIPPED');
+      expect(lines.join('\n')).toContain('--workers-plan paid');
+    } finally {
+      await app.close();
+    }
+  }, 120_000);
 
   it('lists every row of handoff sections 4 and 5', () => {
     expect(COVERAGE_ROWS).toHaveLength(89);

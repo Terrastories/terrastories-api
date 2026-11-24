@@ -7,10 +7,15 @@
  * CLI (exit 0 ok, 1 refused, 2 usage):
  *   tsx guards.ts name <resource-name>...      every name starts with the prefix
  *   tsx guards.ts account <expected-id>        reads `wrangler whoami` text on stdin
- *   tsx guards.ts crons <wrangler.jsonc> <env> cron triggers within the free limit
- *   tsx guards.ts d1-size <bytes>              D1 database within the free limit
+ *   tsx guards.ts crons <wrangler.jsonc> <env> [other-crons] [free|paid]
+ *                                              cron triggers within the plan limit
+ *   tsx guards.ts d1-size <bytes> [free|paid]  D1 database within the plan headroom
+ *   tsx guards.ts d1-size --json [free|paid]   stdin: `wrangler d1 info --json` within the plan headroom
  *   tsx guards.ts d1-id <wrangler.jsonc>       stdin: `wrangler d1 list --json` uuid matches env.staging DB database_id
- *   tsx guards.ts config <wrangler.jsonc>      env.staging matches the kit's fixed names
+ *   tsx guards.ts config <wrangler.jsonc> [free|paid]
+ *                                              env.staging matches the kit's fixed names and plan limits
+ *   tsx guards.ts prod-config <wrangler.jsonc> [free|paid]
+ *                                              env.production has no placeholders and valid bindings, crons, and plan limits
  *   tsx guards.ts url <staging-url> [--local]  URL is a staging origin (--local: loopback http only)
  *   tsx guards.ts origin <origin>              bare frontend origin (scheme://host[:port])
  *   tsx guards.ts cors-file <path> <origin>    R2 CORS rules[] file allows that origin's part PUT
@@ -23,12 +28,22 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+export type WorkersPlan = 'free' | 'paid';
+
 export const STAGING_PREFIX = 'terrastories-staging-';
 /** Workers Free: 5 cron triggers per account (all Workers, all environments). */
 export const FREE_CRON_LIMIT_PER_ACCOUNT = 5;
+/** Workers Paid: 1,000 cron triggers per account (all Workers, all environments). */
+export const PAID_CRON_LIMIT_PER_ACCOUNT = 1000;
 /** D1 Free: 500 MB per database. Keep 10 percent headroom. */
 export const D1_FREE_MAX_BYTES = 500 * 1000 * 1000;
 export const D1_HEADROOM_BYTES = Math.floor(D1_FREE_MAX_BYTES * 0.9);
+/** D1 Paid: 10 GB per database. Keep 10 percent headroom. */
+export const D1_PAID_MAX_BYTES = 10 * 1000 * 1000 * 1000;
+export const D1_PAID_HEADROOM_BYTES = Math.floor(D1_PAID_MAX_BYTES * 0.9);
+/** Workers Paid configurable CPU limit bounds (ms). */
+export const PAID_CPU_MS_MIN = 1;
+export const PAID_CPU_MS_MAX = 300_000;
 
 /** Fixed staging resource names: the deployed config and the scripts share them. */
 export const STAGING_NAMES = {
@@ -53,6 +68,14 @@ export const ABORT_MULTIPART_DAYS = 1;
 const NAME_RE = /^terrastories-staging-[a-z0-9][a-z0-9-]*$/;
 
 export class GuardError extends Error {}
+
+export function parseWorkersPlan(raw: string | undefined): WorkersPlan {
+  const value = raw ?? 'free';
+  if (value === 'free' || value === 'paid') return value;
+  throw new GuardError(
+    `refused: WORKERS_PLAN must be 'free' or 'paid' (got ${JSON.stringify(value)})`
+  );
+}
 
 export function assertStagingName(name: string): void {
   if (!NAME_RE.test(name) || name.length > 63) {
@@ -124,18 +147,15 @@ export function parseJsonc(text: string): unknown {
 }
 
 export function countCrons(config: unknown, env: string): number {
-  const root = config as {
-    env?: Record<string, { triggers?: { crons?: string[] } }>;
-  };
-  return root.env?.[env]?.triggers?.crons?.length ?? 0;
+  const root = (
+    config && typeof config === 'object' ? config : {}
+  ) as WranglerConfig;
+  const envBlock = root.env?.[env];
+  if (!envBlock || typeof envBlock !== 'object') return 0;
+  return resolveEffectiveEnvConfig(config, env).triggers?.crons?.length ?? 0;
 }
 
-/**
- * Cron triggers are counted per account. `otherCrons` is the number already
- * used by other Workers (production template: 3). Default assumes the repo's
- * top-level (production) block is deployed too.
- */
-type StagingEnv = {
+export type WranglerEnvBlock = {
   name?: string;
   d1_databases?: Array<{
     binding?: string;
@@ -145,17 +165,133 @@ type StagingEnv = {
   r2_buckets?: Array<{ binding?: string; bucket_name?: string }>;
   vars?: Record<string, string>;
   triggers?: { crons?: string[] };
+  limits?: unknown;
 };
 
-/** The committed env.staging block must match the names the scripts create. */
-export function assertStagingConfig(config: unknown): void {
-  const staging = (config as { env?: { staging?: StagingEnv } }).env?.staging;
-  if (!staging)
-    throw new GuardError('refused: wrangler.jsonc has no env.staging');
+export type WranglerConfig = WranglerEnvBlock & {
+  env?: Record<string, WranglerEnvBlock | undefined>;
+};
+
+export type EffectiveEnvConfig = {
+  name?: string;
+  d1_databases?: WranglerEnvBlock['d1_databases'];
+  r2_buckets?: WranglerEnvBlock['r2_buckets'];
+  vars?: WranglerEnvBlock['vars'];
+  triggers?: WranglerEnvBlock['triggers'];
+  limits?: unknown;
+};
+
+/**
+ * Compute the effective Wrangler config for `env.<envName>` per Wrangler's
+ * per-key inheritance rules (nullish fallback `??`, matching Wrangler's
+ * `inheritable()`):
+ * - Inheritable: `limits` and `triggers` fall back to top-level when omitted
+ *   or `null`; `name` derives `<root-name>-<envName>` when omitted or `null`.
+ * - Non-inheritable: bindings (`d1_databases`, `r2_buckets`) and `vars` come
+ *   strictly from the env block.
+ */
+export function resolveEffectiveEnvConfig(
+  config: unknown,
+  envName: string
+): EffectiveEnvConfig {
+  const root = (
+    config && typeof config === 'object' ? config : {}
+  ) as WranglerConfig;
+  const envBlock = root.env?.[envName];
+  if (!envBlock || typeof envBlock !== 'object') {
+    throw new GuardError(`refused: wrangler.jsonc has no env.${envName}`);
+  }
+  const derivedName =
+    typeof root.name === 'string' && root.name.length > 0
+      ? `${root.name}-${envName}`
+      : undefined;
+  return {
+    name: envBlock.name ?? derivedName,
+    d1_databases: envBlock.d1_databases,
+    r2_buckets: envBlock.r2_buckets,
+    vars: envBlock.vars,
+    triggers: envBlock.triggers ?? root.triggers ?? undefined,
+    limits: envBlock.limits ?? root.limits ?? undefined,
+  };
+}
+
+/**
+ * Validate effective `limits` against the target Workers plan:
+ * - Free: refuse any effective `limits` block (explicit or inherited).
+ * - Paid: require `limits.cpu_ms` present, integer, 1..300000.
+ */
+export function assertPlanLimits(
+  effectiveLimits: unknown,
+  plan: WorkersPlan = 'free',
+  envLabel = 'env.staging'
+): void {
+  const resolvedPlan = parseWorkersPlan(plan);
+  if (resolvedPlan === 'free') {
+    if (effectiveLimits !== undefined) {
+      throw new GuardError(
+        `refused: ${envLabel} has an effective limits block, which is forbidden on Workers Free`
+      );
+    }
+    return;
+  }
+  if (
+    !effectiveLimits ||
+    typeof effectiveLimits !== 'object' ||
+    Array.isArray(effectiveLimits)
+  ) {
+    throw new GuardError(
+      `refused: ${envLabel} must set limits.cpu_ms (integer ${PAID_CPU_MS_MIN}..${PAID_CPU_MS_MAX}) on Workers Paid`
+    );
+  }
+  const cpuMs = (effectiveLimits as Record<string, unknown>).cpu_ms;
+  if (
+    typeof cpuMs !== 'number' ||
+    !Number.isInteger(cpuMs) ||
+    cpuMs < PAID_CPU_MS_MIN ||
+    cpuMs > PAID_CPU_MS_MAX
+  ) {
+    throw new GuardError(
+      `refused: ${envLabel} limits.cpu_ms must be an integer between ${PAID_CPU_MS_MIN} and ${PAID_CPU_MS_MAX} on Workers Paid`
+    );
+  }
+}
+
+type StagingEnv = WranglerEnvBlock;
+
+const PLACEHOLDER_RE = /REPLACE-WITH-/i;
+
+function findPlaceholderValue(value: unknown, path: string): string | null {
+  if (typeof value === 'string') {
+    return PLACEHOLDER_RE.test(value) ? `${path} (${value})` : null;
+  }
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i += 1) {
+      const hit = findPlaceholderValue(value[i], `${path}[${String(i)}]`);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (value && typeof value === 'object') {
+    for (const [k, v] of Object.entries(value)) {
+      const hit = findPlaceholderValue(v, `${path}.${k}`);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
+/** The committed env.staging block must match the names the scripts create and the plan's limits rules. */
+export function assertStagingConfig(
+  config: unknown,
+  plan: WorkersPlan = 'free'
+): void {
+  const resolvedPlan = parseWorkersPlan(plan);
+  const staging = resolveEffectiveEnvConfig(config, 'staging');
+  const rawStaging = (config as WranglerConfig).env?.staging as StagingEnv;
   const bad = (what: string): never => {
     throw new GuardError('refused: env.staging ' + what);
   };
-  if (staging.name !== STAGING_NAMES.worker)
+  if (rawStaging.name !== STAGING_NAMES.worker)
     bad('name is not ' + STAGING_NAMES.worker);
   const d1 = staging.d1_databases?.find((d) => d.binding === 'DB');
   if (d1?.database_name !== STAGING_NAMES.d1)
@@ -169,9 +305,82 @@ export function assertStagingConfig(config: unknown): void {
   if (staging.vars?.R2_BUCKET_NAME !== STAGING_NAMES.media)
     bad('R2_BUCKET_NAME var is not the media bucket');
   if (!staging.vars?.PUBLIC_ORIGIN) bad('has no PUBLIC_ORIGIN');
-  const crons = [...(staging.triggers?.crons ?? [])].sort();
+  const crons = [...(rawStaging.triggers?.crons ?? [])].sort();
   if (JSON.stringify(crons) !== JSON.stringify([...WORKER_CRONS].sort()))
     bad('crons must be exactly ' + WORKER_CRONS.join(' | '));
+  assertPlanLimits(staging.limits, resolvedPlan, 'env.staging');
+}
+
+/**
+ * Preflight for `env.production` before `wrangler deploy --env production`:
+ * refuses any remaining `REPLACE-WITH-*` placeholder, staging resource names,
+ * invalid DB UUID / PUBLIC_ORIGIN, missing bindings/crons, or invalid plan limits.
+ */
+export function assertProductionConfig(
+  config: unknown,
+  plan: WorkersPlan = 'free'
+): void {
+  const resolvedPlan = parseWorkersPlan(plan);
+  const prod = resolveEffectiveEnvConfig(config, 'production');
+  const rawProd = (config as WranglerConfig).env?.production;
+  const bad = (what: string): never => {
+    throw new GuardError('refused: env.production ' + what);
+  };
+  const placeholder = findPlaceholderValue(rawProd, 'env.production');
+  if (placeholder) {
+    bad('still contains unreplaced placeholder at ' + placeholder);
+  }
+  if (!prod.name || PLACEHOLDER_RE.test(prod.name)) {
+    return bad('has no valid worker name');
+  }
+  if (prod.name.startsWith(STAGING_PREFIX)) {
+    bad('name must not use the staging prefix ' + STAGING_PREFIX);
+  }
+  const dbs = (prod.d1_databases ?? []).filter((d) => d.binding === 'DB');
+  const [db] = dbs;
+  if (!db) bad('has no DB binding');
+  if (dbs.length > 1) bad('has multiple DB bindings');
+  if (!db.database_name || db.database_name.startsWith(STAGING_PREFIX)) {
+    bad('DB database_name is missing or uses the staging prefix');
+  }
+  const dbId = typeof db.database_id === 'string' ? db.database_id : '';
+  if (!UUID_RE.test(dbId) || dbId.toLowerCase() === ZERO_UUID) {
+    bad('DB database_id is missing or not a valid D1 UUID');
+  }
+  const bucket = (binding: string) =>
+    prod.r2_buckets?.find((b) => b.binding === binding)?.bucket_name;
+  const media = bucket('MEDIA');
+  const erasure = bucket('ERASURE_RECORDS');
+  if (!media || media.startsWith(STAGING_PREFIX)) {
+    bad('MEDIA binding is missing or uses the staging prefix');
+  }
+  if (!erasure || erasure.startsWith(STAGING_PREFIX)) {
+    bad('ERASURE_RECORDS binding is missing or uses the staging prefix');
+  }
+  if (media === erasure) {
+    bad('MEDIA and ERASURE_RECORDS must use distinct buckets');
+  }
+  if (prod.vars?.R2_BUCKET_NAME !== media) {
+    bad('R2_BUCKET_NAME var is not the MEDIA bucket');
+  }
+  const publicOrigin = prod.vars?.PUBLIC_ORIGIN ?? '';
+  let parsedOrigin: URL;
+  try {
+    parsedOrigin = new URL(publicOrigin);
+  } catch {
+    return bad('PUBLIC_ORIGIN is not a valid https origin');
+  }
+  if (
+    parsedOrigin.protocol !== 'https:' ||
+    publicOrigin !== parsedOrigin.origin
+  ) {
+    bad('PUBLIC_ORIGIN must be a bare https origin');
+  }
+  const crons = [...(prod.triggers?.crons ?? [])].sort();
+  if (JSON.stringify(crons) !== JSON.stringify([...WORKER_CRONS].sort())) {
+    bad('crons must be exactly ' + WORKER_CRONS.join(' | '));
+  }
+  assertPlanLimits(prod.limits, resolvedPlan, 'env.production');
 }
 
 /**
@@ -202,34 +411,93 @@ export function listHasName(output: string, name: string): boolean {
   }
 }
 
+/**
+ * Cron triggers are counted per account. `otherCrons` is the number already
+ * used by other Workers (production template: 3).
+ */
 export function assertCronBudget(
   stagingCrons: number,
-  otherCrons: number
+  otherCrons: number,
+  plan: WorkersPlan = 'free'
 ): void {
-  if (stagingCrons + otherCrons > FREE_CRON_LIMIT_PER_ACCOUNT) {
+  const resolvedPlan = parseWorkersPlan(plan);
+  if (
+    !Number.isFinite(stagingCrons) ||
+    !Number.isFinite(otherCrons) ||
+    stagingCrons < 0 ||
+    otherCrons < 0
+  ) {
+    throw new GuardError('refused: invalid cron trigger count');
+  }
+  const limit =
+    resolvedPlan === 'paid'
+      ? PAID_CRON_LIMIT_PER_ACCOUNT
+      : FREE_CRON_LIMIT_PER_ACCOUNT;
+  if (stagingCrons + otherCrons > limit) {
+    const planLabel = resolvedPlan === 'paid' ? 'Workers Paid' : 'Workers Free';
     throw new GuardError(
       'refused: ' +
         String(stagingCrons) +
         ' staging + ' +
         String(otherCrons) +
-        ' other cron triggers exceed the Workers Free limit of ' +
-        String(FREE_CRON_LIMIT_PER_ACCOUNT) +
+        ' other cron triggers exceed the ' +
+        planLabel +
+        ' limit of ' +
+        String(limit) +
         ' per account'
     );
   }
 }
 
-export function assertD1Size(bytes: number): void {
+export function assertD1Size(bytes: number, plan: WorkersPlan = 'free'): void {
+  const resolvedPlan = parseWorkersPlan(plan);
   if (!Number.isFinite(bytes) || bytes < 0) {
     throw new GuardError('refused: unreadable D1 size');
   }
-  if (bytes > D1_HEADROOM_BYTES) {
+  const headroom =
+    resolvedPlan === 'paid' ? D1_PAID_HEADROOM_BYTES : D1_HEADROOM_BYTES;
+  if (bytes > headroom) {
+    const limitLabel =
+      resolvedPlan === 'paid' ? '10 GB paid limit' : '500 MB free limit';
     throw new GuardError(
       'refused: D1 database is ' +
         String(bytes) +
-        ' bytes, above 90 percent of the 500 MB free limit'
+        ' bytes, above 90 percent of the ' +
+        limitLabel
     );
   }
+}
+
+/**
+ * Extract byte size from `wrangler d1 info <name> --json` output.
+ * Wrangler renames `file_size` to `database_size` only when truthy, so a
+ * 0-byte database may still report `file_size: 0`.
+ */
+export function extractD1SizeFromInfo(infoJson: string): number {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(infoJson);
+  } catch {
+    throw new GuardError(
+      'refused: wrangler d1 info --json output is not valid JSON'
+    );
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new GuardError(
+      'refused: wrangler d1 info --json output must be a JSON object'
+    );
+  }
+  const record = parsed as Record<string, unknown>;
+  const raw =
+    record.database_size !== undefined
+      ? record.database_size
+      : record.file_size;
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0) {
+    throw new GuardError(
+      'refused: unreadable D1 size in wrangler d1 info --json'
+    );
+  }
+  return raw;
 }
 
 const UUID_RE =
@@ -670,18 +938,41 @@ export function main(argv: string[]): number {
     if (cmd === 'name' && rest.length > 0) rest.forEach(assertStagingName);
     else if (cmd === 'has-name' && rest.length === 1)
       return listHasName(readStdin(), rest[0] as string) ? 0 : 3;
-    else if (cmd === 'config' && rest.length === 1)
-      assertStagingConfig(parseJsonc(readFileSync(rest[0] as string, 'utf8')));
+    else if (cmd === 'config' && (rest.length === 1 || rest.length === 2))
+      assertStagingConfig(
+        parseJsonc(readFileSync(rest[0] as string, 'utf8')),
+        parseWorkersPlan(rest[1])
+      );
+    else if (cmd === 'prod-config' && (rest.length === 1 || rest.length === 2))
+      assertProductionConfig(
+        parseJsonc(readFileSync(rest[0] as string, 'utf8')),
+        parseWorkersPlan(rest[1])
+      );
     else if (cmd === 'account' && rest.length === 1)
       assertAccountMatches(readStdin(), rest[0]);
-    else if (cmd === 'crons' && rest.length >= 2) {
+    else if (cmd === 'crons' && rest.length >= 2 && rest.length <= 4) {
       const config = parseJsonc(readFileSync(rest[0] as string, 'utf8'));
+      const otherRaw = rest[2] ?? '0';
+      const otherCrons = otherRaw === '' ? Number.NaN : Number(otherRaw);
       assertCronBudget(
         countCrons(config, rest[1] as string),
-        Number(rest[2] ?? '0')
+        otherCrons,
+        parseWorkersPlan(rest[3])
       );
-    } else if (cmd === 'd1-size' && rest.length === 1)
-      assertD1Size(Number(rest[0]));
+    } else if (
+      cmd === 'd1-size' &&
+      rest[0] === '--json' &&
+      (rest.length === 1 || rest.length === 2)
+    )
+      assertD1Size(
+        extractD1SizeFromInfo(readStdin()),
+        parseWorkersPlan(rest[1])
+      );
+    else if (cmd === 'd1-size' && (rest.length === 1 || rest.length === 2))
+      assertD1Size(
+        rest[0] === '' ? Number.NaN : Number(rest[0]),
+        parseWorkersPlan(rest[1])
+      );
     else if (cmd === 'd1-id' && rest.length === 1)
       assertStagingD1Id(
         parseJsonc(readFileSync(rest[0] as string, 'utf8')),
@@ -708,7 +999,7 @@ export function main(argv: string[]): number {
       assertCorsPreflight(rest[0] as string, readStdin());
     else {
       process.stderr.write(
-        'usage: guards.ts name|has-name|account|crons|d1-size|d1-id|config|url|' +
+        'usage: guards.ts name|has-name|account|crons|d1-size|d1-id|config|prod-config|url|' +
           'origin|cors-file|cors-policy|media-bucket|lifecycle|preflight ...\n'
       );
       return 2;

@@ -14,11 +14,13 @@ import {
   DEFAULT_PART_SIZE,
   buildCreateBody,
   cleanEtag,
+  disableCommunityBySlug,
   loginSuper,
   main,
   planParts,
   runUpload,
   sha256Hex,
+  uploadViaThrowawayCommunity,
   type FetchLike,
 } from '../../scripts/staging/upload-large.js';
 import { PNG_BYTES } from '../../scripts/walkthrough/client.js';
@@ -36,7 +38,9 @@ interface Call {
 }
 
 /** A fetch stand-in that records every call and answers from a route fn. */
-function fakeFetch(route: (call: Call) => Response | undefined) {
+function fakeFetch(
+  route: (call: Call) => Response | Promise<Response> | undefined
+) {
   const calls: Call[] = [];
   const impl: FetchLike = async (url, init = {}) => {
     const headers: Record<string, string> = {};
@@ -54,7 +58,7 @@ function fakeFetch(route: (call: Call) => Response | undefined) {
           : undefined,
     };
     calls.push(call);
-    const res = route(call);
+    const res = await route(call);
     if (!res) throw new Error(`unexpected request: ${call.method} ${url}`);
     return res;
   };
@@ -664,5 +668,720 @@ describe('upload-large CLI', () => {
     expect(await main(['--file', file], {})).toBe(2);
     expect(err.join('')).toMatch(/STAGING_URL is required/);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('uploadViaThrowawayCommunity (fake fetch)', () => {
+  const SUPER = 'ts_session=super-cookie-value';
+  const ADMIN = 'ts_session=admin-cookie-value';
+  const salt = Buffer.from('0123456789abcdef').toString('base64');
+  const argonAnswer = {
+    algorithm: 'client-argon2id+sha256',
+    salt,
+    params: { memoryKiB: 19 * 1024, iterations: 2, parallelism: 1 },
+  };
+
+  function world(
+    opts: {
+      putStatus?: number;
+      disableStatus?: number;
+      disableBody?: 'empty' | 'mismatch';
+      claimStatus?: number;
+      createSlug?: string;
+      /** Create misbehaviour; the server row exists for all but 'reject'. */
+      create?: 'reject' | 'throw' | 'badjson' | 'error5xx';
+      createStatus?: number;
+    } = {}
+  ) {
+    let slug = '';
+    return fakeFetch((call) => {
+      const u = call.url.replace(BASE, '');
+      if (call.method === 'POST' && u === '/v2/admin/communities') {
+        slug = JSON.parse(String(call.body)).slug;
+        if (opts.create === 'reject')
+          return new Response(null, { status: opts.createStatus ?? 409 });
+        if (opts.create === 'throw') throw new Error('socket hang up');
+        if (opts.create === 'badjson')
+          return new Response('<html>', { status: 201 });
+        if (opts.create === 'error5xx')
+          return new Response(null, { status: 502 });
+        return Response.json(
+          { data: { id: 42, slug: opts.createSlug ?? slug } },
+          { status: 201 }
+        );
+      }
+      if (u === '/v2/admin/communities/42/claim-tokens')
+        return Response.json(
+          { data: { token: 'claim-token-secret' } },
+          { status: 201 }
+        );
+      if (u === '/v2/bootstrap/claim')
+        return opts.claimStatus
+          ? new Response(null, { status: opts.claimStatus })
+          : Response.json({ data: {} }, { status: 201 });
+      if (u === '/v2/auth/prelogin') return Response.json(argonAnswer);
+      if (u === '/v2/auth/login') {
+        const res = Response.json({ user: { id: 7 } });
+        res.headers.append(
+          'set-cookie',
+          'ts_session=admin-cookie-value; Path=/; HttpOnly'
+        );
+        return res;
+      }
+      if (call.method === 'POST' && u === '/v2/media/uploads')
+        return sessionResponse([partTarget()]);
+      if (call.method === 'PUT')
+        return new Response(null, {
+          status: opts.putStatus ?? 200,
+          headers: { ETag: '"e1"' },
+        });
+      if (u === '/v2/media/uploads/sess-1/complete')
+        return Response.json({ data: { id: 'media-1' } }, { status: 201 });
+      if (call.method === 'DELETE' && u === '/v2/media/media-1')
+        return new Response(null, { status: 204 });
+      if (call.method === 'DELETE' && u === '/v2/media/uploads/sess-1')
+        return new Response(null, { status: 204 });
+      const patch = /^\/v2\/admin\/communities\/(\d+)\/status$/.exec(u);
+      if (call.method === 'PATCH' && patch) {
+        const status = opts.disableStatus ?? 200;
+        if (opts.disableBody === 'empty') return new Response(null, { status });
+        const id = opts.disableBody === 'mismatch' ? 999 : Number(patch[1]);
+        return Response.json(
+          { data: { id, slug, status: 'disabled', claimStatus: 'claimed' } },
+          { status }
+        );
+      }
+      return undefined;
+    });
+  }
+
+  const input = {
+    baseUrl: BASE,
+    superCookie: SUPER,
+    file: { name: 's.mp4', contentType: 'video/mp4', bytes: PNG_BYTES },
+  };
+
+  it('provisions a stg-upload-* community and admin, uploads as the admin, disables the community as super', async () => {
+    const { calls, impl } = world();
+    const lines: string[] = [];
+    const res = await uploadViaThrowawayCommunity(input, {
+      fetch: impl,
+      log: (l) => lines.push(l),
+    });
+    expect(res.error).toBeUndefined();
+    expect(res.community?.slug).toMatch(/^stg-upload-[0-9a-f]{8}$/);
+    expect(res.mediaDeleted).toBe(true);
+    expect(res.communityDisabled).toBe(true);
+    expect(res.disableStatus).toBe(200);
+    expect(res.outcome?.mediaId).toBe('media-1');
+    const seq = calls.map(
+      (c) => `${c.method} ${c.url.replace(BASE, '').split('?')[0]}`
+    );
+    expect(seq.slice(0, 3)).toEqual([
+      'POST /v2/admin/communities',
+      'POST /v2/admin/communities/42/claim-tokens',
+      'POST /v2/bootstrap/claim',
+    ]);
+    expect(seq.at(-1)).toBe('PATCH /v2/admin/communities/42/status');
+    expect(JSON.parse(String(calls[0]!.body)).slug).toBe(res.community!.slug);
+    // super cookie only on super calls; the claim call carries no cookie
+    expect(calls[0]!.headers.cookie).toBe(SUPER);
+    expect(calls[1]!.headers.cookie).toBe(SUPER);
+    expect(calls[2]!.headers.cookie).toBeUndefined();
+    expect(calls.at(-1)!.headers.cookie).toBe(SUPER);
+    // the upload runs as the throwaway admin
+    for (const c of calls.filter((x) => x.url.startsWith(`${BASE}/v2/media`)))
+      expect(c.headers.cookie).toBe(ADMIN);
+    expect(JSON.parse(String(calls.at(-1)!.body))).toEqual({
+      status: 'disabled',
+    });
+  });
+
+  it('still disables the community when the upload fails, and aborts the session', async () => {
+    const { calls, impl } = world({ putStatus: 403 });
+    const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
+    expect(res.error).toMatch(/part 1 PUT answered 403/);
+    expect(res.mediaDeleted).toBe(false);
+    expect(res.communityDisabled).toBe(true);
+    expect(calls.some((c) => c.url.endsWith('/complete'))).toBe(false);
+    expect(
+      calls.some(
+        (c) =>
+          c.method === 'DELETE' && c.url.endsWith('/v2/media/uploads/sess-1')
+      )
+    ).toBe(true);
+    expect(calls.at(-1)!.method).toBe('PATCH');
+  });
+
+  it('reports a failed disable instead of hiding it', async () => {
+    const { impl } = world({ disableStatus: 500 });
+    const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
+    expect(res.communityDisabled).toBe(false);
+    expect(res.disableStatus).toBe(500);
+  });
+
+  it('does not try to disable when the community was never created', async () => {
+    const { calls, impl } = fakeFetch(
+      () => new Response(null, { status: 403 })
+    );
+    const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
+    expect(res.error).toMatch(/POST \/v2\/admin\/communities answered 403/);
+    expect(calls.some((c) => c.method === 'PATCH')).toBe(false);
+  });
+
+  it('never leaks cookies, claim token, password or derived key into the log', async () => {
+    const { calls, impl } = world();
+    const lines: string[] = [];
+    await uploadViaThrowawayCommunity(input, {
+      fetch: impl,
+      log: (l) => lines.push(l),
+    });
+    const log = lines.join('\n');
+    for (const secret of [
+      'super-cookie-value',
+      'admin-cookie-value',
+      'claim-token-secret',
+      'X-Amz-Signature',
+    ])
+      expect(log).not.toContain(secret);
+    const claim = JSON.parse(
+      String(calls.find((c) => c.url.endsWith('/bootstrap/claim'))!.body)
+    );
+    expect(log).not.toContain(claim.password.derivedKey);
+    expect(JSON.stringify(calls.map((c) => c.body ?? '')).includes('wt-')).toBe(
+      false
+    );
+  });
+
+  it('prints the slug before the create call is sent', async () => {
+    const lines: string[] = [];
+    const { calls, impl } = world();
+    const log = (l: string) => lines.push(`${calls.length}|${l}`);
+    await uploadViaThrowawayCommunity(input, { fetch: impl, log });
+    const first = lines.find((l) => /creating community stg-upload-/.test(l))!;
+    expect(first.startsWith('0|')).toBe(true);
+  });
+
+  it('reports a disable with an empty 200 or a mismatched body as FAILED', async () => {
+    for (const disableBody of ['empty', 'mismatch'] as const) {
+      const { impl } = world({ disableBody });
+      const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
+      expect(res.communityDisabled, disableBody).toBe(false);
+      expect(res.disableStatus).toBe(200);
+    }
+  });
+
+  it('a claim failure (401 or 500) after create still PATCHes and reports disabled', async () => {
+    for (const claimStatus of [401, 500]) {
+      const { calls, impl } = world({ claimStatus });
+      const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
+      expect(res.error, String(claimStatus)).toMatch(
+        new RegExp(`bootstrap/claim answered ${claimStatus}`)
+      );
+      expect(res.communityDisabled).toBe(true);
+      expect(
+        calls.some(
+          (c) =>
+            c.method === 'PATCH' && c.url.endsWith('/communities/42/status')
+        )
+      ).toBe(true);
+    }
+  });
+
+  it('a create response with another slug stops before claim-token and never PATCHes that id', async () => {
+    const { calls, impl } = world({ createSlug: 'someone-else' });
+    const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
+    expect(res.error).toMatch(/does not match the requested slug/);
+    expect(calls.some((c) => c.url.includes('claim-tokens'))).toBe(false);
+    expect(calls.some((c) => c.method === 'PATCH')).toBe(false);
+    expect(res.communityDisabled).toBe(false);
+  });
+
+  const patches = (calls: Call[]) => calls.filter((c) => c.method === 'PATCH');
+  const lists = (calls: Call[]) =>
+    calls.filter(
+      (c) => c.method === 'GET' && c.url.includes('/admin/communities')
+    );
+
+  it('a definitive create rejection (409, 400, 401, 403) makes no list call, no PATCH and no manual-disable slug', async () => {
+    for (const createStatus of [409, 400, 401, 403]) {
+      const { calls, impl } = world({ create: 'reject', createStatus });
+      const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
+      expect(res.error, String(createStatus)).toMatch(
+        new RegExp(`answered ${createStatus}`)
+      );
+      expect(lists(calls)).toHaveLength(0);
+      expect(patches(calls)).toHaveLength(0);
+      expect(res.communityDisabled).toBe(false);
+      expect(res.communityMayExist).toBe(false);
+      expect(res.manualDisableSlug).toBeUndefined();
+    }
+  });
+
+  it('an ambiguous create (lost response, 502, unreadable 201) makes no lookup and reports the REAL slug to disable', async () => {
+    for (const create of ['throw', 'error5xx', 'badjson'] as const) {
+      const { calls, impl } = world({ create });
+      const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
+      expect(lists(calls), create).toHaveLength(0);
+      expect(patches(calls)).toHaveLength(0);
+      expect(calls.some((c) => c.url.includes('claim-tokens'))).toBe(false);
+      expect(res.communityDisabled).toBe(false);
+      expect(res.communityMayExist).toBe(true);
+      expect(res.manualDisableSlug).toBe(
+        JSON.parse(String(calls[0]!.body)).slug
+      );
+      expect(res.manualDisableSlug).toMatch(/^stg-upload-[0-9a-f]{8}$/);
+    }
+  });
+
+  it('408 and 499 on create are ambiguous, not definitive', async () => {
+    for (const createStatus of [408, 499]) {
+      const { calls, impl } = world({ create: 'reject', createStatus });
+      const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
+      expect(res.communityMayExist, String(createStatus)).toBe(true);
+      expect(res.manualDisableSlug).toBe(
+        JSON.parse(String(calls[0]!.body)).slug
+      );
+      expect(res.attemptedSlug).toBe(res.manualDisableSlug);
+      expect(patches(calls)).toHaveLength(0);
+    }
+  });
+
+  describe('CLI summary and recovery command', () => {
+    const ENV = {
+      STAGING_URL: BASE,
+      WT_SUPER_IDENTIFIER: 'super',
+      WT_SUPER_PASSWORD: 'super-password-secret',
+    };
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    });
+    async function runCli(
+      opts: Parameters<typeof world>[0],
+      argv: string[] = [],
+      env: Record<string, string> = {}
+    ) {
+      const dir = mkdtempSync(join(tmpdir(), 'upload-large-'));
+      const path = join(dir, 'sample.mp4');
+      writeFileSync(path, PNG_BYTES);
+      const w = world(opts);
+      const out: string[] = [];
+      const err: string[] = [];
+      vi.spyOn(process.stdout, 'write').mockImplementation((c) => {
+        out.push(String(c));
+        return true;
+      });
+      vi.spyOn(process.stderr, 'write').mockImplementation((c) => {
+        err.push(String(c));
+        return true;
+      });
+      const LOOP = 'http://127.0.0.1:8787';
+      // --local rehearsal: serve the loopback origin from the same fake world
+      vi.stubGlobal('fetch', (u: string, init?: RequestInit) =>
+        w.impl(u.replace(LOOP, BASE), init)
+      );
+      const code = await main(['--file', path, ...argv], {
+        ...ENV,
+        ...(argv.includes('--local') ? { STAGING_URL: LOOP } : {}),
+        ...env,
+      });
+      const slug = JSON.parse(
+        String(
+          w.calls.find((c) => c.url.endsWith('/v2/admin/communities'))!.body
+        )
+      ).slug as string;
+      const cmds = err
+        .join('')
+        .split('\n')
+        .filter((l) => l.includes('--disable-community'));
+      return { code, out: out.join(''), cmds, slug };
+    }
+
+    it('a failed PATCH or a mismatched 200 body exits 1 with exactly one recovery command', async () => {
+      for (const o of [
+        { disableStatus: 500 },
+        { disableBody: 'mismatch' as const },
+      ]) {
+        const r = await runCli(o);
+        expect(r.code).toBe(1);
+        expect(r.cmds).toEqual([
+          `STAGING_URL='${BASE}' npx tsx scripts/staging/upload-large.ts --disable-community ${r.slug}`,
+        ]);
+        vi.restoreAllMocks();
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('the recovery command repeats --local and STAGING_ALLOW_HOST', async () => {
+      const r = await runCli({ disableStatus: 500 }, ['--local'], {
+        STAGING_ALLOW_HOST: 'staging.example.test',
+      });
+      expect(r.cmds).toEqual([
+        `STAGING_URL='http://127.0.0.1:8787' STAGING_ALLOW_HOST='staging.example.test' npx tsx scripts/staging/upload-large.ts --disable-community ${r.slug} --local`,
+      ]);
+    });
+
+    it('an ambiguous create prints the attempted slug as creation unconfirmed', async () => {
+      const r = await runCli({ create: 'error5xx' });
+      expect(r.out).toContain(`community: ${r.slug} (creation unconfirmed)`);
+      expect(r.out).not.toContain('(not created)');
+      const rej = await runCli({ create: 'reject', createStatus: 409 });
+      expect(rej.out).toContain('community: (not created)');
+    });
+  });
+
+  it('a confirmed create whose disable fails reports the slug to disable by hand', async () => {
+    const { impl } = world({ disableStatus: 500 });
+    const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
+    expect(res.manualDisableSlug).toBe(res.community!.slug);
+  });
+
+  it('a confirmed disable reports no manual-disable slug', async () => {
+    const { impl } = world();
+    const res = await uploadViaThrowawayCommunity(input, { fetch: impl });
+    expect(res.manualDisableSlug).toBeUndefined();
+  });
+
+  it('refuses a non-staging URL itself, before any call', async () => {
+    const { calls, impl } = world();
+    const res = await uploadViaThrowawayCommunity(
+      { ...input, baseUrl: 'https://our.terrastories.app' },
+      { fetch: impl }
+    );
+    expect(res.error).toMatch(/not a staging host/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('with a known password: never in the log, nor the claim or login derived keys (success and failure)', async () => {
+    const KNOWN = 'wt-KNOWN-PASSWORD-for-test';
+    for (const putStatus of [200, 403]) {
+      const { calls, impl } = world({ putStatus });
+      const lines: string[] = [];
+      const res = await uploadViaThrowawayCommunity(input, {
+        fetch: impl,
+        log: (l) => lines.push(l),
+        randomPassword: () => KNOWN,
+      });
+      const text = [...lines, res.error ?? ''].join('\n');
+      const claim = JSON.parse(
+        String(calls.find((c) => c.url.endsWith('/bootstrap/claim'))!.body)
+      );
+      const login = JSON.parse(
+        String(calls.find((c) => c.url.endsWith('/v2/auth/login'))!.body)
+      );
+      for (const secret of [
+        KNOWN,
+        claim.password.derivedKey,
+        login.derivedKey,
+      ]) {
+        expect(secret).toBeTruthy();
+        expect(text).not.toContain(secret);
+      }
+      // the password itself never goes on the wire either
+      for (const c of calls) expect(String(c.body ?? '')).not.toContain(KNOWN);
+    }
+  });
+
+  it('CLI stdout and stderr never contain the password or derived keys, on success and failure', async () => {
+    const KNOWN = 'wt-KNOWN-PASSWORD-for-test';
+    const dir = mkdtempSync(join(tmpdir(), 'upload-large-'));
+    const path = join(dir, 'sample.mp4');
+    writeFileSync(path, PNG_BYTES);
+    for (const putStatus of [200, 403]) {
+      const { calls, impl } = world({ putStatus });
+      const out: string[] = [];
+      const err: string[] = [];
+      vi.spyOn(process.stdout, 'write').mockImplementation((c) => {
+        out.push(String(c));
+        return true;
+      });
+      vi.spyOn(process.stderr, 'write').mockImplementation((c) => {
+        err.push(String(c));
+        return true;
+      });
+      vi.stubGlobal('fetch', impl);
+      const code = await main(
+        ['--file', path],
+        {
+          STAGING_URL: BASE,
+          WT_SUPER_IDENTIFIER: 'super',
+          WT_SUPER_PASSWORD: 'super-password-secret',
+        },
+        { randomPassword: () => KNOWN }
+      );
+      expect(code).toBe(putStatus === 200 ? 0 : 1);
+      const text = out.join('') + err.join('');
+      const claim = JSON.parse(
+        String(calls.find((c) => c.url.endsWith('/bootstrap/claim'))!.body)
+      );
+      const logins = calls
+        .filter((c) => c.url.endsWith('/v2/auth/login'))
+        .map((c) => JSON.parse(String(c.body)).derivedKey as string);
+      for (const secret of [
+        KNOWN,
+        'super-password-secret',
+        claim.password.derivedKey,
+        ...logins,
+        'admin-cookie-value',
+        'super-cookie-value',
+      ]) {
+        expect(text).not.toContain(secret);
+      }
+      expect(text).toMatch(/community: stg-upload-/);
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('--disable-community and the manual-disable line', () => {
+  const SLUG = 'stg-upload-0a1b2c3d';
+  const SUPER = 'ts_session=super-cookie-value';
+  const salt = Buffer.from('0123456789abcdef').toString('base64');
+  const argonAnswer = {
+    algorithm: 'client-argon2id+sha256',
+    salt,
+    params: { memoryKiB: 19 * 1024, iterations: 2, parallelism: 1 },
+  };
+  const ENV = {
+    STAGING_URL: BASE,
+    WT_SUPER_IDENTIFIER: 'super',
+    WT_SUPER_PASSWORD: 'super-password-secret',
+  };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  /** 250 rows over 3 pages; the target sits at row index `at`. */
+  function listWorld(
+    opts: {
+      at?: number;
+      status?: string;
+      patchBody?: 'ok' | 'mismatch';
+      patchStatus?: number;
+      listStatus?: number;
+    } = {}
+  ) {
+    return fakeFetch((call) => {
+      const u = call.url.replace(BASE, '');
+      if (u === '/v2/auth/prelogin') return Response.json(argonAnswer);
+      if (u === '/v2/auth/login') {
+        const res = Response.json({ user: { id: 1 } });
+        res.headers.append(
+          'set-cookie',
+          'ts_session=super-cookie-value; Path=/'
+        );
+        return res;
+      }
+      if (call.method === 'GET' && u.startsWith('/v2/admin/communities?')) {
+        if (opts.listStatus)
+          return new Response(null, { status: opts.listStatus });
+        const offset = Number(new URL(call.url).searchParams.get('offset'));
+        const n = Math.min(100, 250 - offset);
+        const data = Array.from({ length: n }, (_, i) => {
+          const idx = offset + i;
+          return idx === opts.at
+            ? { id: 77, slug: SLUG, status: opts.status ?? 'active' }
+            : { id: 1000 + idx, slug: `other-${idx}`, status: 'active' };
+        });
+        return Response.json({
+          data,
+          meta: { total: 250, limit: 100, offset },
+        });
+      }
+      if (call.method === 'PATCH' && u === '/v2/admin/communities/77/status') {
+        const status = opts.patchStatus ?? 200;
+        if (opts.patchBody === 'mismatch')
+          return Response.json(
+            { data: { id: 77, slug: 'x', status: 'disabled' } },
+            { status }
+          );
+        return Response.json(
+          { data: { id: 77, slug: SLUG, status: 'disabled' } },
+          { status }
+        );
+      }
+      return undefined;
+    });
+  }
+  const listCalls = (calls: Call[]) => calls.filter((c) => c.method === 'GET');
+
+  it('refuses any slug that is not stg-upload-<8 hex>, with no network call', async () => {
+    const { calls, impl } = listWorld({ at: 0 });
+    for (const bad of [
+      'prod',
+      'stg-upload-xyz',
+      'stg-upload-0a1b2c3d9',
+      'stg-upload-0A1B2C3D',
+      'x-stg-upload-0a1b2c3d',
+    ])
+      await expect(
+        disableCommunityBySlug(impl, BASE, SUPER, bad)
+      ).rejects.toThrow(/refusing slug/);
+    expect(calls).toHaveLength(0);
+    const err: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((c) => {
+      err.push(String(c));
+      return true;
+    });
+    const fetchSpy = vi.fn(() => {
+      throw new Error('must not fetch');
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    expect(await main(['--disable-community', 'prod'], ENV)).toBe(2);
+    expect(err.join('')).toMatch(/refusing slug prod/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('--dry-run with --disable-community makes no network call and disables nothing', async () => {
+    const out: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation((c) => {
+      out.push(String(c));
+      return true;
+    });
+    const fetchSpy = vi.fn(() => {
+      throw new Error('must not fetch');
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    expect(await main(['--disable-community', SLUG, '--dry-run'], ENV)).toBe(0);
+    expect(out.join('')).toMatch(/dry run: would .*disable community/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('finds the community on a later page by exact slug and verifies the 200 body', async () => {
+    const { calls, impl } = listWorld({ at: 230 });
+    expect(await disableCommunityBySlug(impl, BASE, SUPER, SLUG)).toBe(
+      'disabled'
+    );
+    expect(
+      listCalls(calls).map((c) => new URL(c.url).searchParams.get('offset'))
+    ).toEqual(['0', '100', '200']);
+    expect(calls.at(-1)!.url).toBe(`${BASE}/v2/admin/communities/77/status`);
+    expect(JSON.parse(String(calls.at(-1)!.body))).toEqual({
+      status: 'disabled',
+    });
+    expect(calls.every((c) => c.redirect === 'error')).toBe(true);
+  });
+
+  it('stops paging at the first exact match', async () => {
+    const { calls, impl } = listWorld({ at: 5 });
+    await disableCommunityBySlug(impl, BASE, SUPER, SLUG);
+    expect(listCalls(calls)).toHaveLength(1);
+  });
+
+  it('a PATCH answering a mismatched body or non-200 is NOT confirmed', async () => {
+    for (const o of [
+      { patchBody: 'mismatch' as const },
+      { patchStatus: 500 },
+    ]) {
+      const { impl } = listWorld({ at: 3, ...o });
+      expect(await disableCommunityBySlug(impl, BASE, SUPER, SLUG)).toBe(
+        'failed'
+      );
+    }
+  });
+
+  it('reports not found, already disabled (no PATCH), and a failing list call', async () => {
+    const nf = listWorld();
+    expect(await disableCommunityBySlug(nf.impl, BASE, SUPER, SLUG)).toBe(
+      'not-found'
+    );
+    expect(listCalls(nf.calls)).toHaveLength(3);
+    const done = listWorld({ at: 3, status: 'disabled' });
+    expect(await disableCommunityBySlug(done.impl, BASE, SUPER, SLUG)).toBe(
+      'already-disabled'
+    );
+    expect(done.calls.some((c) => c.method === 'PATCH')).toBe(false);
+    const bad = listWorld({ listStatus: 500 });
+    await expect(
+      disableCommunityBySlug(bad.impl, BASE, SUPER, SLUG)
+    ).rejects.toThrow(/answered 500/);
+  });
+
+  it('CLI exit codes: disabled 0, already disabled 0, not found 1', async () => {
+    const out: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation((c) => {
+      out.push(String(c));
+      return true;
+    });
+    for (const [o, code, text] of [
+      [{ at: 9 }, 0, /disabled/],
+      [{ at: 9, status: 'disabled' }, 0, /already disabled/],
+      [{}, 1, /not found/],
+    ] as const) {
+      out.length = 0;
+      vi.stubGlobal('fetch', listWorld(o).impl);
+      expect(await main(['--disable-community', SLUG], ENV)).toBe(code);
+      expect(out.join('')).toMatch(text);
+      expect(out.join('')).not.toContain('super-cookie-value');
+    }
+  });
+
+  it('prints exactly one disable command with the real slug when the disable is not confirmed, none after a 4xx', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'upload-large-'));
+    const path = join(dir, 'sample.mp4');
+    writeFileSync(path, PNG_BYTES);
+    const cases: Array<[string, (url: string) => Response | undefined]> = [
+      [
+        'ambiguous',
+        (u) =>
+          u === '/v2/admin/communities'
+            ? new Response(null, { status: 502 })
+            : undefined,
+      ],
+      [
+        'rejected',
+        (u) =>
+          u === '/v2/admin/communities'
+            ? new Response(null, { status: 409 })
+            : undefined,
+      ],
+    ];
+    for (const [name, answer] of cases) {
+      const base = fakeFetch((call) => {
+        const u = call.url.replace(BASE, '');
+        if (call.method === 'POST' && u === '/v2/admin/communities')
+          return answer(u);
+        if (u === '/v2/auth/prelogin') return Response.json(argonAnswer);
+        if (u === '/v2/auth/login') {
+          const res = Response.json({ user: { id: 1 } });
+          res.headers.append(
+            'set-cookie',
+            'ts_session=super-cookie-value; Path=/'
+          );
+          return res;
+        }
+        return undefined;
+      });
+      const err: string[] = [];
+      vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+      vi.spyOn(process.stderr, 'write').mockImplementation((c) => {
+        err.push(String(c));
+        return true;
+      });
+      vi.stubGlobal('fetch', base.impl);
+      expect(await main(['--file', path], ENV), name).toBe(1);
+      const slug = JSON.parse(
+        String(
+          base.calls.find((c) => c.url.endsWith('/v2/admin/communities'))!.body
+        )
+      ).slug;
+      const cmds = err
+        .join('')
+        .split('\n')
+        .filter((l) => l.includes('--disable-community'));
+      if (name === 'ambiguous') {
+        expect(cmds).toEqual([
+          `STAGING_URL='${BASE}' npx tsx scripts/staging/upload-large.ts --disable-community ${slug}`,
+        ]);
+      } else {
+        expect(cmds).toEqual([]);
+      }
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    }
   });
 });

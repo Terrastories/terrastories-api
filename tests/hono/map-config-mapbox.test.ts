@@ -1329,8 +1329,16 @@ function registerSharedMapboxTests(harness: TestHarness) {
       byteSize: 0,
       fileCount: 0,
     };
-    const first = buildCommunityExportManifest(snapshot!, [], mediaArchive);
-    const second = buildCommunityExportManifest(snapshot!, [], mediaArchive);
+    const first = await buildCommunityExportManifest(
+      snapshot!,
+      [],
+      mediaArchive
+    );
+    const second = await buildCommunityExportManifest(
+      snapshot!,
+      [],
+      mediaArchive
+    );
     expect(second.checksum).toBe(first.checksum);
     expect(first.manifest.exclusions.credentialsExcluded).toBe(true);
     expect(first.manifest.mapConfig).toMatchObject({

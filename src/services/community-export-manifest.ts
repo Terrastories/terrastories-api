@@ -42,7 +42,7 @@ import {
   canonicalJsonStringify,
   CanonicalJsonLimitError,
 } from '../shared/utils/canonical-json.js';
-import { StreamingSha256 } from '../shared/utils/sha256-stream.js';
+import { toHex } from '../shared/auth-crypto.js';
 
 export interface VerifiedExportFile {
   id: string;
@@ -274,12 +274,12 @@ export function countSnapshotRows(snapshot: CommunityExportSnapshot): number {
   );
 }
 
-export function buildCommunityExportManifest(
+export async function buildCommunityExportManifest(
   snapshot: CommunityExportSnapshot,
   verifiedFiles: ReadonlyArray<VerifiedExportFile>,
   mediaArchive: { checksum: string; byteSize: number; fileCount: number },
   maxBytes = Infinity
-): BuiltCommunityExportManifest {
+): Promise<BuiltCommunityExportManifest> {
   const verifiedById = new Map<string, VerifiedExportFile>();
   for (const vf of verifiedFiles) {
     verifiedById.set(vf.id, vf);
@@ -512,7 +512,9 @@ export function buildCommunityExportManifest(
     throw error;
   }
   const bytes = new TextEncoder().encode(jsonText);
-  const checksum = new StreamingSha256().update(bytes).digestHex();
+  const checksum = toHex(
+    new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))
+  );
 
   return {
     manifest,

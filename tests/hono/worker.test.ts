@@ -33,7 +33,20 @@ it('serves the foundation through workerd D1/R2 without Node compatibility', asy
   const mf = startWorkerRuntime(
     await bundleWorkerModule(
       `import worker from './src/worker.js';
-       export default worker;`
+       const bindings = new WeakMap();
+       export default {
+         ...worker,
+         fetch(request, env) {
+           if (!bindings.has(env.DB)) bindings.set(env.DB, new Proxy(env.DB, {
+             get(target, key) {
+               if (key === 'withSession') throw new Error('Expected native primary reads');
+               const value = Reflect.get(target, key, target);
+               return typeof value === 'function' ? value.bind(target) : value;
+             },
+           }));
+           return worker.fetch(request, { ...env, DB: bindings.get(env.DB) });
+         },
+       };`
     ),
     { ENVIRONMENT: 'test', AUTH_SERVER_SECRET: authSecret }
   );

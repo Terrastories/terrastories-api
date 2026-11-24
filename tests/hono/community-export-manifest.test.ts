@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
@@ -591,7 +592,7 @@ describe('Slice 13a deterministic community export manifest builder', () => {
     });
     const snapshot = await repo.readCommunityExportSnapshot(1);
     expect(snapshot).not.toBeNull();
-    const built = buildCommunityExportManifest(
+    const built = await buildCommunityExportManifest(
       snapshot!,
       verifiedFiles,
       mediaArchive
@@ -689,7 +690,7 @@ describe('Slice 13a deterministic community export manifest builder', () => {
         ])
         .run();
       const snapshot = await repo.readCommunityExportSnapshot(1);
-      const first = buildCommunityExportManifest(
+      const first = await buildCommunityExportManifest(
         snapshot!,
         verifiedFiles,
         mediaArchive
@@ -700,7 +701,7 @@ describe('Slice 13a deterministic community export manifest builder', () => {
       expect(first.manifest.files.map((file) => file.id)).toEqual(
         expect.arrayContaining([own.sourceFileId, ...own.stagedFileIds])
       );
-      const second = buildCommunityExportManifest(
+      const second = await buildCommunityExportManifest(
         (await repo.readCommunityExportSnapshot(1))!,
         verifiedFiles,
         mediaArchive
@@ -717,7 +718,7 @@ describe('Slice 13a deterministic community export manifest builder', () => {
 
     const snap1 = await repo.readCommunityExportSnapshot(1);
     expect(snap1).not.toBeNull();
-    const first = buildCommunityExportManifest(
+    const first = await buildCommunityExportManifest(
       snap1!,
       verifiedFiles,
       mediaArchive
@@ -742,13 +743,16 @@ describe('Slice 13a deterministic community export manifest builder', () => {
     }
 
     const snap2 = await repo.readCommunityExportSnapshot(1);
-    const second = buildCommunityExportManifest(
+    const second = await buildCommunityExportManifest(
       snap2!,
       verifiedFiles,
       mediaArchive
     );
 
     expect(second.checksum).toBe(first.checksum);
+    expect(first.checksum).toBe(
+      createHash('sha256').update(first.bytes).digest('hex')
+    );
     expect(second.byteSize).toBe(first.byteSize);
     expect(Buffer.from(second.bytes).equals(Buffer.from(first.bytes))).toBe(
       true

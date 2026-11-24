@@ -199,13 +199,14 @@ export class HonoFoundationService {
     user: FoundationUser;
     kind: SessionKind;
     absoluteExpiresAt: number | null;
+    tokenHash: string;
   } | null> {
     if (!token || !/^[a-f0-9]{64}$/.test(token)) return null;
-    const context = await this.repository.sessionContext(
-      await tokenDigest(token),
-      now
-    );
-    return context && parseV2Role(context.user.role) ? context : null;
+    const tokenHash = await tokenDigest(token);
+    const context = await this.repository.sessionContext(tokenHash, now);
+    return context && parseV2Role(context.user.role)
+      ? { ...context, tokenHash }
+      : null;
   }
 
   async media(id: string, user: FoundationUser) {

@@ -190,10 +190,16 @@ const publicUser = (user: FoundationUser) => ({
   communityId: user.communityId,
 });
 
+export type FoundationHonoEnv = {
+  Variables: {
+    actor: FoundationUser;
+    sessionKind: SessionKind;
+    sessionTokenHash: string;
+  };
+};
+
 export function createHonoApp(options: FoundationOptions) {
-  const app = new Hono<{
-    Variables: { actor: FoundationUser; sessionKind: SessionKind };
-  }>();
+  const app = new Hono<FoundationHonoEnv>();
   const service = new HonoFoundationService(
     options.repository,
     options.storage
@@ -425,6 +431,7 @@ export function createHonoApp(options: FoundationOptions) {
     if (!session) return c.json({ error: 'Unauthorized' }, 401);
     c.set('actor', session.user);
     c.set('sessionKind', session.kind);
+    c.set('sessionTokenHash', session.tokenHash);
     if (
       session.user.communityId !== null &&
       !['/v2/community/sovereignty', '/v2/community/erasure'].includes(

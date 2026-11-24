@@ -470,6 +470,9 @@ export const createR2Storage = (
 /** Workers entrypoint; client-stretched authentication runs in the app. */
 export function createWorker() {
   const apps = new WeakMap<WorkerBindings, ReturnType<typeof createHonoApp>>();
+  let lastApp:
+    | { bindings: WorkerBindings; app: ReturnType<typeof createHonoApp> }
+    | undefined;
   // Throttle the one-line refusal log per isolate: module state persists for
   // the isolate's lifetime, which is at least as stable a key as the `env`
   // object's identity across requests (PR #229 review).
@@ -478,6 +481,21 @@ export function createWorker() {
   const appFor = (env: WorkerBindings) => {
     const cached = apps.get(env);
     if (cached) return cached;
+    // A fresh env wrapper can still carry exactly the same bindings.
+    const keys = Object.keys(env) as (keyof WorkerBindings)[];
+    const previous = lastApp;
+    if (
+      previous &&
+      keys.length === Object.keys(previous.bindings).length &&
+      keys.every(
+        (key) =>
+          Object.hasOwn(previous.bindings, key) &&
+          env[key] === previous.bindings[key]
+      )
+    ) {
+      apps.set(env, previous.app);
+      return previous.app;
+    }
     // #150: fail closed at initialisation — insecure/default production
     // configuration refuses to serve. Throws before any adapter is built.
     const runtimeConfig = validateWorkerV2Runtime(env);
@@ -488,17 +506,10 @@ export function createWorker() {
       // eslint-disable-next-line no-console -- workerd's only operator channel
       console.warn(modeNotice);
     }
-    const client = new Proxy(env.DB, {
-      get(target, key, receiver) {
-        // App configuration is cached; every DB operation still starts primary-current.
-        const primary = env.DB.withSession('first-primary');
-        if (key === 'prepare') return primary.prepare.bind(primary);
-        if (key === 'batch') return primary.batch.bind(primary);
-        return Reflect.get(target, key, receiver);
-      },
-    });
+    // Native D1 prepare/batch always use the primary and ignore bookmarks.
+    // A first-primary Sessions API object would only pin its first query.
     const app = createHonoApp({
-      repository: new HonoFoundationRepository(drizzle(client)),
+      repository: new HonoFoundationRepository(drizzle(env.DB)),
       serverSecret: runtimeConfig.serverSecret,
       bootstrapSecret: runtimeConfig.bootstrapSecret,
       requireRecoveryCodes: true,
@@ -513,6 +524,7 @@ export function createWorker() {
       mapboxAccessToken: runtimeConfig.mapboxAccessToken,
       offlineMode: runtimeConfig.environment === 'offline',
     });
+    lastApp = { bindings: { ...env }, app };
     apps.set(env, app);
     return app;
   };

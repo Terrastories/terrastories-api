@@ -156,11 +156,10 @@ export class DirectUploadService {
       bindingFields.ownerType = request.ownerType;
     if (request.ownerId !== undefined)
       bindingFields.ownerId = String(request.ownerId);
-    if (request.metadata !== undefined)
-      bindingFields.metadata = JSON.stringify(request.metadata);
     const binding = this.media.parseUploadBindingFields(
       actor,
-      new Map(Object.entries(bindingFields))
+      new Map(Object.entries(bindingFields)),
+      request.metadata
     );
     if (!binding.ok) {
       if (binding.status === 403) {

@@ -290,7 +290,7 @@ export class CommunityExportService {
       activeUploadId = null;
 
       const zipSummary = await zipSummaryPromise;
-      const manifestBuilt = buildCommunityExportManifest(
+      const manifestBuilt = await buildCommunityExportManifest(
         snapshot,
         zipSummary.entries,
         {

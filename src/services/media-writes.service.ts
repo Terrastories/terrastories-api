@@ -241,7 +241,8 @@ export class MediaWritesService {
 
   parseUploadBindingFields(
     actor: FoundationUser,
-    fields: ReadonlyMap<string, string>
+    fields: ReadonlyMap<string, string>,
+    directMetadata?: Record<string, unknown>
   ):
     | {
         ok: true;
@@ -269,10 +270,18 @@ export class MediaWritesService {
     const ownerType = fields.get('ownerType');
     const ownerIdRaw = fields.get('ownerId');
     const metadataRaw = fields.get('metadata');
+    // Direct metadata still uses the serialized length of the JSON object.
+    const metadataLength =
+      directMetadata === undefined
+        ? metadataRaw?.length
+        : JSON.stringify(directMetadata).length;
 
     let parsedMetadata: Record<string, unknown> | null = null;
-    if (metadataRaw !== undefined && metadataRaw.trim() !== '') {
-      if (metadataRaw.length > MAX_METADATA_JSON_LENGTH) {
+    if (directMetadata !== undefined || metadataRaw?.trim()) {
+      if (
+        metadataLength !== undefined &&
+        metadataLength > MAX_METADATA_JSON_LENGTH
+      ) {
         return {
           ok: false,
           status: 400,
@@ -283,7 +292,21 @@ export class MediaWritesService {
       }
       let jsonVal: unknown;
       try {
-        jsonVal = JSON.parse(metadataRaw);
+        if (directMetadata === undefined) {
+          jsonVal = JSON.parse(metadataRaw!);
+        } else {
+          // Preserve the numeric normalization of the previous JSON round trip.
+          jsonVal = Object.fromEntries(
+            Object.entries(directMetadata).map(([key, value]) => [
+              key,
+              typeof value === 'number'
+                ? Number.isFinite(value)
+                  ? value + 0
+                  : null
+                : value,
+            ])
+          );
+        }
       } catch {
         return {
           ok: false,

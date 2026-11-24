@@ -34,7 +34,6 @@ import {
   PutStoryPlacesRequestSchema,
   PutStorySpeakersRequestSchema,
   ReorderExternalMediaLinksRequestSchema,
-  StoryWriteResponseSchema,
   type ExternalMediaLinksListResponse,
   type ExternalMediaLinkWriteResponse,
   type StoryWriteResponse,
@@ -216,11 +215,8 @@ export class StoryWritesService {
         return readBack;
       }
 
-      const checked = StoryWriteResponseSchema.safeParse(readBack.body);
-      if (!checked.success) {
-        return { status: 500, body: INTERNAL_ERROR_BODY };
-      }
-      return { status: 201, body: checked.data };
+      // Read-back validates the shared story detail/write response schema.
+      return { status: 201, body: readBack.body };
     } catch (err) {
       if (isForeignKeyConstraintError(err) || isNotNullConstraintError(err)) {
         return {
@@ -383,15 +379,7 @@ export class StoryWritesService {
         String(storyId),
         origin
       );
-      if (readBack.status !== 200) {
-        return readBack;
-      }
-
-      const checked = StoryWriteResponseSchema.safeParse(readBack.body);
-      if (!checked.success) {
-        return { status: 500, body: INTERNAL_ERROR_BODY };
-      }
-      return { status: 200, body: checked.data };
+      return readBack;
     } catch (err) {
       if (isForeignKeyConstraintError(err)) {
         return {
@@ -551,15 +539,7 @@ export class StoryWritesService {
         String(storyId),
         origin
       );
-      if (readBack.status !== 200) {
-        return readBack;
-      }
-
-      const checked = StoryWriteResponseSchema.safeParse(readBack.body);
-      if (!checked.success) {
-        return { status: 500, body: INTERNAL_ERROR_BODY };
-      }
-      return { status: 200, body: checked.data };
+      return readBack;
     } catch (err) {
       if (isForeignKeyConstraintError(err) || isNotNullConstraintError(err)) {
         return {

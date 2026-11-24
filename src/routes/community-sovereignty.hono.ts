@@ -11,11 +11,10 @@ import type { ErasureRecordStore } from '../services/erasure-record-store.js';
 
 import type { Context, Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
-import { getCookie } from 'hono/cookie';
+import type { FoundationHonoEnv } from '../hono-app.js';
 import type { HonoAuthRepository } from '../repositories/hono-auth.repository.js';
 import type { CommunitySovereigntyRepository } from '../repositories/community-sovereignty.repository.js';
 import { CommunitySovereigntyService } from '../services/community-sovereignty.service.js';
-import { tokenDigest } from '../services/hono-foundation.service.js';
 import { actorOf, parseJsonRequestBody } from './community-writes.hono.js';
 
 export interface CommunitySovereigntyRoutesOptions {
@@ -34,8 +33,7 @@ const sovereigntyBody4k = bodyLimit({
 });
 
 export function registerCommunitySovereigntyRoutes(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  app: Hono<any>,
+  app: Hono<FoundationHonoEnv>,
   options: CommunitySovereigntyRoutesOptions
 ): void {
   const service = new CommunitySovereigntyService(
@@ -64,14 +62,10 @@ export function registerCommunitySovereigntyRoutes(
     if (!parsed.ok) {
       return c.json({ error: parsed.error }, parsed.status);
     }
-    const rawSession = getCookie(c, 'ts_session');
-    const sessionTokenHash = rawSession
-      ? await tokenDigest(rawSession)
-      : undefined;
     const result = await service.updateSteward(
       actorOf(c),
       parsed.body,
-      sessionTokenHash,
+      c.get('sessionTokenHash'),
       {
         clientIp: options.ipFor(c),
         now: options.now(),
@@ -88,11 +82,10 @@ export function registerCommunitySovereigntyRoutes(
     app.post(path, sovereigntyBody4k, async (c) => {
       const parsed = await parseJsonRequestBody(c);
       if (!parsed.ok) return c.json({ error: parsed.error }, parsed.status);
-      const rawSession = getCookie(c, 'ts_session');
       const result = await action(
         actorOf(c),
         parsed.body,
-        rawSession ? await tokenDigest(rawSession) : undefined,
+        c.get('sessionTokenHash'),
         {
           clientIp: options.ipFor(c),
           now: options.now(),

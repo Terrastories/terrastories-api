@@ -1,6 +1,8 @@
-# Workers Paid profile (ready plan, not active)
+# Workers Paid profile (approved option, not active)
 
 **Status (2026-11-23, #295):** the hosted profile stays on Workers Free (SPEC-V2 Section 5, #184). Staging measurements on 2026-11-23, recorded in issue [#295](https://github.com/Terrastories/terrastories-api/issues/295), show CPU above the 10 ms Free budget on several routes (`POST /v2/media` up to 92 ms, `POST /v2/community/export` 87 ms, `/v2/community/erasure` 63 ms, `POST /v2/stories` 56 ms, others 14 to 25 ms), all with outcome ok and no error 1102 yet (per the issue). This file is the plan for switching to Workers Paid if Free stops holding. Nothing here is applied. Switching needs a spec change, an owner decision and a payment method: **REQUIRES HUMAN APPROVAL**.
+
+**Decided (2026-11-24, [#187](https://github.com/Terrastories/terrastories-api/issues/187)):** a Workers Paid production profile is allowed; Workers Free stays a supported profile and the staging profile; the Paid erasure bound is accepted at 31 days worst case. SPEC-V2 is amended accordingly. The payment method (step 2) still needs human approval.
 
 Prices and limits below were read on 2026-11-23. Recheck them before acting.
 
@@ -37,7 +39,7 @@ Switch only when one of these holds and the Free-path fixes (#295, codex diagnos
 | Queues                     | 10,000 operations per day                                         | 1 million operations per month included, then USD 0.40 per million                                                                         | [Queues pricing](https://developers.cloudflare.com/queues/platform/pricing/)                                                                               |
 | Workflows                  | available; 10 ms CPU per invocation, 3,000 steps per day          | CPU raised with `limits.cpu_ms`                                                                                                            | [Workflows pricing](https://developers.cloudflare.com/workflows/reference/pricing/)                                                                        |
 
-### Erasure bound: decide #187 before Paid go-live
+### Erasure bound: decided (#187)
 
 SPEC-V2 Section 7 (Backups) states the Paid bound as an open question. On Paid, Time Travel keeps 30 days, counted from when each DELETE lands. Live deletion completes at C, at most T + 24 hours after the request T. A deleted row then stays in Time Travel history until C + 30 days: up to 31 days after the request, not 30. Section 7 still forbids using it: operator tooling refuses every restore while an erasure is pending, refuses any point before completion, and reconciles erasures after an allowed restore before serving. The bound is about how long a copy exists, not about a permitted restore. The owner must choose one of these before Paid serves real communities:
 
@@ -46,11 +48,13 @@ SPEC-V2 Section 7 (Backups) states the Paid bound as an open question. On Paid, 
 
 This gate blocks go-live. Neither the walkthrough nor smoke can pass it.
 
+**Decided 2026-11-24 ([#187](https://github.com/Terrastories/terrastories-api/issues/187)):** option 1. The 31-day worst case is accepted for Workers Paid; Workers Free and the self-hosted/field-kit profiles keep 30 days from the request; the restore refusal and reconciliation rules are unchanged. SPEC-V2 Sections 4, 6.7 to 6.9, 7, 12 and 14 state it. Communities hosted on Paid must be told the bound.
+
 ## 3. Implementation checklist (in order)
 
 Snapshot every changed file under `backups/` first. Each step lands as its own reviewed PR.
 
-1. **Decide and amend the spec** (section 5 below), including #187. No config change before the spec allows a paid profile.
+1. **Decide and amend the spec** (section 5 below), including #187. No config change before the spec allows a paid profile. **Decided 2026-11-24** ([#187](https://github.com/Terrastories/terrastories-api/issues/187)); SPEC-V2 amended. Staging stays on Workers Free (section 4).
 2. **Subscribe** the target account to Workers Paid in the dashboard. **REQUIRES HUMAN APPROVAL** (payment method). The plan is per account: staging and production on separate accounts need two subscriptions, or staging stays Free (section 4).
 3. **`wrangler.jsonc`.** Add a CPU cap. `limits` is inheritable: a top-level block also applies to `env.staging` unless that environment overrides it ([wrangler config](https://developers.cloudflare.com/workers/wrangler/configuration/)). Production deploys from the top-level block today. If staging stays on a Free account, do not put `limits` at the top level: add an `env.production` block holding it and deploy production with `--env production`, or put staging on Paid too. An `env.production` block inherits almost nothing that matters here: bindings, `vars` and secrets are non-inheritable and must be set per environment ([environments](https://developers.cloudflare.com/workers/wrangler/environments/#non-inheritable-keys-and-environments)). Repeat in it the production `name`, `d1_databases` (`DB`), `r2_buckets` (`MEDIA`, `ERASURE_RECORDS`), `vars` (`PUBLIC_ORIGIN`, `CORS_ORIGINS`, `R2_BUCKET_NAME`) and `triggers.crons`, as `env.staging` does, and set every secret with `wrangler secret put ... --env production` (`AUTH_SERVER_SECRET`, `BOOTSTRAP_SECRET`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`; optional `MAPBOX_ACCESS_TOKEN`). Check with `npx wrangler deploy --env production --dry-run`. Put `limits` only in the environment deployed to the Paid account:
 

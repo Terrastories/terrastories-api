@@ -331,7 +331,7 @@ export function assertProductionConfig(
     bad('still contains unreplaced placeholder at ' + placeholder);
   }
   if (!prod.name || PLACEHOLDER_RE.test(prod.name)) {
-    bad('has no valid worker name');
+    return bad('has no valid worker name');
   }
   if (prod.name.startsWith(STAGING_PREFIX)) {
     bad('name must not use the staging prefix ' + STAGING_PREFIX);
@@ -368,7 +368,7 @@ export function assertProductionConfig(
   try {
     parsedOrigin = new URL(publicOrigin);
   } catch {
-    bad('PUBLIC_ORIGIN is not a valid https origin');
+    return bad('PUBLIC_ORIGIN is not a valid https origin');
   }
   if (
     parsedOrigin.protocol !== 'https:' ||

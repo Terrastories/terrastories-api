@@ -1471,11 +1471,11 @@ esac
       });
     const calls = () =>
       existsSync(callsLog) ? readFileSync(callsLog, 'utf8') : '';
-    return { run, calls };
+    return { run, calls, repo };
   };
 
   it('match under --apply: verifies D1 database_id and proceeds to dry-run and real deploy', () => {
-    const { run, calls } = setup(
+    const { run, calls, repo } = setup(
       stagingId,
       JSON.stringify([
         { name: 'terrastories-prod-db', uuid: prodId },
@@ -1487,11 +1487,28 @@ esac
     expect(r.stdout).toContain('D1 database_id verified');
     const log = calls();
     const d1IdPos = log.indexOf('guards.ts d1-id');
-    const dryDeployPos = log.indexOf('wrangler deploy --env staging --dry-run');
-    const realDeployPos = log.indexOf('wrangler deploy --env staging\n');
+    const config = join(repo, 'wrangler.jsonc');
+    const deploy = `wrangler deploy --env staging --config ${config}`;
+    expect(log.match(/^wrangler d1 list .*$/gm)).toEqual(
+      Array(2).fill(`wrangler d1 list --json --config ${config}`)
+    );
+    const dryDeployPos = log.indexOf(`${deploy} --dry-run\n`);
+    const realDeployPos = log.indexOf(`${deploy}\n`);
     expect(d1IdPos).toBeGreaterThan(-1);
     expect(dryDeployPos).toBeGreaterThan(d1IdPos);
     expect(realDeployPos).toBeGreaterThan(dryDeployPos);
+  });
+
+  it('refuses a Wrangler deploy config redirect before any npx call', () => {
+    const { run, calls, repo } = setup(stagingId, '[]');
+    const redirectDir = join(repo, '.wrangler/deploy');
+    mkdirSync(redirectDir, { recursive: true });
+    writeFileSync(join(redirectDir, 'config.json'), '{}');
+
+    const r = run(['--apply']);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('Wrangler deploy config redirect exists');
+    expect(calls()).toBe('');
   });
 
   it('mismatch under --apply: dies before both --dry-run and real deploy', () => {
@@ -1530,7 +1547,9 @@ esac
     const r = run([]);
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout).toContain('+ npx wrangler d1 list --json');
-    expect(r.stdout).toContain('+ npx wrangler deploy --env staging --dry-run');
+    expect(r.stdout).toMatch(
+      /\+ npx wrangler deploy --env staging --config .* --dry-run/
+    );
     expect(r.stdout).toContain('+ npx wrangler deploy --env staging');
     const log = calls();
     expect(log).not.toContain('guards.ts d1-id');

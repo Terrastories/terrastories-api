@@ -27,7 +27,11 @@ import { deriveUserIdentityColumns } from '../../src/shared/utils/derived-column
 import { validateContentFreeAuditEntry } from '../../src/shared/utils/audit-entry.js';
 import { MediaUploadResponseSchema } from '../../src/shared/schemas/media-v2.js';
 import { DirectUploadSessionResponseSchema } from '../../src/shared/schemas/media-uploads-v2.js';
-import { FakeR2Bucket, startFakeS3 } from '../helpers/fake-r2-s3.js';
+import {
+  FakeR2Bucket,
+  handleFakeR2PartRequest,
+  startFakeS3,
+} from '../helpers/fake-r2-s3.js';
 
 const MIB = 1024 * 1024;
 const API = 'https://api.example.test';
@@ -902,6 +906,42 @@ describe('direct multipart media upload (#286)', () => {
       );
       expect(aborted.status).toBe(204);
       expect(bucket.objects.has(key)).toBe(true);
+    });
+
+    it('rejects an expired signed part PUT and accepts it before expiry', async () => {
+      const bytes = sparseMp4(1024);
+      const { res, json } = await createSession(r2App, cookies.editor!, bytes);
+      expect(res.status).toBe(201);
+      const session = DirectUploadSessionResponseSchema.parse(json).data;
+      const target = session.parts[0]!;
+      const url = new URL(target.url);
+      const request = {
+        method: 'PUT',
+        url,
+        header: (name: string) =>
+          name === 'content-length'
+            ? String(bytes.byteLength)
+            : (target.headers[name] ?? ''),
+        body: bytes,
+      };
+      // SigV4 timestamps have second precision.
+      const expiresAt = Math.floor(Date.parse(session.expiresAt) / 1000) * 1000;
+      const put = (now: number) =>
+        handleFakeR2PartRequest(
+          bucket,
+          { ...s3Config, now: () => now },
+          request
+        );
+
+      const expired = await put(expiresAt + 1000);
+      expect(expired.status).toBe(403);
+      expect(expired.body).toContain('<Code>AccessDenied</Code>');
+      expect(expired.body).toContain('<Message>Request has expired</Message>');
+      expect((await put(expiresAt - 1000)).status).toBe(200);
+      await r2App.request(`${API}/v2/media/uploads/${session.id}`, {
+        method: 'DELETE',
+        headers: { cookie: cookies.editor! },
+      });
     });
 
     it('re-issues part targets within the session lifetime and refuses other users', async () => {

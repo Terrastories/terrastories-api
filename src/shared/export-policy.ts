@@ -56,7 +56,8 @@ export const WORKERS_EXPORT_MAX_ARCHIVE_BYTES = 64 * 1024 * 1024; // 64 MiB
 
 /**
  * Workers Paid export feasibility limits (docs/WORKERS-PAID-PROFILE.md §2, §3 steps 6–7):
- * TODO(SPEC-V2 §5, §7 Export): inert unless WORKERS_PLAN=paid after SPEC-V2 §5 and §7 are amended to state per-plan caps.
+ * SPEC-V2 §7 Export (amended 2026-11-24 in #302): per-plan caps live here; a Paid
+ * deployment keeps the Free caps until they are measured.
  * TODO: Keep the Free export ceilings (10,000 rows, 30 files, 50 MiB media,
  * 64 MiB archive) on Paid as interim values; raise only after a production
  * memory/CPU measurement.
@@ -89,7 +90,8 @@ export const WORKER_EXPORT_SWEEP_BATCH_LIMIT = 5;
  * 30 s default. Reclaiming 20 expired exports per minute tick (~120 subrequests,
  * ~60 D1 queries) matches EXPORT_SWEEP_BATCH_LIMIT while using < 2% of Paid's
  * subrequest budget and < 10% of Paid's D1 query budget.
- * TODO(SPEC-V2 §5, §7 Export): inert unless WORKERS_PLAN=paid after SPEC-V2 §5 and §7 are amended.
+ * SPEC-V2 §5 (amended 2026-11-24 in #302) approves the Paid profile; active only
+ * with WORKERS_PLAN=paid.
  */
 export const WORKER_PAID_EXPORT_SWEEP_BATCH_LIMIT = EXPORT_SWEEP_BATCH_LIMIT;
 

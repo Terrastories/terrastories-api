@@ -40,7 +40,8 @@ export const KNOWN_ENVIRONMENTS: readonly V2RuntimeEnvironment[] = [
 /**
  * Hosted Workers plan tier (#295, docs/WORKERS-PAID-PROFILE.md §3 step 6).
  * Unset or empty resolves to `'free'` everywhere.
- * TODO(SPEC-V2 §5, §7): `'paid'` constants stay inert unless `WORKERS_PLAN=paid` after SPEC-V2 §5 and §7 are amended.
+ * SPEC-V2 §5 and §7 (amended 2026-11-24 in #302) approve the Paid profile; the
+ * `'paid'` constants apply only when `WORKERS_PLAN=paid`.
  */
 export type WorkersPlan = 'free' | 'paid';
 

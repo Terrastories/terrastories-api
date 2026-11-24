@@ -114,7 +114,8 @@ export const D1_FREE_DAILY_ROWS_WRITTEN = 100_000;
 /**
  * Workers Paid plan: 50,000,000 D1 rows written per month included before
  * overage, with no daily hard cap (docs/WORKERS-PAID-PROFILE.md §2).
- * TODO(SPEC-V2 §5): inert unless WORKERS_PLAN=paid after SPEC-V2 §5 is amended to permit the Paid profile.
+ * SPEC-V2 §5 (amended 2026-11-24 in #302) approves the Paid profile; active only
+ * with WORKERS_PLAN=paid.
  */
 export const D1_PAID_INCLUDED_ROWS_WRITTEN = 50_000_000;
 

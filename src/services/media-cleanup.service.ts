@@ -378,7 +378,8 @@ export const WORKER_SWEEP_SUBREQUEST_BUDGET = 40;
  * Sizing the hourly orphan sweep at 1,000 subrequests keeps a pure-reference
  * run (~834 D1 queries + ~166 R2 list pages) below the 1,000 D1 query limit and
  * an all-orphan run (~1,000 subrequests) 10x below the 10,000 subrequest limit.
- * TODO(SPEC-V2 §5): inert unless WORKERS_PLAN=paid after SPEC-V2 §5 is amended to permit the Paid profile.
+ * SPEC-V2 §5 (amended 2026-11-24 in #302) approves the Paid profile; active only
+ * with WORKERS_PLAN=paid.
  */
 export const WORKER_PAID_SWEEP_SUBREQUEST_BUDGET = 1000;
 

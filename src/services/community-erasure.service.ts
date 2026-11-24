@@ -23,7 +23,8 @@ export const WORKER_ERASURE_STORAGE_BUDGET = 15;
  * `ERASURE_PASS_MAX_WALL_MS` headroom before the 60 s cron interval) so one
  * Paid cron invocation stays safely below the 1,000 D1 query cap and 10,000
  * subrequest cap.
- * TODO(SPEC-V2 §5, §7 Backups #187): inert unless WORKERS_PLAN=paid after SPEC-V2 §5 and §7 (31-day Time Travel bound) are amended.
+ * SPEC-V2 §5 and §7 Backups (#187, amended 2026-11-24 in #302) approve the Paid
+ * profile and its 31-day worst-case erasure bound; active only with WORKERS_PLAN=paid.
  */
 export const WORKER_PAID_ERASURE_STORAGE_BUDGET = 400;
 export const WORKER_PAID_ERASURE_D1_BUDGET = 400;

@@ -56,7 +56,7 @@ type MediaBucket = Awaited<
  * Miniflare does not serve. This wrapper intercepts requests to that R2 S3
  * origin and verifies them with the same fake R2 S3 logic as the unit tests
  * (`tests/helpers/fake-r2-s3.ts`): SigV4 query signature over
- * `UNSIGNED-PAYLOAD`, signed `Content-Length`, signed `x-amz-content-sha256`
+ * `UNSIGNED-PAYLOAD`, URL expiry (`403 AccessDenied`), signed `Content-Length`, signed `x-amz-content-sha256`
  * matched against the body bytes (`400 XAmzContentSHA256Mismatch`), and `501`
  * for `x-amz-checksum-sha256`. Everything on the Worker's own origin
  * (including `PUT /v2/media/uploads/:id/parts/:n`) goes to the real bundle.

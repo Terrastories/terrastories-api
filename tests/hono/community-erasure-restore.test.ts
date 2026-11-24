@@ -10,6 +10,7 @@ import type { FoundationStorage } from '../../src/services/hono-foundation.servi
 import { communitiesSqlite } from '../../src/db/schema/communities.js';
 import { communitySovereigntyRequestsSqlite } from '../../src/db/schema/community_sovereignty.js';
 import { auditEntriesSqlite } from '../../src/db/schema/audit_entries.js';
+import { exportJobsSqlite } from '../../src/db/schema/community_exports.js';
 import { SOVEREIGNTY_AUDIT_ACTIONS } from '../../src/shared/sovereignty-policy.js';
 
 /**
@@ -22,6 +23,8 @@ import { SOVEREIGNTY_AUDIT_ACTIONS } from '../../src/shared/sovereignty-policy.j
 const NOW = new Date('2026-11-24T12:00:00.000Z');
 const T1 = '2026-11-20T00:00:00.000Z';
 const T2 = '2026-11-22T00:00:00.000Z';
+/** Request time shared by a database request row and its out-of-band record. */
+const REQUESTED_AT = '2026-11-19T00:00:00.000Z';
 
 type RequestState =
   | 'notice'
@@ -44,11 +47,37 @@ async function setup() {
       else records[i] = record;
     },
   };
+  // In-memory object store: listing honours prefix, startAfter and limit.
+  const objects = new Set<string>();
+  const aborted: Array<{ key: string; uploadId: string }> = [];
+  const fenced: number[] = [];
   const storage: FoundationStorage = {
     read: async () => null,
-    delete: async () => {},
-    list: async () => ({ entries: [], truncated: false }),
-    fenceCommunity: async () => {},
+    delete: async (key) => {
+      objects.delete(key);
+    },
+    list: async ({ prefix = '', startAfter, limit = 1000 } = {}) => {
+      const keys = [...objects]
+        .filter((k) => k.startsWith(prefix) && (!startAfter || k > startAfter))
+        .sort();
+      const entries = keys
+        .slice(0, limit)
+        .map((key) => ({ key, size: 1, lastModified: NOW }));
+      const truncated = keys.length > limit;
+      return {
+        entries,
+        truncated,
+        nextStartAfter: truncated
+          ? entries[entries.length - 1]!.key
+          : undefined,
+      };
+    },
+    abortMultipartUpload: async (key, uploadId) => {
+      aborted.push({ key, uploadId });
+    },
+    fenceCommunity: async (id) => {
+      fenced.push(id);
+    },
   };
   const service = new CommunityErasureService(
     new CommunitySovereigntyRepository(db),
@@ -63,38 +92,55 @@ async function setup() {
       .returning();
     return row!.id;
   }
+  /** Inserts the database request row and returns its id (the record's requestId). */
   async function request(
     communityId: number,
     state: RequestState,
     noticeEndsAt: number | null = null
   ) {
+    const id = crypto.randomUUID();
     await db.insert(communitySovereigntyRequestsSqlite).values({
-      id: crypto.randomUUID(),
+      id,
       communityId,
       kind: 'erasure',
       state,
       initiatedByRole: 'steward',
-      requestedAt: NOW.getTime() - 1000,
+      requestedAt: Date.parse(REQUESTED_AT),
       noticeEndsAt,
       completedAt: state === 'completed' ? Date.parse(T1) : null,
       cancelledAt: state === 'cancelled' ? NOW.getTime() : null,
       updatedAt: NOW.getTime(),
     });
+    return id;
   }
+  /** Out-of-band record; pass the database request id to link them as the real flow does. */
   function record(
     communityId: number,
-    completedAt: string | null
+    completedAt: string | null,
+    requestId: string = crypto.randomUUID()
   ): ErasureRecord {
     return {
       communityId,
-      requestId: crypto.randomUUID(),
+      requestId,
       requestingActorId: null,
-      requestedAt: '2026-11-19T00:00:00.000Z',
+      requestedAt: REQUESTED_AT,
       completedAt,
       outcome: completedAt === null ? 'pending' : 'completed',
     };
   }
-  return { db, records, store, service, community, request, record };
+  return {
+    db,
+    records,
+    store,
+    storage,
+    objects,
+    aborted,
+    fenced,
+    service,
+    community,
+    request,
+    record,
+  };
 }
 
 const BLOCKED = 'Restore blocked by pending community erasure';
@@ -106,8 +152,8 @@ describe('CommunityErasureService.verifyRestorePoint', () => {
     async (state) => {
       const f = await setup();
       const id = await f.community('pending');
-      await f.request(id, state);
-      await f.store.write(f.record(id, null));
+      const requestId = await f.request(id, state);
+      await f.store.write(f.record(id, null, requestId));
       for (const point of [
         new Date(0),
         new Date(NOW.getTime() - 1),
@@ -132,8 +178,8 @@ describe('CommunityErasureService.verifyRestorePoint', () => {
   it('refuses via the record store alone when no database request is pending', async () => {
     const f = await setup();
     const id = await f.community('record-only');
-    await f.request(id, 'completed');
-    await f.store.write(f.record(id, null));
+    const requestId = await f.request(id, 'completed');
+    await f.store.write(f.record(id, null, requestId));
     await expect(
       f.service.verifyRestorePoint(new Date(NOW.getTime() + 1), NOW)
     ).rejects.toThrow(VIOLATES);
@@ -158,8 +204,8 @@ describe('CommunityErasureService.verifyRestorePoint', () => {
   it('refuses a point before completion and allows points at or after it', async () => {
     const f = await setup();
     const id = await f.community('done');
-    await f.request(id, 'completed');
-    await f.store.write(f.record(id, T1));
+    const requestId = await f.request(id, 'completed');
+    await f.store.write(f.record(id, T1, requestId));
     const completed = Date.parse(T1);
     for (const point of [new Date(0), new Date(completed - 1)])
       await expect(f.service.verifyRestorePoint(point, NOW)).rejects.toThrow(
@@ -181,10 +227,10 @@ describe('CommunityErasureService.verifyRestorePoint', () => {
     const f = await setup();
     const a = await f.community('a');
     const b = await f.community('b');
-    await f.request(a, 'completed');
-    await f.store.write(f.record(a, T1));
-    await f.request(b, 'executing');
-    await f.store.write(f.record(b, null));
+    const requestA = await f.request(a, 'completed');
+    await f.store.write(f.record(a, T1, requestA));
+    const requestB = await f.request(b, 'executing');
+    await f.store.write(f.record(b, null, requestB));
     // Pending in DB: blocked even for a point after the first completion.
     await expect(
       f.service.verifyRestorePoint(new Date(Date.parse(T1) + 1), NOW)
@@ -194,7 +240,7 @@ describe('CommunityErasureService.verifyRestorePoint', () => {
       .update(communitySovereigntyRequestsSqlite)
       .set({ state: 'completed', completedAt: Date.parse(T2) })
       .where(eq(communitySovereigntyRequestsSqlite.communityId, b));
-    await f.store.write(f.record(b, T2));
+    await f.store.write(f.record(b, T2, requestB));
     await expect(
       f.service.verifyRestorePoint(new Date(Date.parse(T1) + 1), NOW)
     ).rejects.toThrow(VIOLATES);
@@ -204,20 +250,51 @@ describe('CommunityErasureService.verifyRestorePoint', () => {
     await f.service.verifyRestorePoint(new Date(T2), NOW);
   });
 
-  it('allows a point after completion and reconcileRestore then re-erases a resurrected community', async () => {
+  it('allows a point after completion and reconcileRestore re-erases a resurrected community from the out-of-band record alone', async () => {
     const f = await setup();
     const id = await f.community('restored');
-    await f.request(id, 'completed');
+    const other = await f.community('bystander');
+    // The restored database carries NO erasure request row for the community
+    // (SPEC-V2 section 7 Backups); only the out-of-band record survives.
+    expect(
+      await f.db.select().from(communitySovereigntyRequestsSqlite)
+    ).toHaveLength(0);
     await f.store.write(f.record(id, T1));
+    // Resurrected bytes: more than one listing page, plus an in-flight multipart upload.
+    const prefix = `communities/${id}/`;
+    for (let i = 0; i < 25; i++)
+      f.objects.add(`${prefix}media/${String(i).padStart(2, '0')}.bin`);
+    const bystander = `communities/${other}/media/keep.bin`;
+    f.objects.add(bystander);
+    await f.db.insert(exportJobsSqlite).values({
+      id: crypto.randomUUID(),
+      communityId: id,
+      status: 'generating',
+      zipStorageKey: `${prefix}exports/export.zip`,
+      zipUploadId: 'upload-1',
+      createdAt: NOW.getTime(),
+      expiresAt: NOW.getTime() + 86400000,
+    });
     const point = new Date(T1);
     await f.service.verifyRestorePoint(point, NOW);
     await f.service.reconcileRestore(point, NOW);
+    expect(f.fenced).toEqual([id]);
+    expect(f.aborted).toEqual([
+      { key: `${prefix}exports/export.zip`, uploadId: 'upload-1' },
+    ]);
+    expect([...f.objects]).toEqual([bystander]);
     expect(
       await f.db
         .select()
         .from(communitiesSqlite)
         .where(eq(communitiesSqlite.id, id))
     ).toHaveLength(0);
+    expect(
+      await f.db
+        .select()
+        .from(communitiesSqlite)
+        .where(eq(communitiesSqlite.id, other))
+    ).toHaveLength(1);
     const audit = await f.db.select().from(auditEntriesSqlite);
     expect(audit.map((row) => row.action)).toContain(
       SOVEREIGNTY_AUDIT_ACTIONS.RESTORE_RECONCILE
@@ -227,8 +304,8 @@ describe('CommunityErasureService.verifyRestorePoint', () => {
   it('reconcileRestore refuses a point before completion', async () => {
     const f = await setup();
     const id = await f.community('early');
-    await f.request(id, 'completed');
-    await f.store.write(f.record(id, T1));
+    const requestId = await f.request(id, 'completed');
+    await f.store.write(f.record(id, T1, requestId));
     await expect(
       f.service.reconcileRestore(new Date(Date.parse(T1) - 1), NOW)
     ).rejects.toThrow(VIOLATES);

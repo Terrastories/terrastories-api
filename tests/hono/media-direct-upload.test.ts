@@ -316,6 +316,50 @@ describe('direct multipart media upload (#286)', () => {
       expect(again.status).toBe(404);
     });
 
+    it('keeps request metadata through completion', async () => {
+      const bytes = sparseMp4(1024);
+      const { res, json } = await createSession(
+        apiApp,
+        cookies.editor!,
+        bytes,
+        {
+          metadata: { caption: 'River', year: 1987, public: true },
+        }
+      );
+      expect(res.status).toBe(201);
+      const session = DirectUploadSessionResponseSchema.parse(json).data;
+      const target = session.parts[0]!;
+      const put = await apiApp.request(target.url, {
+        method: 'PUT',
+        headers: {
+          ...target.headers,
+          cookie: cookies.editor!,
+          'content-length': String(bytes.byteLength),
+        },
+        body: bytes,
+      });
+      expect(put.status).toBe(200);
+      const etag = put.headers.get('etag')!.replace(/"/g, '');
+      const done = await post(
+        apiApp,
+        `/v2/media/uploads/${session.id}/complete`,
+        cookies.editor!,
+        { parts: [{ partNumber: 1, etag }] }
+      );
+      expect(done.status).toBe(201);
+      const file = MediaUploadResponseSchema.parse(await done.json()).data;
+      const meta = await apiApp.request(`${API}/v2/media/${file.id}/metadata`, {
+        headers: { cookie: cookies.editor! },
+      });
+      expect(meta.status).toBe(200);
+      const body = (await meta.json()) as { data: { metadata: unknown } };
+      expect(body.data.metadata).toEqual({
+        caption: 'River',
+        year: 1987,
+        public: true,
+      });
+    });
+
     it('rejects part uploads that do not match the declared size or digest', async () => {
       const bytes = sparseMp4(17 * MIB);
       const { json } = await createSession(apiApp, cookies.editor!, bytes);

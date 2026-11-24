@@ -55,8 +55,8 @@ This gate is closed by the decision below; it no longer blocks go-live. Neither 
 Snapshot every changed file under `backups/` first. Each step lands as its own reviewed PR.
 
 1. **Decide and amend the spec** (section 5 below), including #187. No config change before the spec allows a paid profile. **Decided 2026-11-24** ([#187](https://github.com/Terrastories/terrastories-api/issues/187)); SPEC-V2 amended. Staging stays on Workers Free (section 4).
-2. **Subscribe** the target account to Workers Paid in the dashboard. **REQUIRES HUMAN APPROVAL** (payment method). The plan is per account: staging and production on separate accounts need two subscriptions, or staging stays Free (section 4).
-3. **`wrangler.jsonc`.** Add a CPU cap. `limits` is inheritable: a top-level block also applies to `env.staging` unless that environment overrides it ([wrangler config](https://developers.cloudflare.com/workers/wrangler/configuration/)). Production deploys from the top-level block today. If staging stays on a Free account, do not put `limits` at the top level: add an `env.production` block holding it and deploy production with `--env production`, or put staging on Paid too. An `env.production` block inherits almost nothing that matters here: bindings, `vars` and secrets are non-inheritable and must be set per environment ([environments](https://developers.cloudflare.com/workers/wrangler/environments/#non-inheritable-keys-and-environments)). Repeat in it the production `name`, `d1_databases` (`DB`), `r2_buckets` (`MEDIA`, `ERASURE_RECORDS`), `vars` (`PUBLIC_ORIGIN`, `CORS_ORIGINS`, `R2_BUCKET_NAME`) and `triggers.crons`, as `env.staging` does, and set every secret with `wrangler secret put ... --env production` (`AUTH_SERVER_SECRET`, `BOOTSTRAP_SECRET`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`; optional `MAPBOX_ACCESS_TOKEN`). Check with `npx wrangler deploy --env production --dry-run`. Put `limits` only in the environment deployed to the Paid account:
+2. **Subscribe** the target account to Workers Paid in the dashboard. **REQUIRES HUMAN APPROVAL** (payment method). The plan is per account, and staging stays on Workers Free (decided 2026-11-24): subscribe only the production account, which must be separate from the staging account (section 4).
+3. **`wrangler.jsonc`.** Add a CPU cap. `limits` is inheritable: a top-level block also applies to `env.staging` unless that environment overrides it ([wrangler config](https://developers.cloudflare.com/workers/wrangler/configuration/)). Production deploys from the top-level block today. Staging stays on a Free account, so do not put `limits` at the top level: add an `env.production` block holding it and deploy production with `--env production`. An `env.production` block inherits almost nothing that matters here: bindings, `vars` and secrets are non-inheritable and must be set per environment ([environments](https://developers.cloudflare.com/workers/wrangler/environments/#non-inheritable-keys-and-environments)). Repeat in it the production `name`, `d1_databases` (`DB`), `r2_buckets` (`MEDIA`, `ERASURE_RECORDS`), `vars` (`PUBLIC_ORIGIN`, `CORS_ORIGINS`, `R2_BUCKET_NAME`) and `triggers.crons`, as `env.staging` does, and set every secret with `wrangler secret put ... --env production` (`AUTH_SERVER_SECRET`, `BOOTSTRAP_SECRET`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`; optional `MAPBOX_ACCESS_TOKEN`). Check with `npx wrangler deploy --env production --dry-run`. Put `limits` only in the environment deployed to the Paid account:
 
    ```jsonc
    // Workers Paid only (docs/WORKERS-PAID-PROFILE.md). Caps cost of a runaway
@@ -64,7 +64,7 @@ Snapshot every changed file under `backups/` first. Each step lands as its own r
    "limits": { "cpu_ms": 30000 },
    ```
 
-   Start at 30,000 ms, the Paid default, written out so the budget is explicit. Lower it after step 7. Leave `limits.subrequests` unset (default 10,000). Keep all three `triggers.crons` strings unchanged: `src/worker.ts` matches them exactly.
+   Start at 30,000 ms, the Paid default, written out so the budget is explicit. Lower it after the step 8 measurement. Leave `limits.subrequests` unset (default 10,000). Keep all three `triggers.crons` strings unchanged: `src/worker.ts` matches them exactly.
 
 4. **`scripts/staging/guards.ts`.** It hard-codes Free limits:
    - `FREE_CRON_LIMIT_PER_ACCOUNT = 5` in `assertCronBudget`: take the plan as input (for example `WORKERS_PLAN=paid`, limit 1,000), default Free.
@@ -82,14 +82,16 @@ Snapshot every changed file under `backups/` first. Each step lands as its own r
 
    What simplifies: with 30 s CPU and 10,000 subrequests, export and erasure can stay synchronous as built. Codex diagnosis steps 4 and 5 (bounded erasure hand-off, capped synchronous export) become optional. Moving export generation to Queues or Workflows is not needed. It would also change the Section 7 Delivery contract (generation on request returns the download tokens) and the Section 9 API contract, so do it only with a spec amendment. Erasure already retries on the `*/1 * * * *` cron and stays there. The client-side password KDF stays: it is a protocol decision (Section 7, Section 14), not only a Free workaround.
 
-7. **Verify on staging**, plan active, before production:
+7. **Verify on staging (Workers Free only)** before production. Staging stays on Free, so it checks the Free behavior and the plan-aware code paths with the Free plan selected:
    - `provision.sh` dry run, then `--apply`; `wrangler d1 info` shows `version: production`.
-   - `scripts/staging/smoke.sh --apply`: health, walkthrough 89/89 with `--d1` and the plan option from step 6 (on Free it uses the day's single import), CORS preflight, R2 part-checksum probe.
-   - CPU procedure (`smoke.sh --cpu-procedure`, `parse-tail.mjs`) for every route in #295 plus export and erasure at the raised caps. Record p50, p99, wall time and outcome in the go/no-go sheet.
+   - `scripts/staging/smoke.sh --apply`: health, walkthrough 89/89 with `--d1` and the Free plan option from step 6 (it uses the day's single import), CORS preflight, R2 part-checksum probe.
+   - Free CPU procedure (`smoke.sh --cpu-procedure`, `parse-tail.mjs`) with the Free rule.
+8. **Production go/no-go (the only Paid account)**, plan active, before the Paid deployment serves real communities:
+   - CPU procedure (`smoke.sh --cpu-procedure`, `parse-tail.mjs`) against the production Worker for every route in #295 plus export and erasure at the raised caps, with the Paid rule (zero `exceededCpu`, p99 per route under half of `limits.cpu_ms`). Record p50, p99, wall time and outcome in the go/no-go sheet.
    - Erasure live deletion finishes within 24 hours. Restore tooling refuses a restore while an erasure is pending and to a point before completion, and reconciles erasures after an allowed restore before serving (Section 7).
    - Then lower `limits.cpu_ms` (step 3) and rerun the CPU procedure.
-8. **Production.** Update `docs/CUTOVER-RUNBOOK.md` sections 4 B, 5 and 6: the 6-of-5 cron workaround and the Free CPU and D1 checks become Paid checks. Deploy with the same `limits` block. Record the change in the same PR.
-9. **Rollback to Free.** Preconditions: every D1 database under 500 MB, all D1 storage in the account under 5 GB, at most 10 D1 databases in the account ([D1 limits](https://developers.cloudflare.com/d1/platform/limits/)), total crons in the account at most 5, export and sweep budgets back to the Free values, and the Free-path CPU fixes from #295 landed (otherwise the 1102 risk returns). Then remove `limits`, set the guard plan back to Free, redeploy, and downgrade the plan last. Time Travel depth drops to 7 days (see Open Questions on history already kept).
+9. **Production.** Update `docs/CUTOVER-RUNBOOK.md` sections 4 B, 5 and 6: the 6-of-5 cron workaround and the Free CPU and D1 checks become Paid checks. Deploy with the same `limits` block. Record the change in the same PR.
+10. **Rollback to Free.** Preconditions: every D1 database under 500 MB, all D1 storage in the account under 5 GB, at most 10 D1 databases in the account ([D1 limits](https://developers.cloudflare.com/d1/platform/limits/)), total crons in the account at most 5, export and sweep budgets back to the Free values, and the Free-path CPU fixes from #295 landed (otherwise the 1102 risk returns). Then remove `limits`, set the guard plan back to Free, redeploy, and downgrade the plan last. Time Travel depth drops to 7 days (see Open Questions on history already kept).
 
 ## 4. Cost estimate
 
@@ -106,12 +108,12 @@ Assumptions: one production Worker plus one staging Worker; the R2 free tier (10
 
 Split accounts (staging on its own account, each with its own 10 GB R2 allowance):
 
-| Case               | Production account                 | Staging account                     | Total (USD) |
-| ------------------ | ---------------------------------- | ----------------------------------- | ----------- |
-| Both Paid          | 5.00 + (30 - 10) GB x 0.015 = 5.30 | 5.00 + 0 (10 GB inside free) = 5.00 | about 10.30 |
-| Staging stays Free | 5.30                               | 0.00                                | about 5.30  |
+| Case                         | Production account                 | Staging account                     | Total (USD) |
+| ---------------------------- | ---------------------------------- | ----------------------------------- | ----------- |
+| Both Paid (not chosen)       | 5.00 + (30 - 10) GB x 0.015 = 5.30 | 5.00 + 0 (10 GB inside free) = 5.00 | about 10.30 |
+| Staging stays Free (decided) | 5.30                               | 0.00                                | about 5.30  |
 
-Sources: [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/), [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/), [R2 pricing](https://developers.cloudflare.com/r2/pricing/). With staging kept on a Free account, staging cannot rehearse the Paid caps. Sensitivity: the 8 million CPU ms of headroom is about 46 ms more per cron invocation, or 8 ms more per HTTP request, before overage; every further 10 million CPU ms costs USD 0.20; every further 1 million requests costs USD 0.30. The R2 line is due on Free too once media passes 10 GB (runbook decision A).
+Sources: [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/), [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/), [R2 pricing](https://developers.cloudflare.com/r2/pricing/). Staging stays on a Free account (decided 2026-11-24), so production and staging are separate accounts, the one-account table above does not apply, and staging cannot rehearse the Paid caps (step 8). Sensitivity: the 8 million CPU ms of headroom is about 46 ms more per cron invocation, or 8 ms more per HTTP request, before overage; every further 10 million CPU ms costs USD 0.20; every further 1 million requests costs USD 0.30. The R2 line is due on Free too once media passes 10 GB (runbook decision A).
 
 ## 5. Spec changes needed
 

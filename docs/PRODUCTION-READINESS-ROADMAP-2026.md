@@ -10,7 +10,7 @@ Current baseline as of 2026-11-12 (#193):
 
 - `main` runs Fastify V1. PR #132 was closed on 2026-11-11 and superseded by a thin Hono slice re-landed off `main`: health, login, durable session, revocation, and one protected media read (about 1,500 lines cap).
 - Fastify freeze: after #162, #177 and #160 merge, no new Fastify-only route work. #177 is merged; #162 and #160 are open.
-- Launch profiles (#195): Cloudflare Workers Free + D1 + R2 (hosted); Node.js with SQLite or PostgreSQL (self-hosted); offline Node.js + SQLite field kit. Free hosting is required; no paid plan (#184). Both SQLite and PostgreSQL stay (#196 closed).
+- Launch profiles (#195): Cloudflare Workers + D1 + R2 (hosted; Workers Free by default and for staging, Workers Paid approved for production, #295); Node.js with SQLite or PostgreSQL (self-hosted); offline Node.js + SQLite field kit. Free hosting is the default; a Workers Paid production profile is approved, about USD 5/month base (#184, #295, SPEC-V2 Section 5). Both SQLite and PostgreSQL stay (#196 closed).
 - #194, measured on Workers Free: server-side bcrypt/Argon2id killed the Worker (error 1102) and PBKDF2 100k fails under sustained load; the client-stretching auth gate passed.
 
 Historical 2026-08-22 baseline:
@@ -144,7 +144,7 @@ A Terrastories API revision is production-ready only when all of the following a
 - Add property/invariant tests asserting a principal from community A cannot observe community B data unless the contract explicitly permits public data.
 - Validate V2 public/private and community-ownership behavior consistently in nested relations, search, public API, files, and metadata; do not reintroduce elder-only/cultural-metadata scope removed by the V2 spec.
 - Ensure audit logs capture security-relevant administrative actions under the content-free audit contract in `SPEC-V2.md` Section 7 (actor/community/action/resource IDs and outcome; network metadata only on authentication and security events with bounded retention).
-- Keep export always available to community admins, including while the community is disabled, and complete erasure within 30 days including backups (#187).
+- Keep export always available to community admins, including while the community is disabled, and complete erasure including backups within the per-profile bound of SPEC-V2 Section 7: 30 days from the request on Workers Free and self-hosted/field kit, 30 days from live-deletion completion (31 days worst case) on Workers Paid (#187).
 - Add a release-blocking sovereignty suite independent from general unit coverage.
 
 ### Exit gate

@@ -170,14 +170,20 @@ export class CommunityErasureService {
   async sweep(
     now: Date,
     storageBudget = 25,
-    d1QueryBudget?: number
+    d1QueryBudget?: number,
+    workersPlan?: WorkersPlan
   ): Promise<void> {
-    const passStartMs = this.clock().getTime();
-    const pastDeadline = () =>
-      this.clock().getTime() - passStartMs >= ERASURE_PASS_MAX_WALL_MS;
+    const isPaid = workersPlan === 'paid';
+    const passStartMs = isPaid ? this.clock().getTime() : 0;
+    const pastDeadline = isPaid
+      ? () => this.clock().getTime() - passStartMs >= ERASURE_PASS_MAX_WALL_MS
+      : () => false;
     const effectiveD1Budget =
-      d1QueryBudget ??
-      (storageBudget > 25 ? WORKER_PAID_ERASURE_D1_BUDGET : undefined);
+      workersPlan === 'free'
+        ? undefined
+        : isPaid
+          ? (d1QueryBudget ?? WORKER_PAID_ERASURE_D1_BUDGET)
+          : d1QueryBudget;
     const d1Budget =
       effectiveD1Budget !== undefined
         ? { remaining: effectiveD1Budget }
@@ -293,6 +299,7 @@ export class CommunityErasureService {
         if (!object.key.startsWith(prefix))
           throw new Error('Invalid erasure listing');
       }
+      if (pastDeadline()) return;
       if (this.storage.deleteMany) {
         const keys: string[] = [];
         for (const object of page.entries) {

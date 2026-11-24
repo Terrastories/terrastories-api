@@ -3,6 +3,7 @@ import { createWorker, type WorkerBindings } from '../../src/worker.js';
 import {
   KNOWN_WORKERS_PLANS,
   V2RuntimeConfigError,
+  type WorkersPlan,
   parseWorkersPlan,
   validateNodeV2Runtime,
   validateV2RuntimeCore,
@@ -1128,7 +1129,8 @@ describe('V2 runtime configuration gate (#150)', () => {
       const runScenario = async (
         fileCount: number,
         storageBudget: number,
-        d1Budget?: number
+        d1Budget?: number,
+        workersPlan?: WorkersPlan
       ) => {
         const legacyFiles = makeFiles(fileCount);
         const cleared: string[] = [];
@@ -1198,7 +1200,7 @@ describe('V2 runtime configuration gate (#150)', () => {
           store,
           () => new Date(clockMs)
         );
-        await service.sweep(new Date(0), storageBudget, d1Budget);
+        await service.sweep(new Date(0), storageBudget, d1Budget, workersPlan);
         return {
           cleared,
           remainingIds: legacyFiles.map((f) => f.id),
@@ -1217,7 +1219,8 @@ describe('V2 runtime configuration gate (#150)', () => {
       const smallPaid = await runScenario(
         3,
         WORKER_PAID_ERASURE_STORAGE_BUDGET,
-        27
+        27,
+        'paid'
       );
       expect(smallPaid.cleared).toEqual(['f1', 'f2']);
       expect(smallPaid.remainingIds).toEqual(['f3']);
@@ -1228,7 +1231,8 @@ describe('V2 runtime configuration gate (#150)', () => {
       const fullPaid = await runScenario(
         200,
         workerErasureStorageBudget('paid'),
-        workerErasureD1Budget('paid')
+        workerErasureD1Budget('paid'),
+        'paid'
       );
       expect(fullPaid.d1Queries).toBeLessThan(1000);
       expect(fullPaid.d1Queries).toBeLessThanOrEqual(
@@ -1236,22 +1240,195 @@ describe('V2 runtime configuration gate (#150)', () => {
       );
       expect(fullPaid.remainingIds.length).toBeGreaterThan(0);
 
-      // Wall-clock deadline still halts mid-pass before the next minute tick.
+      // Wall-clock deadline still halts mid-pass on Paid before the next minute tick.
       smallPaid.storage.fenceCommunity = async () => {
         smallPaid.advanceClock(ERASURE_PASS_MAX_WALL_MS);
       };
-      await smallPaid.service.sweep(new Date(60_000), 100);
+      await smallPaid.service.sweep(
+        new Date(60_000),
+        workerErasureStorageBudget('paid'),
+        workerErasureD1Budget('paid'),
+        'paid'
+      );
       expect(smallPaid.remainingIds).toEqual(['f3']);
+
+      // Without Paid plan or explicit D1 budget, storageBudget > 25 does not
+      // trigger a D1 budget or the 45 s wall-clock deadline heuristic.
+      const highBudgetNoPlan = await runScenario(200, 200);
+      expect(highBudgetNoPlan.cleared).toHaveLength(196);
+      expect(highBudgetNoPlan.d1Queries).toBeGreaterThan(
+        WORKER_PAID_ERASURE_D1_BUDGET
+      );
 
       // Free behavior is unchanged: 10 shared users/ keys under budget 15
       // still clear all 10 in one pass (1 fence + 10 * 1 skipped = 11 <= 15).
       const freeRun = await runScenario(
         10,
         workerErasureStorageBudget('free'),
-        workerErasureD1Budget('free')
+        workerErasureD1Budget('free'),
+        'free'
       );
       expect(freeRun.cleared).toHaveLength(10);
       expect(freeRun.remainingIds).toEqual([]);
+    });
+
+    it('keeps Free erasure sweep free of wall-clock and D1 cutoffs even with a slow clock', async () => {
+      let clockMs = 1_000;
+      const legacyFiles = [
+        { id: 'lf-1', storageKey: 'legacy/one.png', path: null },
+      ];
+      const objects = ['communities/1/media/photo.png'];
+      const erased: number[] = [];
+      const records: ErasureRecord[] = [
+        {
+          communityId: 1,
+          requestId: 'req-free-slow',
+          requestingActorId: null,
+          requestedAt: new Date(0).toISOString(),
+          completedAt: null,
+          outcome: 'pending',
+        },
+      ];
+      const repo = {
+        activateDueErasures: async () => true,
+        erasureWork: async () => [],
+        erasureUploads: async () => [],
+        erasureArchiveCustody: async () => null,
+        erasureLegacyFiles: async () => [...legacyFiles],
+        erasureMayDeleteKey: async () => true,
+        clearErasureLegacyFile: async (_c: number, id: string) => {
+          const idx = legacyFiles.findIndex((f) => f.id === id);
+          if (idx >= 0) legacyFiles.splice(idx, 1);
+        },
+        eraseRows: async (id: number) => {
+          erased.push(id);
+        },
+      } as unknown as CommunitySovereigntyRepository;
+      const deleteMany = vi.fn(async (keys: string[]) => {
+        for (const key of keys) {
+          const idx = objects.indexOf(key);
+          if (idx >= 0) objects.splice(idx, 1);
+        }
+      });
+      const storage: FoundationStorage = {
+        read: async () => null,
+        delete: async (key: string) => {
+          if (key === 'legacy/one.png') {
+            clockMs += ERASURE_PASS_MAX_WALL_MS + 10_000;
+          }
+        },
+        deleteMany,
+        fenceCommunity: async () => {
+          clockMs += ERASURE_PASS_MAX_WALL_MS + 10_000;
+        },
+        list: async ({ prefix } = {}) => {
+          clockMs += ERASURE_PASS_MAX_WALL_MS + 10_000;
+          if (prefix === 'communities/1/') {
+            return {
+              entries: objects.map((key) => ({ key, uploaded: new Date(0) })),
+              truncated: false,
+            };
+          }
+          return { entries: [], truncated: false };
+        },
+      };
+      const store = {
+        list: async () => records,
+        write: async (r: ErasureRecord) => {
+          records[0] = r;
+        },
+      };
+      const service = new CommunityErasureService(
+        repo,
+        storage,
+        store,
+        () => new Date(clockMs)
+      );
+      // Even if a caller passes a D1 budget alongside 'free' and a slow clock,
+      // Free imposes neither D1 budget nor wall-clock deadline cutoffs.
+      await service.sweep(
+        new Date(0),
+        workerErasureStorageBudget('free'),
+        5,
+        'free'
+      );
+      expect(legacyFiles).toEqual([]);
+      expect(deleteMany).toHaveBeenCalledWith([
+        'communities/1/media/photo.png',
+      ]);
+      expect(objects).toEqual([]);
+
+      // Second pass sees empty R2 listing and completes despite slow clock.
+      await service.sweep(
+        new Date(60_000),
+        workerErasureStorageBudget('free'),
+        workerErasureD1Budget('free'),
+        'free'
+      );
+      expect(erased).toEqual([1]);
+      expect(records[0]!.outcome).toBe('completed');
+    });
+
+    it('stops Paid erasure before deleteMany when R2 listing pushes past ERASURE_PASS_MAX_WALL_MS', async () => {
+      let clockMs = 1_000;
+      const erased: number[] = [];
+      const records: ErasureRecord[] = [
+        {
+          communityId: 1,
+          requestId: 'req-paid-list-timeout',
+          requestingActorId: null,
+          requestedAt: new Date(0).toISOString(),
+          completedAt: null,
+          outcome: 'pending',
+        },
+      ];
+      const repo = {
+        activateDueErasures: async () => true,
+        erasureWork: async () => [],
+        erasureUploads: async () => [],
+        erasureArchiveCustody: async () => null,
+        erasureLegacyFiles: async () => [],
+        eraseRows: async (id: number) => {
+          erased.push(id);
+        },
+      } as unknown as CommunitySovereigntyRepository;
+      const deleteMany = vi.fn(async () => {});
+      const storage: FoundationStorage = {
+        read: async () => null,
+        delete: async () => {},
+        deleteMany,
+        fenceCommunity: async () => {},
+        list: async () => {
+          clockMs += ERASURE_PASS_MAX_WALL_MS;
+          return {
+            entries: [
+              { key: 'communities/1/media/photo.png', uploaded: new Date(0) },
+            ],
+            truncated: false,
+          };
+        },
+      };
+      const store = {
+        list: async () => records,
+        write: async (r: ErasureRecord) => {
+          records[0] = r;
+        },
+      };
+      const service = new CommunityErasureService(
+        repo,
+        storage,
+        store,
+        () => new Date(clockMs)
+      );
+      await service.sweep(
+        new Date(0),
+        workerErasureStorageBudget('paid'),
+        undefined,
+        'paid'
+      );
+      expect(deleteMany).not.toHaveBeenCalled();
+      expect(erased).toEqual([]);
+      expect(records[0]!.completedAt).toBeNull();
     });
 
     it('logs one content-free warning in scheduled() on invalid WORKERS_PLAN and falls back to free', async () => {

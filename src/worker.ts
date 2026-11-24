@@ -625,7 +625,8 @@ export function createWorker() {
                 ).sweep(
                   scheduledNow(),
                   workerErasureStorageBudget(workersPlan),
-                  workerErasureD1Budget(workersPlan)
+                  workerErasureD1Budget(workersPlan),
+                  workersPlan
                 );
               } catch {
                 // eslint-disable-next-line no-console -- content-free retry signal

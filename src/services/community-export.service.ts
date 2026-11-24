@@ -117,6 +117,7 @@ class ExportWriterFencedError extends Error {}
 
 export class CommunityExportService {
   private readonly isWorkers: boolean;
+  private readonly workersPlan: WorkersPlan;
   private readonly now: () => Date;
   private readonly limits: ExportLimits;
   private readonly rateLimits: ExportRateLimits;
@@ -127,11 +128,9 @@ export class CommunityExportService {
     options: CommunityExportServiceOptions = {}
   ) {
     this.isWorkers = options.isWorkers ?? false;
+    this.workersPlan = options.workersPlan ?? 'free';
     this.now = options.now ?? (() => new Date());
-    const defaults = exportLimitsForProfile(
-      this.isWorkers,
-      options.workersPlan
-    );
+    const defaults = exportLimitsForProfile(this.isWorkers, this.workersPlan);
     this.limits = {
       maxRows: options.limits?.maxRows ?? defaults.maxRows,
       maxManifestBytes:
@@ -230,17 +229,19 @@ export class CommunityExportService {
         throw new Error('Community missing during export snapshot');
       }
 
+      const planLabel =
+        this.workersPlan === 'paid' ? 'Workers Paid' : 'Workers Free';
       const rowCount = countSnapshotRows(snapshot);
       if (rowCount > this.limits.maxRows) {
         throw new ExportLimitExceededError(
           'maxRows',
-          'Export row count exceeds Workers Free limit'
+          `Export row count exceeds ${planLabel} limit`
         );
       }
       if (snapshot.files.length > this.limits.maxFiles) {
         throw new ExportLimitExceededError(
           'maxFiles',
-          'Export file count exceeds Workers Free limit'
+          `Export file count exceeds ${planLabel} limit`
         );
       }
       const declaredMediaBytes = snapshot.files.reduce(
@@ -254,7 +255,7 @@ export class CommunityExportService {
       if (declaredMediaBytes > this.limits.maxMediaBytes) {
         throw new ExportLimitExceededError(
           'maxMediaBytes',
-          'Export media bytes exceed Workers Free limit'
+          `Export media bytes exceed ${planLabel} limit`
         );
       }
 
@@ -428,11 +429,13 @@ export class CommunityExportService {
         return { status: 409, body: CONFLICT_BODY };
       }
       if (error instanceof ExportLimitExceededError) {
+        const planLabel =
+          this.workersPlan === 'paid' ? 'Workers Paid' : 'Workers Free';
         return {
           status: 422,
           body: {
             error: this.isWorkers
-              ? `Export exceeds Workers Free ${error.limitName} limit; run export from a self-hosted or field-kit deployment profile`
+              ? `Export exceeds ${planLabel} ${error.limitName} limit; run export from a self-hosted or field-kit deployment profile`
               : `Export exceeds ${error.limitName} archive limit`,
             code: 'export_limit_exceeded',
           },

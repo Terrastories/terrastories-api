@@ -55,30 +55,26 @@ export const WORKERS_EXPORT_MAX_MEDIA_BYTES = 50 * 1024 * 1024; // 50 MiB
 export const WORKERS_EXPORT_MAX_ARCHIVE_BYTES = 64 * 1024 * 1024; // 64 MiB
 
 /**
- * Workers Paid export feasibility limits (docs/WORKERS-PAID-PROFILE.md §2, §3 step 6):
+ * Workers Paid export feasibility limits (docs/WORKERS-PAID-PROFILE.md §2, §3 steps 6–7):
  * TODO(SPEC-V2 §5, §7 Export): inert unless WORKERS_PLAN=paid after SPEC-V2 §5 and §7 are amended to state per-plan caps.
+ * TODO: Keep the Free export ceilings (10,000 rows, 30 files, 50 MiB media,
+ * 64 MiB archive) on Paid as interim values; raise only after a production
+ * memory/CPU measurement.
  *
- * - WORKERS_PAID_EXPORT_MAX_ROWS (100,000): Paid raises CPU per request from
- *   10 ms to 30 s default (up to 5 min) and D1 rows read from 5M/day to
- *   25B/month included, while isolate memory remains 128 MB; 100k rows (10x
- *   Free) fits inside the unchanged 128 MB isolate memory and 8 MiB manifest cap.
- * - WORKERS_PAID_EXPORT_MAX_FILES (1,000): Paid raises subrequests per
- *   invocation from 50 to 10,000 default (internal services R2/D1 included) and
- *   D1 queries to 1,000; 1,000 R2 object reads plus ~105 multipart ZIP upload
- *   parts and ~20 D1 snapshot queries (~1,125 subrequests) stays ~9x below the
- *   10,000 subrequest default.
- * - WORKERS_PAID_EXPORT_MAX_MEDIA_BYTES (500 MiB): Paid provides 30 s CPU and
- *   10,000 subrequests while keeping the 128 MB isolate memory cap; because the
- *   ZIP streams through 5 MiB R2 multipart upload parts without full-archive
- *   buffering, 500 MiB uses ~100 uploadPart subrequests and a 5 MiB buffer.
- * - WORKERS_PAID_EXPORT_MAX_ARCHIVE_BYTES (512 MiB): 500 MiB media allowance
- *   plus 12 MiB headroom for deterministic ZIP headers across up to 1,000 files,
- *   streamed in 5 MiB R2 multipart parts (~103 parts << 10,000 subrequests).
+ * Workers Paid raises CPU per request to 30 s default (up to 5 min) and
+ * subrequests to 10,000, but keeps the same 128 MB isolate memory limit.
+ * D1 materializes the snapshot rows in isolate memory before the final
+ * row-count check (the SQL byte guard measures field contents only, not V8
+ * object overhead), and ZIP/media streaming buffers a 5 MiB R2 multipart chunk
+ * plus a copied upload part while running two pure-JS SHA-256 passes and CRC32
+ * over media.
  */
-export const WORKERS_PAID_EXPORT_MAX_ROWS = 100_000;
-export const WORKERS_PAID_EXPORT_MAX_FILES = 1_000;
-export const WORKERS_PAID_EXPORT_MAX_MEDIA_BYTES = 500 * 1024 * 1024; // 500 MiB
-export const WORKERS_PAID_EXPORT_MAX_ARCHIVE_BYTES = 512 * 1024 * 1024; // 512 MiB
+export const WORKERS_PAID_EXPORT_MAX_ROWS = WORKERS_EXPORT_MAX_ROWS;
+export const WORKERS_PAID_EXPORT_MAX_FILES = WORKERS_EXPORT_MAX_FILES;
+export const WORKERS_PAID_EXPORT_MAX_MEDIA_BYTES =
+  WORKERS_EXPORT_MAX_MEDIA_BYTES;
+export const WORKERS_PAID_EXPORT_MAX_ARCHIVE_BYTES =
+  WORKERS_EXPORT_MAX_ARCHIVE_BYTES;
 
 /** Node self-hosted / field-kit archive bound (ZIP32 safe ceiling, 2 GiB). */
 export const NODE_EXPORT_MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024;

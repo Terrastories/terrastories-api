@@ -145,19 +145,21 @@ const D1_DAILY_IMPORT_LIMIT_BODY: V2ErrorResponse = {
 
 /**
  * Workers Free D1 allows 100,000 rows written/day, so V2 caps committed imports
- * at 1 per UTC day across the D1 database (SPEC-V2 §4, §5). Workers Paid has no
- * daily D1 row-write cap (50M/month included, docs/WORKERS-PAID-PROFILE.md §2),
- * so the 1/UTC-day rule is off (`null`) when WORKERS_PLAN=paid while each
- * import still obeys D1's per-statement/batch bounds.
- * TODO(SPEC-V2 §4, §5): inert unless WORKERS_PLAN=paid after SPEC-V2 §4 and §5 are amended to permit the Paid profile.
+ * at 1 per UTC day across the D1 database (SPEC-V2 §4, §5). Although Workers
+ * Paid replaces the daily D1 write quota with a 50M/month included allowance
+ * (docs/WORKERS-PAID-PROFILE.md §2), SPEC-V2 §4 requires one import per hosted
+ * database per UTC day, §5 defines Free as the hosted launch profile, §7 leaves
+ * Paid backup retention open, and open-preview / per-batch limits alone would
+ * not throttle repeated commits. Keep the 1/UTC-day precheck and atomic commit
+ * guard on Paid until SPEC-V2 §4, §5, and §7 are amended with a Paid import
+ * throttle policy.
  */
 export const WORKER_FREE_DAILY_IMPORT_LIMIT =
   D1_MAX_COMMITTED_IMPORTS_PER_UTC_DAY;
-export const WORKER_PAID_DAILY_IMPORT_LIMIT = null;
+export const WORKER_PAID_DAILY_IMPORT_LIMIT =
+  D1_MAX_COMMITTED_IMPORTS_PER_UTC_DAY;
 
-export function workerDailyImportLimit(
-  plan: WorkersPlan = 'free'
-): number | null {
+export function workerDailyImportLimit(plan: WorkersPlan = 'free'): number {
   return plan === 'paid'
     ? WORKER_PAID_DAILY_IMPORT_LIMIT
     : WORKER_FREE_DAILY_IMPORT_LIMIT;
@@ -537,7 +539,7 @@ export class ImportsService {
     now: Date
   ): { startMs: number; endMs: number } | null {
     if (!this.isD1Enforced()) return null;
-    return workerDailyImportLimit(this.workersPlan) !== null
+    return workerDailyImportLimit(this.workersPlan) > 0
       ? utcDayWindowMs(now)
       : null;
   }

@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { createWorker, type WorkerBindings } from '../../src/worker.js';
 import {
   KNOWN_WORKERS_PLANS,
   V2RuntimeConfigError,
@@ -31,10 +32,18 @@ import {
   workerExportSweepBatchLimit,
 } from '../../src/shared/export-policy.js';
 import {
+  CommunityErasureService,
+  ERASURE_PASS_MAX_WALL_MS,
   WORKER_ERASURE_STORAGE_BUDGET,
+  WORKER_PAID_ERASURE_D1_BUDGET,
   WORKER_PAID_ERASURE_STORAGE_BUDGET,
+  workerErasureD1Budget,
   workerErasureStorageBudget,
 } from '../../src/services/community-erasure.service.js';
+import { CommunityExportService } from '../../src/services/community-export.service.js';
+import type { CommunityExportRepository } from '../../src/repositories/community-export.repository.js';
+import type { CommunitySovereigntyRepository } from '../../src/repositories/community-sovereignty.repository.js';
+import type { ErasureRecord } from '../../src/services/erasure-record-store.js';
 import {
   D1_FREE_DAILY_ROWS_WRITTEN,
   D1_PAID_INCLUDED_ROWS_WRITTEN,
@@ -926,10 +935,10 @@ describe('V2 runtime configuration gate (#150)', () => {
       expect(WORKERS_EXPORT_MAX_FILES).toBe(30);
       expect(WORKERS_EXPORT_MAX_MEDIA_BYTES).toBe(50 * 1024 * 1024);
       expect(WORKERS_EXPORT_MAX_ARCHIVE_BYTES).toBe(64 * 1024 * 1024);
-      expect(WORKERS_PAID_EXPORT_MAX_ROWS).toBe(100_000);
-      expect(WORKERS_PAID_EXPORT_MAX_FILES).toBe(1_000);
-      expect(WORKERS_PAID_EXPORT_MAX_MEDIA_BYTES).toBe(500 * 1024 * 1024);
-      expect(WORKERS_PAID_EXPORT_MAX_ARCHIVE_BYTES).toBe(512 * 1024 * 1024);
+      expect(WORKERS_PAID_EXPORT_MAX_ROWS).toBe(10_000);
+      expect(WORKERS_PAID_EXPORT_MAX_FILES).toBe(30);
+      expect(WORKERS_PAID_EXPORT_MAX_MEDIA_BYTES).toBe(50 * 1024 * 1024);
+      expect(WORKERS_PAID_EXPORT_MAX_ARCHIVE_BYTES).toBe(64 * 1024 * 1024);
 
       expect(exportLimitsForProfile(true)).toEqual({
         maxRows: 10_000,
@@ -941,13 +950,9 @@ describe('V2 runtime configuration gate (#150)', () => {
       expect(exportLimitsForProfile(true, 'free')).toEqual(
         exportLimitsForProfile(true)
       );
-      expect(exportLimitsForProfile(true, 'paid')).toEqual({
-        maxRows: 100_000,
-        maxFiles: 1_000,
-        maxMediaBytes: 500 * 1024 * 1024,
-        maxArchiveBytes: 512 * 1024 * 1024,
-        maxManifestBytes: 8 * 1024 * 1024,
-      });
+      expect(exportLimitsForProfile(true, 'paid')).toEqual(
+        exportLimitsForProfile(true)
+      );
 
       // Node/self-hosted profiles are unaffected regardless of plan
       const expectedNodeLimits = {
@@ -969,12 +974,17 @@ describe('V2 runtime configuration gate (#150)', () => {
       expect(workerExportSweepBatchLimit('free')).toBe(5);
       expect(workerExportSweepBatchLimit('paid')).toBe(20);
 
-      // 3. Community erasure storage budget
+      // 3. Community erasure storage & D1 query budgets
       expect(WORKER_ERASURE_STORAGE_BUDGET).toBe(15);
-      expect(WORKER_PAID_ERASURE_STORAGE_BUDGET).toBe(500);
+      expect(WORKER_PAID_ERASURE_STORAGE_BUDGET).toBe(400);
+      expect(WORKER_PAID_ERASURE_D1_BUDGET).toBe(400);
+      expect(ERASURE_PASS_MAX_WALL_MS).toBe(45_000);
       expect(workerErasureStorageBudget()).toBe(15);
       expect(workerErasureStorageBudget('free')).toBe(15);
-      expect(workerErasureStorageBudget('paid')).toBe(500);
+      expect(workerErasureStorageBudget('paid')).toBe(400);
+      expect(workerErasureD1Budget()).toBeUndefined();
+      expect(workerErasureD1Budget('free')).toBeUndefined();
+      expect(workerErasureD1Budget('paid')).toBe(400);
 
       // 4. Migration load D1 rows-written budget
       expect(D1_FREE_DAILY_ROWS_WRITTEN).toBe(100_000);
@@ -983,15 +993,15 @@ describe('V2 runtime configuration gate (#150)', () => {
       expect(d1RowsWrittenBudget('free')).toBe(100_000);
       expect(d1RowsWrittenBudget('paid')).toBe(50_000_000);
 
-      // 5. Daily committed imports limit on D1
+      // 5. Daily committed imports limit on D1 (retained on Paid until SPEC-V2 §4/§5/§7 amendment)
       expect(WORKER_FREE_DAILY_IMPORT_LIMIT).toBe(1);
-      expect(WORKER_PAID_DAILY_IMPORT_LIMIT).toBeNull();
+      expect(WORKER_PAID_DAILY_IMPORT_LIMIT).toBe(1);
       expect(workerDailyImportLimit()).toBe(1);
       expect(workerDailyImportLimit('free')).toBe(1);
-      expect(workerDailyImportLimit('paid')).toBeNull();
+      expect(workerDailyImportLimit('paid')).toBe(1);
     });
 
-    it('keeps 429 d1_daily_import_limit on Free and disables the daily cap on Paid in ImportsService', async () => {
+    it('keeps 429 d1_daily_import_limit on Free and Paid in ImportsService until SPEC-V2 is amended', async () => {
       const fakeRepo = {
         connection: {},
         hasD1Batch: () => true,
@@ -1017,43 +1027,286 @@ describe('V2 runtime configuration gate (#150)', () => {
         communityId: 1,
       };
 
-      const freeService = new ImportsService(
-        fakeRepo,
-        fakeStorage,
-        fakeCleanup,
-        {
+      for (const workersPlan of ['free', 'paid'] as const) {
+        const service = new ImportsService(fakeRepo, fakeStorage, fakeCleanup, {
           enforceD1Budget: true,
+          workersPlan,
+        });
+        const preview = await service.previewImport({
+          actor,
+          contentTypeHeader: 'multipart/form-data; boundary=---x',
+          contentLengthHeader: '10',
+          body: null,
+        });
+        expect(preview.status).toBe(429);
+        expect(preview.body).toMatchObject({
+          code: 'd1_daily_import_limit',
+        });
+      }
+    });
+
+    it('names Workers Free or Workers Paid accurately in 422 export limit responses', async () => {
+      const fakeExportRepo = {
+        findJobsNeedingCleanup: async () => [],
+        reserveExportJob: async () => ({ status: 'reserved' as const }),
+        readCommunityExportSnapshot: async () => ({
+          community: { id: 1 },
+          mapConfig: null,
+          users: [{ id: 1 }, { id: 2 }],
+          places: [],
+          speakers: [],
+          stories: [],
+          storyPlaces: [],
+          storySpeakers: [],
+          files: [],
+          attachments: [],
+          externalMediaLinks: [],
+          legacyCommunityMedia: [],
+          importManifests: [],
+          auditEntries: [],
+        }),
+        failExportJob: async () => {},
+      } as unknown as CommunityExportRepository;
+      const fakeStorage: FoundationStorage = {
+        read: async () => null,
+        put: async () => ({ size: 0 }),
+        delete: async () => {},
+      };
+      const admin = {
+        id: 1,
+        email: 'admin@community.local',
+        username: 'admin',
+        displayName: 'Admin',
+        role: 'admin' as const,
+        communityId: 1,
+        tokenVersion: 0,
+        passwordHash: '',
+      };
+
+      const freeExport = new CommunityExportService(
+        fakeExportRepo,
+        fakeStorage,
+        {
+          isWorkers: true,
           workersPlan: 'free',
+          limits: { maxRows: 1 },
         }
       );
-      const freePreview = await freeService.previewImport({
-        actor,
-        contentTypeHeader: 'multipart/form-data; boundary=---x',
-        contentLengthHeader: '10',
-        body: null,
-      });
-      expect(freePreview.status).toBe(429);
-      expect(freePreview.body).toMatchObject({
-        code: 'd1_daily_import_limit',
+      const freeRes = await freeExport.createExport(admin);
+      expect(freeRes.status).toBe(422);
+      expect(freeRes.body).toEqual({
+        error:
+          'Export exceeds Workers Free maxRows limit; run export from a self-hosted or field-kit deployment profile',
+        code: 'export_limit_exceeded',
       });
 
-      const paidService = new ImportsService(
-        fakeRepo,
+      const paidExport = new CommunityExportService(
+        fakeExportRepo,
         fakeStorage,
-        fakeCleanup,
         {
-          enforceD1Budget: true,
+          isWorkers: true,
           workersPlan: 'paid',
+          limits: { maxRows: 1 },
         }
       );
-      const paidPreview = await paidService.previewImport({
-        actor,
-        contentTypeHeader: 'multipart/form-data; boundary=---x',
-        contentLengthHeader: '10',
-        body: null,
+      const paidRes = await paidExport.createExport(admin);
+      expect(paidRes.status).toBe(422);
+      expect(paidRes.body).toEqual({
+        error:
+          'Export exceeds Workers Paid maxRows limit; run export from a self-hosted or field-kit deployment profile',
+        code: 'export_limit_exceeded',
       });
-      // Proceeds past the daily limit check to multipart validation (400 for null body).
-      expect(paidPreview.status).toBe(400);
+    });
+
+    it('counts D1 queries in the Paid erasure budget under 1,000, stops at ERASURE_PASS_MAX_WALL_MS, and leaves Free unchanged', async () => {
+      const makeFiles = (count: number) =>
+        Array.from({ length: count }, (_, idx) => ({
+          id: `f${idx + 1}`,
+          storageKey: `users/7/avatar-${idx + 1}.png`,
+          path: null,
+        }));
+      const runScenario = async (
+        fileCount: number,
+        storageBudget: number,
+        d1Budget?: number
+      ) => {
+        const legacyFiles = makeFiles(fileCount);
+        const cleared: string[] = [];
+        let d1Queries = 0;
+        let clockMs = 1_000;
+        const records: ErasureRecord[] = [
+          {
+            communityId: 1,
+            requestId: 'req-1',
+            requestingActorId: null,
+            requestedAt: new Date(0).toISOString(),
+            completedAt: null,
+            outcome: 'pending',
+          },
+        ];
+        const repo = {
+          activateDueErasures: async () => {
+            d1Queries += 2;
+            return true;
+          },
+          erasureWork: async () => {
+            d1Queries += 2;
+            return [];
+          },
+          erasureUploads: async () => {
+            d1Queries += 1;
+            return [];
+          },
+          erasureArchiveCustody: async () => {
+            d1Queries += 1;
+            return null;
+          },
+          erasureLegacyFiles: async () => {
+            d1Queries += 1;
+            return [...legacyFiles];
+          },
+          erasureMayDeleteKey: async () => {
+            d1Queries += 2;
+            return false;
+          },
+          clearErasureLegacyFile: async (_c: number, id: string) => {
+            d1Queries += 1;
+            cleared.push(id);
+            const idx = legacyFiles.findIndex((f) => f.id === id);
+            if (idx >= 0) legacyFiles.splice(idx, 1);
+          },
+          eraseRows: async () => {
+            d1Queries += 23;
+          },
+        } as unknown as CommunitySovereigntyRepository;
+        const storage: FoundationStorage = {
+          read: async () => null,
+          delete: async () => {},
+          fenceCommunity: async () => {},
+          list: async () => ({ entries: [], truncated: false }),
+          erasureDeleteCost: 3,
+        };
+        const store = {
+          list: async () => records,
+          write: async (r: ErasureRecord) => {
+            records[0] = r;
+          },
+        };
+        const service = new CommunityErasureService(
+          repo,
+          storage,
+          store,
+          () => new Date(clockMs)
+        );
+        await service.sweep(new Date(0), storageBudget, d1Budget);
+        return {
+          cleared,
+          remainingIds: legacyFiles.map((f) => f.id),
+          d1Queries,
+          service,
+          storage,
+          advanceClock: (ms: number) => {
+            clockMs += ms;
+          },
+        };
+      };
+
+      // Paid D1 budget (27): 19 startup + 1 custody + 1 legacy list = 21 -> 6
+      // remaining; each shared users/ key costs 3 D1 queries, so f1 and f2
+      // clear (6 -> 0) and f3 stops before exceeding the D1 budget.
+      const smallPaid = await runScenario(
+        3,
+        WORKER_PAID_ERASURE_STORAGE_BUDGET,
+        27
+      );
+      expect(smallPaid.cleared).toEqual(['f1', 'f2']);
+      expect(smallPaid.remainingIds).toEqual(['f3']);
+
+      // Full Paid budgets (400 storage, 400 D1): 200 shared users/ keys would
+      // run 600+ D1 queries without D1 accounting; counting D1 queries stops
+      // the pass well under D1's 1,000-query per-invocation ceiling.
+      const fullPaid = await runScenario(
+        200,
+        workerErasureStorageBudget('paid'),
+        workerErasureD1Budget('paid')
+      );
+      expect(fullPaid.d1Queries).toBeLessThan(1000);
+      expect(fullPaid.d1Queries).toBeLessThanOrEqual(
+        WORKER_PAID_ERASURE_D1_BUDGET
+      );
+      expect(fullPaid.remainingIds.length).toBeGreaterThan(0);
+
+      // Wall-clock deadline still halts mid-pass before the next minute tick.
+      smallPaid.storage.fenceCommunity = async () => {
+        smallPaid.advanceClock(ERASURE_PASS_MAX_WALL_MS);
+      };
+      await smallPaid.service.sweep(new Date(60_000), 100);
+      expect(smallPaid.remainingIds).toEqual(['f3']);
+
+      // Free behavior is unchanged: 10 shared users/ keys under budget 15
+      // still clear all 10 in one pass (1 fence + 10 * 1 skipped = 11 <= 15).
+      const freeRun = await runScenario(
+        10,
+        workerErasureStorageBudget('free'),
+        workerErasureD1Budget('free')
+      );
+      expect(freeRun.cleared).toHaveLength(10);
+      expect(freeRun.remainingIds).toEqual([]);
+    });
+
+    it('logs one content-free warning in scheduled() on invalid WORKERS_PLAN and falls back to free', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const worker = createWorker();
+        const statement = {
+          bind: () => statement,
+          first: async () => null,
+          all: async () => ({ results: [] }),
+          run: async () => ({ success: true, meta: {} }),
+          raw: async () => [],
+        };
+        const db = {
+          prepare: () => statement,
+          batch: async () => [],
+          withSession: () => db,
+        };
+        const media = {
+          list: async () => ({ objects: [], truncated: false }),
+          get: async () => null,
+          put: async () => null,
+          head: async () => null,
+          delete: async () => {},
+        };
+        const env = {
+          WORKERS_PLAN: 'secret-invalid-plan-value',
+          DB: db,
+          MEDIA: media,
+        } as unknown as WorkerBindings;
+        const pending: Promise<unknown>[] = [];
+        const ctx = {
+          waitUntil: (p: Promise<unknown>) => pending.push(p),
+          passThroughOnException: () => {},
+        } as unknown as ExecutionContext;
+        const controller = {
+          cron: '*/1 * * * *',
+          scheduledTime: 1_000,
+          noRetry: () => {},
+        } as unknown as ScheduledController;
+
+        await worker.scheduled(controller, env, ctx);
+        await worker.scheduled(controller, env, ctx);
+        await Promise.all(pending);
+
+        expect(errorSpy).not.toHaveBeenCalled();
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(JSON.stringify(warn.mock.calls)).not.toContain(
+          'secret-invalid-plan-value'
+        );
+      } finally {
+        warn.mockRestore();
+        errorSpy.mockRestore();
+      }
     });
   });
 });

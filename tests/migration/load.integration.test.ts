@@ -582,6 +582,29 @@ describeWithPostgres('Rails -> V2 load (stage 3)', () => {
       });
       expect(paidEnvDry.warnings).toEqual([]);
 
+      const paidOverDry = await loadTransformOutput({
+        transformDir: outDir,
+        target: 'd1',
+        sqlOut: next('d1'),
+        dryRun: true,
+        rowBudget: 10,
+        env: { WORKERS_PLAN: 'paid' },
+      });
+      expect(paidOverDry.warnings![0]).toMatch(
+        /exceed the Workers Paid preflight threshold of 10 \(the monthly included rows-written allowance before billable overage\)/
+      );
+      await expect(
+        loadTransformOutput({
+          transformDir: outDir,
+          target: 'd1',
+          sqlOut: next('d1'),
+          rowBudget: 10,
+          workersPlan: 'paid',
+        })
+      ).rejects.toThrow(
+        /Workers Paid preflight threshold of 10 \(the monthly included rows-written allowance before billable overage\); pass --allow-over-budget/
+      );
+
       await expect(
         loadTransformOutput({
           transformDir: outDir,

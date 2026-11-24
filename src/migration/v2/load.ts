@@ -65,7 +65,7 @@ export interface LoadOptions {
   retry?: { maxAttempts?: number; baseDelayMs?: number };
   /** Test seam replacing the backoff sleep. */
   sleepImpl?: (ms: number) => Promise<void>;
-  /** d1: proceed although the estimated rows written exceed the Free daily budget. */
+  /** d1: proceed although the estimated rows written exceed the plan's preflight budget. */
   allowOverBudget?: boolean;
   /** Test seam: rows-written budget (default d1RowsWrittenBudget(workersPlan)). */
   rowBudget?: number;
@@ -775,11 +775,17 @@ async function loadD1(
   const overBudget = estimatedRowsWritten > rowBudget;
   if (overBudget && !options.allowOverBudget) {
     const message =
-      'Estimated D1 rows written (' +
-      String(estimatedRowsWritten) +
-      ') exceed the Workers Free budget of ' +
-      String(rowBudget) +
-      ' per day. Use a paid plan, or split the import over several days; pass --allow-over-budget to proceed anyway.';
+      plan === 'paid'
+        ? 'Estimated D1 rows written (' +
+          String(estimatedRowsWritten) +
+          ') exceed the Workers Paid preflight threshold of ' +
+          String(rowBudget) +
+          ' (the monthly included rows-written allowance before billable overage); pass --allow-over-budget to proceed anyway.'
+        : 'Estimated D1 rows written (' +
+          String(estimatedRowsWritten) +
+          ') exceed the Workers Free budget of ' +
+          String(rowBudget) +
+          ' per day. Use a paid plan, or split the import over several days; pass --allow-over-budget to proceed anyway.';
     if (!options.dryRun) throw new Error(message);
     warnings.push(message);
   }

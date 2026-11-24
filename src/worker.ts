@@ -1,6 +1,7 @@
 import { createWorkerErasureRecordStore } from './worker-erasure-record-store.js';
 import {
   CommunityErasureService,
+  workerErasureD1Budget,
   workerErasureStorageBudget,
 } from './services/community-erasure.service.js';
 import type {
@@ -30,9 +31,11 @@ import {
 } from './services/media-cleanup.service.js';
 import { workerExportSweepBatchLimit } from './shared/export-policy.js';
 import {
+  parseWorkersPlan,
   validateWorkerV2Runtime,
   V2RuntimeConfigError,
   v2RuntimeModeNotice,
+  type WorkersPlan,
 } from './config/v2-runtime.js';
 import { CommunitySovereigntyRepository } from './repositories/community-sovereignty.repository.js';
 import { CommunityExportRepository } from './repositories/community-export.repository.js';
@@ -482,6 +485,7 @@ export function createWorker() {
   // the isolate's lifetime, which is at least as stable a key as the `env`
   // object's identity across requests (PR #229 review).
   let reportedConfigRefusal = false;
+  let reportedScheduledPlanWarning = false;
 
   const appFor = (env: WorkerBindings) => {
     const cached = apps.get(env);
@@ -584,7 +588,19 @@ export function createWorker() {
     ) => {
       ctx.waitUntil(
         (async () => {
-          const { workersPlan } = validateWorkerV2Runtime(env);
+          let workersPlan: WorkersPlan = 'free';
+          try {
+            workersPlan = parseWorkersPlan(env.WORKERS_PLAN);
+          } catch (error) {
+            if (!(error instanceof V2RuntimeConfigError)) throw error;
+            if (!reportedScheduledPlanWarning) {
+              reportedScheduledPlanWarning = true;
+              // eslint-disable-next-line no-console -- workerd's only operator channel
+              console.warn(
+                'WORKERS_PLAN invalid in scheduled(); falling back to free'
+              );
+            }
+          }
           const client = new Proxy(env.DB, {
             get(target, key, receiver) {
               const primary = env.DB.withSession('first-primary');
@@ -608,7 +624,8 @@ export function createWorker() {
                   createWorkerErasureRecordStore(env.ERASURE_RECORDS)
                 ).sweep(
                   scheduledNow(),
-                  workerErasureStorageBudget(workersPlan)
+                  workerErasureStorageBudget(workersPlan),
+                  workerErasureD1Budget(workersPlan)
                 );
               } catch {
                 // eslint-disable-next-line no-console -- content-free retry signal

@@ -32,6 +32,9 @@
 # --allow-destructive is passed to the walkthrough: it only creates and erases
 # a disposable community, but it is a write run, so it stays staging-only.
 # Env (names only, values never printed):
+#   WORKERS_PLAN                                free (default) or paid; selects
+#     the CPU pass rule and passes --workers-plan to the walkthrough (anything
+#     else refuses)
 #   WT_SUPER_IDENTIFIER, WT_SUPER_PASSWORD      super admin for the walkthrough
 #     (required only when the walkthrough will actually run)
 #   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME  probe
@@ -59,9 +62,16 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+resolve_workers_plan
+PLAN="$WORKERS_PLAN_RESOLVED"
+
 cpu_procedure() {
+  if [ "$PLAN" = paid ]; then
+    echo "Worker CPU measurement (manual; Workers Paid — limits.cpu_ms budget)"
+  else
+    echo "Worker CPU measurement (manual; Workers Free budget is about 10 ms per invocation)"
+  fi
   cat <<'EOF'
-Worker CPU measurement (manual; Workers Free budget is about 10 ms per invocation)
  1. Terminal A: npx wrangler tail terrastories-staging-api --format json > cpu-tail.json
     (no --env: the worker name already includes "staging"; with an exported
     CLOUDFLARE_API_TOKEN for another account use env -u CLOUDFLARE_API_TOKEN.
@@ -121,11 +131,24 @@ Worker CPU measurement (manual; Workers Free budget is about 10 ms per invocatio
     is concatenated JSON objects, not JSON Lines (line-based jq fails). Parse it
     with the balanced-brace reader (prints method, url, outcome, cpuTime, wallTime):
       node scripts/staging/parse-tail.mjs cpu-tail.json
+EOF
+  if [ "$PLAN" = paid ]; then
+    cat <<'EOF'
+ 5. Record in the go/no-go sheet: route, size, p50/p99 cpuTime (ms), wallTime (ms), outcome.
+    Pass (Workers Paid): zero exceededCpu outcomes across all measured routes — POST /v2/media
+    (90 MB raw), POST /v2/media/uploads (create), POST .../complete (300 MB multipart), plus
+    every route in #295, export and erasure — and p99 CPU per route under half of the
+    configured limits.cpu_ms. Any exceededCpu or p99 at or above half of limits.cpu_ms is a
+    NO-GO on Paid (see docs/WORKERS-PAID-PROFILE.md).
+EOF
+  else
+    cat <<'EOF'
  5. Record in the go/no-go sheet: route, size, cpuTime (ms), wallTime (ms), outcome.
     Pass: every upload invocation — POST /v2/media (90 MB raw), POST /v2/media/uploads
     (create) AND POST .../complete (300 MB multipart) — stays under the Free 10 ms
     budget with no error 1102. Any 1102 is a NO-GO on Free (see runbook).
 EOF
+  fi
 }
 
 if [ "$CPU_ONLY" = 1 ]; then cpu_procedure; exit 0; fi
@@ -210,7 +233,7 @@ else
   WT_START_DAY="$(date -u +%F)"
   WT_RC=0
   (cd "$REPO_ROOT" && run npm run walkthrough -- --base-url "$BASE" --community "$COMMUNITY" --d1 \
-    --super-credentials-env --allow-destructive --out "$WT_OUT") || WT_RC=$?
+    --workers-plan "$PLAN" --super-credentials-env --allow-destructive --out "$WT_OUT") || WT_RC=$?
   if [ "$WT_RC" != 0 ]; then
     info "hint: if another run already committed an import today (UTC $TODAY), the import steps fail by design; read summary.md, and rerun after 00:00 UTC or with --skip-walkthrough"
     die "walkthrough failed (exit $WT_RC)"

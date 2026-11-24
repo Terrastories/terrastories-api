@@ -16,19 +16,27 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  D1_HEADROOM_BYTES,
+  D1_PAID_HEADROOM_BYTES,
+  FREE_CRON_LIMIT_PER_ACCOUNT,
   GuardError,
+  PAID_CRON_LIMIT_PER_ACCOUNT,
   WORKER_CRONS,
   assertAccountMatches,
-  assertMediaBucket,
-  assertStagingConfig,
-  assertStagingD1Id,
-  listHasName,
   assertCronBudget,
   assertD1Size,
+  assertMediaBucket,
+  assertPlanLimits,
+  assertStagingConfig,
+  assertStagingD1Id,
   assertStagingName,
   assertStagingUrl,
   countCrons,
+  extractD1SizeFromInfo,
+  listHasName,
   parseJsonc,
+  parseWorkersPlan,
+  resolveEffectiveEnvConfig,
 } from '../../scripts/staging/guards.js';
 // @ts-expect-error plain .mjs helper without types
 import {
@@ -1449,6 +1457,7 @@ echo "$@" >> "${callsLog}"
 case "$*" in
   *whoami*) echo "Account ${ACCOUNT}" ;;
   *"d1 list"*) cat "${d1ListFile}" ;;
+  *"d1 info"*) echo '{"name":"terrastories-staging-db","database_size":1048576}' ;;
   *"r2 bucket list"*) printf 'name: %s\\nname: %s\\n' "${bucket}" "${erasureBucket}" ;;
   *"r2 bucket cors list"*) cat "${corsListFile}" ;;
   *"r2 bucket lifecycle list"*) cat "${lifecycleListFile}" ;;
@@ -1566,5 +1575,527 @@ esac
     const log = calls();
     expect(log).not.toContain('guards.ts d1-id');
     expect(log).not.toContain('wrangler deploy');
+  });
+});
+
+describe('Workers plan-aware guards (free and paid)', () => {
+  const baseConfig = () =>
+    parseJsonc(readFileSync(join(ROOT, 'wrangler.jsonc'), 'utf8')) as {
+      limits?: unknown;
+      d1_databases?: unknown;
+      r2_buckets?: unknown;
+      vars?: Record<string, string>;
+      triggers?: { crons?: string[] };
+      env: {
+        staging: {
+          name?: string;
+          d1_databases?: Array<Record<string, unknown>>;
+          r2_buckets?: Array<Record<string, unknown>>;
+          vars?: Record<string, string>;
+          triggers?: { crons?: string[] };
+          limits?: unknown;
+        };
+      };
+    };
+
+  it('parseWorkersPlan defaults to free and refuses unknown plans', () => {
+    expect(parseWorkersPlan(undefined)).toBe('free');
+    expect(parseWorkersPlan('free')).toBe('free');
+    expect(parseWorkersPlan('paid')).toBe('paid');
+    for (const bad of ['', 'pro', 'PAID', 'Free', 'enterprise']) {
+      expect(() => parseWorkersPlan(bad), bad).toThrow(GuardError);
+    }
+  });
+
+  it('assertCronBudget enforces 5 on free and 1000 on paid', () => {
+    expect(FREE_CRON_LIMIT_PER_ACCOUNT).toBe(5);
+    expect(PAID_CRON_LIMIT_PER_ACCOUNT).toBe(1000);
+    expect(() => assertCronBudget(3, 2, 'free')).not.toThrow();
+    expect(() => assertCronBudget(3, 3, 'free')).toThrow(/Workers Free limit/);
+    expect(() => assertCronBudget(3, 3, 'paid')).not.toThrow();
+    expect(() => assertCronBudget(3, 997, 'paid')).not.toThrow();
+    expect(() => assertCronBudget(3, 998, 'paid')).toThrow(
+      /Workers Paid limit of 1000/
+    );
+    expect(() => assertCronBudget(3, Number.NaN, 'paid')).toThrow(GuardError);
+  });
+
+  it('assertD1Size enforces 90% headroom of 500 MB (free) and 10 GB (paid)', () => {
+    expect(D1_HEADROOM_BYTES).toBe(450_000_000);
+    expect(D1_PAID_HEADROOM_BYTES).toBe(9_000_000_000);
+    expect(() => assertD1Size(450_000_000, 'free')).not.toThrow();
+    expect(() => assertD1Size(450_000_001, 'free')).toThrow(
+      /500 MB free limit/
+    );
+    expect(() => assertD1Size(460_000_000, 'paid')).not.toThrow();
+    expect(() => assertD1Size(9_000_000_000, 'paid')).not.toThrow();
+    expect(() => assertD1Size(9_000_000_001, 'paid')).toThrow(
+      /10 GB paid limit/
+    );
+  });
+
+  it('extractD1SizeFromInfo parses wrangler d1 info --json (including 0-byte file_size)', () => {
+    expect(
+      extractD1SizeFromInfo(
+        JSON.stringify({
+          name: 'terrastories-staging-db',
+          database_size: 16384,
+        })
+      )
+    ).toBe(16384);
+    expect(
+      extractD1SizeFromInfo(
+        JSON.stringify({ name: 'terrastories-staging-db', file_size: 0 })
+      )
+    ).toBe(0);
+    for (const bad of [
+      '',
+      '{ not json',
+      '[]',
+      'null',
+      '{}',
+      JSON.stringify({ database_size: '100' }),
+      JSON.stringify({ database_size: -1 }),
+    ]) {
+      expect(() => extractD1SizeFromInfo(bad), bad).toThrow(GuardError);
+    }
+  });
+
+  it('assertStagingConfig applies Wrangler per-key inheritance for limits vs non-inheritable keys', () => {
+    // Default free accepts committed wrangler.jsonc (no limits anywhere)
+    const clean = baseConfig();
+    expect(() => assertStagingConfig(clean, 'free')).not.toThrow();
+    expect(() => assertStagingConfig(clean, 'paid')).toThrow(/limits\.cpu_ms/);
+
+    // Inheritable: top-level limits applies to env.staging when omitted there
+    const topLimits = baseConfig();
+    topLimits.limits = { cpu_ms: 30000 };
+    expect(() => assertStagingConfig(topLimits, 'free')).toThrow(
+      /effective limits block/
+    );
+    expect(() => assertStagingConfig(topLimits, 'paid')).not.toThrow();
+
+    // Explicit env.staging.limits overrides top-level limits
+    const envLimits = baseConfig();
+    envLimits.env.staging.limits = { cpu_ms: 30000 };
+    expect(() => assertStagingConfig(envLimits, 'free')).toThrow(
+      /effective limits block/
+    );
+    expect(() => assertStagingConfig(envLimits, 'paid')).not.toThrow();
+
+    // env.staging.limits: {} overrides top-level limits: refused on BOTH plans
+    const emptyOverride = baseConfig();
+    emptyOverride.limits = { cpu_ms: 30000 };
+    emptyOverride.env.staging.limits = {};
+    expect(() => assertStagingConfig(emptyOverride, 'free')).toThrow(
+      /effective limits block/
+    );
+    expect(() => assertStagingConfig(emptyOverride, 'paid')).toThrow(
+      /limits\.cpu_ms/
+    );
+
+    // Paid cpu_ms bounds: integer 1..300000
+    for (const okCpu of [1, 30000, 300000]) {
+      const cfg = baseConfig();
+      cfg.env.staging.limits = { cpu_ms: okCpu };
+      expect(
+        () => assertStagingConfig(cfg, 'paid'),
+        String(okCpu)
+      ).not.toThrow();
+    }
+    for (const badLimits of [
+      null,
+      [],
+      {},
+      { cpu_ms: 0 },
+      { cpu_ms: -10 },
+      { cpu_ms: 300001 },
+      { cpu_ms: 10.5 },
+      { cpu_ms: '30000' },
+    ]) {
+      const cfg = baseConfig();
+      cfg.env.staging.limits = badLimits;
+      expect(
+        () => assertStagingConfig(cfg, 'paid'),
+        JSON.stringify(badLimits)
+      ).toThrow(GuardError);
+    }
+
+    // Non-inheritable keys: bindings, vars and triggers NEVER inherit from top-level
+    const noBindings = baseConfig();
+    noBindings.env.staging.limits = { cpu_ms: 30000 };
+    noBindings.d1_databases = noBindings.env.staging.d1_databases;
+    delete noBindings.env.staging.d1_databases;
+    expect(() => assertStagingConfig(noBindings, 'paid')).toThrow(/DB binding/);
+
+    const noVars = baseConfig();
+    noVars.env.staging.limits = { cpu_ms: 30000 };
+    noVars.vars = noVars.env.staging.vars;
+    delete noVars.env.staging.vars;
+    expect(() => assertStagingConfig(noVars, 'paid')).toThrow(/R2_BUCKET_NAME/);
+  });
+
+  it('guards.ts CLI accepts explicit free|paid plan on config, crons and d1-size', () => {
+    const tsx = join(ROOT, 'node_modules/.bin/tsx');
+    const work = mkdtempSync(join(tmpdir(), 'guards-plan-cli-'));
+    const paidCfg = join(work, 'wrangler-paid.jsonc');
+    const baseText = readFileSync(join(ROOT, 'wrangler.jsonc'), 'utf8');
+    writeFileSync(
+      paidCfg,
+      baseText.replace(
+        '"observability": { "enabled": false, "traces": { "enabled": false } },\n    },\n  },\n}',
+        '"limits": { "cpu_ms": 30000 },\n      "observability": { "enabled": false, "traces": { "enabled": false } },\n    },\n  },\n}'
+      )
+    );
+    const runCli = (args: string[], input?: string) =>
+      spawnSync(tsx, ['scripts/staging/guards.ts', ...args], {
+        cwd: ROOT,
+        encoding: 'utf8',
+        input,
+      });
+
+    expect(
+      runCli(['config', join(ROOT, 'wrangler.jsonc'), 'free']).status
+    ).toBe(0);
+    expect(
+      runCli(['config', join(ROOT, 'wrangler.jsonc'), 'paid']).status
+    ).toBe(1);
+    expect(runCli(['config', paidCfg, 'paid']).status).toBe(0);
+    expect(runCli(['config', paidCfg, 'free']).status).toBe(1);
+    expect(runCli(['config', paidCfg, 'bogus']).status).toBe(1);
+
+    expect(
+      runCli(['crons', join(ROOT, 'wrangler.jsonc'), 'staging', '3', 'free'])
+        .status
+    ).toBe(1);
+    expect(
+      runCli(['crons', join(ROOT, 'wrangler.jsonc'), 'staging', '3', 'paid'])
+        .status
+    ).toBe(0);
+
+    expect(runCli(['d1-size', '460000000', 'free']).status).toBe(1);
+    expect(runCli(['d1-size', '460000000', 'paid']).status).toBe(0);
+    expect(runCli(['d1-size', '9500000000', 'paid']).status).toBe(1);
+    expect(
+      runCli(
+        ['d1-size', '--json', 'paid'],
+        JSON.stringify({ database_size: 460_000_000 })
+      ).status
+    ).toBe(0);
+    expect(
+      runCli(
+        ['d1-size', '--json', 'free'],
+        JSON.stringify({ database_size: 460_000_000 })
+      ).status
+    ).toBe(1);
+  });
+});
+
+describe('provision.sh plan-aware wiring and d1-size guard (fake npx, no network)', () => {
+  const makeUuid = (ch: string) =>
+    [8, 4, 4, 4, 12].map((n) => ch.repeat(n)).join('-');
+  const stagingId = makeUuid('3');
+  const origin = 'https://app.terrastories.test';
+  const bucket = 'terrastories-staging-media';
+  const erasureBucket = 'terrastories-staging-erasure-records';
+  const corsListOk = `Listing CORS rules for bucket '${bucket}'...\n\nallowed_origins:    ${origin}\nallowed_methods:    PUT\nallowed_headers:    x-amz-content-sha256, content-type\nexposed_headers:    ETag\nmax_age_seconds:    3600\n`;
+  const lifecycleListOk = `Listing lifecycle rules for bucket '${bucket}'...\n\nname:     terrastories-staging-abort-incomplete-multipart\nenabled:  Yes\nprefix:   (all prefixes)\naction:   Abort incomplete multipart uploads after 1 days\n`;
+
+  const setup = (opts: {
+    d1InfoJson?: string;
+    d1InfoFail?: boolean;
+    stagingLimits?: string;
+    topLevelLimits?: string;
+  }) => {
+    const work = mkdtempSync(join(tmpdir(), 'provision-plan-'));
+    const repo = join(work, 'repo');
+    const stagingDir = join(repo, 'scripts/staging');
+    const bin = join(work, 'bin');
+    mkdirSync(stagingDir, { recursive: true });
+    mkdirSync(bin);
+    for (const f of ['provision.sh', 'lib.sh', 'guards.ts', 'r2-cors.json']) {
+      copyFileSync(join(ROOT, 'scripts/staging', f), join(stagingDir, f));
+    }
+    chmodSync(join(stagingDir, 'provision.sh'), 0o755);
+    let wranglerText = readFileSync(
+      join(ROOT, 'wrangler.jsonc'),
+      'utf8'
+    ).replace('REPLACE-WITH-STAGING-D1-ID', stagingId);
+    if (opts.topLevelLimits) {
+      wranglerText = wranglerText.replace(
+        '"compatibility_date": "2026-11-12",',
+        `"compatibility_date": "2026-11-12",\n  "limits": ${opts.topLevelLimits},`
+      );
+    }
+    if (opts.stagingLimits) {
+      wranglerText = wranglerText.replace(
+        '"observability": { "enabled": false, "traces": { "enabled": false } },\n    },\n  },\n}',
+        `"limits": ${opts.stagingLimits},\n      "observability": { "enabled": false, "traces": { "enabled": false } },\n    },\n  },\n}`
+      );
+    }
+    writeFileSync(join(repo, 'wrangler.jsonc'), wranglerText);
+    const d1InfoFile = join(work, 'd1-info.json');
+    const corsListFile = join(work, 'cors-list.txt');
+    const lifecycleListFile = join(work, 'lifecycle-list.txt');
+    const callsLog = join(work, 'npx.log');
+    writeFileSync(
+      d1InfoFile,
+      opts.d1InfoJson ??
+        JSON.stringify({
+          uuid: stagingId,
+          name: 'terrastories-staging-db',
+          database_size: 10_000_000,
+        })
+    );
+    writeFileSync(corsListFile, corsListOk);
+    writeFileSync(lifecycleListFile, lifecycleListOk);
+    writeFileSync(
+      join(bin, 'npx'),
+      `#!/usr/bin/env bash
+echo "$@" >> "${callsLog}"
+case "$*" in
+  *whoami*) echo "Account ${ACCOUNT}" ;;
+  *"d1 list"*) echo '${JSON.stringify([{ name: 'terrastories-staging-db', uuid: stagingId }])}' ;;
+  *"d1 info"*)
+    if [ "${opts.d1InfoFail ? '1' : '0'}" = "1" ]; then exit 1; fi
+    cat "${d1InfoFile}" ;;
+  *"r2 bucket list"*) printf 'name: %s\\nname: %s\\n' "${bucket}" "${erasureBucket}" ;;
+  *"r2 bucket cors list"*) cat "${corsListFile}" ;;
+  *"r2 bucket lifecycle list"*) cat "${lifecycleListFile}" ;;
+  *tsx*) shift; shift; exec "${ROOT}/node_modules/.bin/tsx" "$@" ;;
+esac
+`
+    );
+    chmodSync(join(bin, 'npx'), 0o755);
+
+    const run = (env: Record<string, string> = {}, args: string[] = []) =>
+      spawnSync('bash', [join(stagingDir, 'provision.sh'), ...args], {
+        cwd: repo,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
+          STAGING_FRONTEND_ORIGIN: origin,
+          ...env,
+        },
+      });
+    const calls = () =>
+      existsSync(callsLog) ? readFileSync(callsLog, 'utf8') : '';
+    return { run, calls };
+  };
+
+  it('prints the plan in both dry-run and apply modes and rejects invalid WORKERS_PLAN', () => {
+    const { run, calls } = setup({});
+    const bad = run({ WORKERS_PLAN: 'enterprise' });
+    expect(bad.status).not.toBe(0);
+    expect(bad.stderr).toMatch(/WORKERS_PLAN must be 'free' or 'paid'/);
+    expect(calls()).toBe('');
+
+    const dry = run({});
+    expect(dry.status, dry.stderr).toBe(0);
+    expect(dry.stdout).toContain('mode: DRY-RUN plan: free');
+    expect(dry.stdout).toContain(
+      '+ npx wrangler d1 info terrastories-staging-db --json'
+    );
+    expect(calls()).not.toContain('d1 info');
+
+    const applied = run({}, ['--apply']);
+    expect(applied.status, applied.stderr).toBe(0);
+    expect(applied.stdout).toContain('mode: APPLY plan: free');
+    expect(applied.stdout).toContain(
+      'D1 size verified within free plan headroom'
+    );
+    expect(calls()).toContain(
+      'wrangler d1 info terrastories-staging-db --json'
+    );
+  });
+
+  it('free plan refuses oversized D1 (460 MB) and inherited top-level limits', () => {
+    const big = setup({
+      d1InfoJson: JSON.stringify({
+        name: 'terrastories-staging-db',
+        database_size: 460_000_000,
+      }),
+    });
+    const rBig = big.run({}, ['--apply']);
+    expect(rBig.status).not.toBe(0);
+    expect(rBig.stderr).toMatch(/500 MB free limit/);
+    expect(big.calls()).not.toContain('wrangler deploy');
+
+    const topLim = setup({ topLevelLimits: '{ "cpu_ms": 30000 }' });
+    const rLim = topLim.run({});
+    expect(rLim.status).not.toBe(0);
+    expect(rLim.stderr).toMatch(/effective limits block/);
+  });
+
+  it('paid plan accepts 6 crons, 460 MB D1, and limits.cpu_ms; refuses 9.5 GB D1 and missing limits', () => {
+    const paidOk = setup({
+      stagingLimits: '{ "cpu_ms": 30000 }',
+      d1InfoJson: JSON.stringify({
+        name: 'terrastories-staging-db',
+        database_size: 460_000_000,
+      }),
+    });
+    const dry = paidOk.run({ WORKERS_PLAN: 'paid', OTHER_CRON_TRIGGERS: '3' });
+    expect(dry.status, dry.stderr).toBe(0);
+    expect(dry.stdout).toContain('mode: DRY-RUN plan: paid');
+    expect(dry.stdout).toContain(
+      'wrangler d1 info terrastories-staging-db --json'
+    );
+
+    const applied = paidOk.run(
+      { WORKERS_PLAN: 'paid', OTHER_CRON_TRIGGERS: '3' },
+      ['--apply']
+    );
+    expect(applied.status, applied.stderr + applied.stdout).toBe(0);
+    expect(applied.stdout).toContain('mode: APPLY plan: paid');
+    expect(applied.stdout).toContain(
+      'D1 size verified within paid plan headroom'
+    );
+
+    const paidBig = setup({
+      stagingLimits: '{ "cpu_ms": 30000 }',
+      d1InfoJson: JSON.stringify({
+        name: 'terrastories-staging-db',
+        database_size: 9_500_000_000,
+      }),
+    });
+    const rBig = paidBig.run({ WORKERS_PLAN: 'paid' }, ['--apply']);
+    expect(rBig.status).not.toBe(0);
+    expect(rBig.stderr).toMatch(/10 GB paid limit/);
+    expect(paidBig.calls()).not.toContain('wrangler deploy');
+
+    const paidNoLimits = setup({});
+    const rNoLim = paidNoLimits.run({ WORKERS_PLAN: 'paid' });
+    expect(rNoLim.status).not.toBe(0);
+    expect(rNoLim.stderr).toMatch(/limits\.cpu_ms/);
+  });
+
+  it('provision.sh --help documents both plans', () => {
+    const r = spawnSync('bash', ['scripts/staging/provision.sh', '--help'], {
+      cwd: ROOT,
+      encoding: 'utf8',
+    });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain('WORKERS_PLAN');
+    expect(r.stdout).toContain('1000 on');
+    expect(r.stdout).toContain('10 GB on Paid');
+  });
+});
+
+describe('smoke.sh WORKERS_PLAN handling (fake npm)', () => {
+  const work = mkdtempSync(join(tmpdir(), 'smoke-plan-'));
+  const bin = join(work, 'bin');
+  mkdirSync(bin);
+  const npmLog = join(work, 'npm.log');
+  writeFileSync(
+    join(bin, 'npm'),
+    `#!/usr/bin/env bash\necho "npm $*" >> "${npmLog}"\nexit 0\n`
+  );
+  chmodSync(join(bin, 'npm'), 0o755);
+  const run = (args: string[], env: Record<string, string> = {}) =>
+    spawnSync('bash', ['scripts/staging/smoke.sh', ...args], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        STAGING_URL: 'http://127.0.0.1:9',
+        ...env,
+      },
+    });
+
+  it('rejects invalid WORKERS_PLAN values', () => {
+    const r = run(['--cpu-procedure'], { WORKERS_PLAN: 'pro' });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/WORKERS_PLAN must be 'free' or 'paid'/);
+  });
+
+  it('keeps cpu_procedure identical on unset vs free and switches pass rule on paid', () => {
+    const def = run(['--cpu-procedure']);
+    const free = run(['--cpu-procedure'], { WORKERS_PLAN: 'free' });
+    expect(def.status, def.stderr).toBe(0);
+    expect(free.status, free.stderr).toBe(0);
+    expect(free.stdout).toBe(def.stdout);
+    expect(def.stdout).toContain('Any 1102 is a NO-GO on Free');
+
+    const paid = run(['--cpu-procedure'], { WORKERS_PLAN: 'paid' });
+    expect(paid.status, paid.stderr).toBe(0);
+    expect(paid.stdout).toContain('zero exceededCpu');
+    expect(paid.stdout).toContain('p99 CPU per route under half of');
+    expect(paid.stdout).toContain('limits.cpu_ms');
+    expect(paid.stdout).not.toContain('NO-GO on Free');
+  });
+
+  it('passes --workers-plan to the walkthrough invocation', () => {
+    const dryFree = run(['--local']);
+    expect(dryFree.status, dryFree.stderr).toBe(0);
+    expect(dryFree.stdout).toContain('--d1 --workers-plan free');
+
+    const dryPaid = run(['--local'], { WORKERS_PLAN: 'paid' });
+    expect(dryPaid.status, dryPaid.stderr).toBe(0);
+    expect(dryPaid.stdout).toContain('--d1 --workers-plan paid');
+  });
+});
+
+describe('scripts/production/wrangler.env.production.example.jsonc', () => {
+  it('parses cleanly, matches wrangler.jsonc crons, and passes paid effective-config checks', () => {
+    const examplePath = join(
+      ROOT,
+      'scripts/production/wrangler.env.production.example.jsonc'
+    );
+    const example = parseJsonc(readFileSync(examplePath, 'utf8'));
+    const mainWrangler = parseJsonc(
+      readFileSync(join(ROOT, 'wrangler.jsonc'), 'utf8')
+    ) as {
+      triggers?: { crons?: string[] };
+      env?: { staging?: { triggers?: { crons?: string[] } } };
+    };
+
+    const effective = resolveEffectiveEnvConfig(example, 'production');
+    expect(effective.name).toBeTruthy();
+    expect(
+      effective.d1_databases?.find((d) => d.binding === 'DB')
+    ).toMatchObject({
+      binding: 'DB',
+      database_id: 'REPLACE-WITH-PROD-D1-ID',
+    });
+    expect(
+      effective.r2_buckets?.find((b) => b.binding === 'MEDIA')?.bucket_name
+    ).toBeTruthy();
+    expect(
+      effective.r2_buckets?.find((b) => b.binding === 'ERASURE_RECORDS')
+        ?.bucket_name
+    ).toBeTruthy();
+    expect(effective.vars?.PUBLIC_ORIGIN).toBeTruthy();
+    expect(effective.vars?.CORS_ORIGINS).toBe('');
+    expect(effective.vars?.R2_BUCKET_NAME).toBe(
+      effective.r2_buckets?.find((b) => b.binding === 'MEDIA')?.bucket_name
+    );
+    expect(effective.triggers?.crons).toEqual(mainWrangler.triggers?.crons);
+    expect(effective.triggers?.crons).toEqual(
+      mainWrangler.env?.staging?.triggers?.crons
+    );
+    expect(effective.limits).toEqual({ cpu_ms: 30000 });
+
+    // Effective-config plan validation accepts it for Paid and refuses it for Free
+    expect(() =>
+      assertPlanLimits(effective.limits, 'paid', 'env.production')
+    ).not.toThrow();
+    expect(() =>
+      assertPlanLimits(effective.limits, 'free', 'env.production')
+    ).toThrow(/effective limits block/);
+
+    // Combining env.production into wrangler.jsonc keeps env.staging valid on Free
+    const combined = {
+      ...(mainWrangler as Record<string, unknown>),
+      env: {
+        ...mainWrangler.env,
+        production: (example as { env: { production: unknown } }).env
+          .production,
+      },
+    };
+    expect(() => assertStagingConfig(combined, 'free')).not.toThrow();
   });
 });

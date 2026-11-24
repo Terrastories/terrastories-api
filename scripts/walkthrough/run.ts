@@ -11,7 +11,13 @@
  */
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { newState, type Config, type Ctx, type State } from './context.js';
+import {
+  newState,
+  type Config,
+  type Ctx,
+  type State,
+  type WorkersPlan,
+} from './context.js';
 import { Walk } from './walk.js';
 import { COVERAGE_ROWS } from './coverage.js';
 import { defineAccounts, adminOpening } from './chapters/admin-opening.js';
@@ -239,6 +245,7 @@ interface Parsed {
   loginRealAdmin: boolean;
   local: boolean;
   d1: boolean;
+  workersPlan: WorkersPlan;
   help: boolean;
 }
 
@@ -252,6 +259,7 @@ export function parseArgs(argv: string[]): Parsed {
     loginRealAdmin: false,
     local: false,
     d1: false,
+    workersPlan: 'free',
     help: false,
   };
   const optionalValue = (i: number): [string | undefined, number] => {
@@ -290,7 +298,12 @@ export function parseArgs(argv: string[]): Parsed {
     else if (arg === '--login-real-admin') parsed.loginRealAdmin = true;
     else if (arg === '--local') parsed.local = true;
     else if (arg === '--d1') parsed.d1 = true;
-    else if (arg === '--help' || arg === '-h') parsed.help = true;
+    else if (arg === '--workers-plan') {
+      const value = need();
+      if (value !== 'free' && value !== 'paid')
+        throw new Error('--workers-plan must be free or paid');
+      parsed.workersPlan = value;
+    } else if (arg === '--help' || arg === '-h') parsed.help = true;
     else throw new Error(`Unknown argument ${arg}`);
   }
   return parsed;
@@ -306,7 +319,8 @@ const USAGE = `Usage: npm run walkthrough -- --base-url <url> [options]
   --super-credentials-env [P]   read P_IDENTIFIER and P_PASSWORD (default WT_SUPER)
   --allow-destructive           also walk withdrawal and erasure, on a disposable community the script creates
 Everything that changes data runs in a disposable community made with the super admin credentials; --community is only read.
-  --d1                          the target is a Cloudflare D1 Worker (staging, production, workerd): one committed import per UTC day, so the import chapter commits once and asserts the 429 for the second (also WT_D1=1)
+  --d1                          the target is a Cloudflare D1 Worker (staging, production, workerd): one committed import per UTC day, so the import chapter commits once and asserts the 429 for the second on free (also WT_D1=1)
+  --workers-plan free|paid      Workers plan for --d1 runs (default free); paid skips the Free-only daily-import 429 assertions while the import service is not plan-switched
   --local                       start an in-process stand-in app instead of --base-url
 Bootstrap secret: WT_BOOTSTRAP_SECRET.`;
 
@@ -346,6 +360,7 @@ export async function main(
       allowDestructive: args.allowDestructive,
       loginRealAdmin: args.loginRealAdmin,
       d1: args.d1 || env.WT_D1 === '1',
+      workersPlan: args.workersPlan,
       // only --setup-from-bootstrap may ever send the secret
       bootstrapSecret: args.setupFromBootstrap
         ? env.WT_BOOTSTRAP_SECRET

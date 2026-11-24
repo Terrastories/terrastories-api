@@ -38,6 +38,16 @@ need_env() {
   done
 }
 
+# Resolve WORKERS_PLAN (free|paid, default free; anything else dies).
+WORKERS_PLAN_RESOLVED="free"
+resolve_workers_plan() {
+  local raw="${WORKERS_PLAN:-free}"
+  case "$raw" in
+    free|paid) WORKERS_PLAN_RESOLVED="$raw" ;;
+    *) die "WORKERS_PLAN must be 'free' or 'paid' (got: '$raw')" ;;
+  esac
+}
+
 # Free-tier / account precheck shared by every script that touches Cloudflare.
 check_account() {
   need_env CLOUDFLARE_ACCOUNT_ID

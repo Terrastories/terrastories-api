@@ -1056,8 +1056,11 @@ const refusedByD1Limit = (r: Reply): string | undefined =>
 async function importChapterD1(ctx: Ctx, form: ImportForm): Promise<void> {
   const { w, s } = ctx;
   const elena = s.actors.elena!;
+  const isPaid = ctx.cfg.workersPlan === 'paid';
   w.narrate(
-    'This target is Cloudflare D1: one committed import is allowed per UTC day for the whole database. Elena previews everything first, commits the stories import, and the platform refuses a second commit and any new preview until the next UTC day.'
+    isPaid
+      ? 'This target is Cloudflare D1 on Workers Paid (--workers-plan paid). Elena previews everything first and commits the stories import; the Free-only 429 assertions for a second import are skipped because src/services/imports.service.ts is not plan-switched yet.'
+      : 'This target is Cloudflare D1: one committed import is allowed per UTC day for the whole database. Elena previews everything first, commits the stories import, and the platform refuses a second commit and any new preview until the next UTC day.'
   );
   const places = await w.step({
     who: elena,
@@ -1203,28 +1206,37 @@ async function importChapterD1(ctx: Ctx, form: ImportForm): Promise<void> {
         : 'the committed import did not create both stories';
     },
   });
-  await w.step({
-    who: elena,
-    say: 'submits the places import too; D1 refuses a second committed import on the same UTC day',
-    method: 'POST',
-    path: `/v2/imports/${placesManifest}/commit`,
-    expect: 429,
-    negative: true,
-    covers: ['C31'],
-    check: refusedByD1Limit,
-    show: 'the page says the daily D1 import limit is reached and lists the alternatives',
-  });
-  await w.step({
-    who: elena,
-    say: 'tries to start a new places import the same day',
-    method: 'POST',
-    path: '/v2/imports/preview',
-    form: form('places', `name\n${w.runId} Second-day place\n`),
-    expect: 429,
-    negative: true,
-    covers: ['C30'],
-    check: refusedByD1Limit,
-  });
+  if (isPaid) {
+    w.skip(
+      ['C31', 'C30'],
+      'Elena skips the Free-only D1 daily-import 429 assertions (second commit and follow-up preview)',
+      'Workers Paid (--workers-plan paid): d1_daily_import_limit in src/services/imports.service.ts is not plan-switched yet, so the Free-only 429 assertions are skipped on Paid',
+      'Elena'
+    );
+  } else {
+    await w.step({
+      who: elena,
+      say: 'submits the places import too; D1 refuses a second committed import on the same UTC day',
+      method: 'POST',
+      path: `/v2/imports/${placesManifest}/commit`,
+      expect: 429,
+      negative: true,
+      covers: ['C31'],
+      check: refusedByD1Limit,
+      show: 'the page says the daily D1 import limit is reached and lists the alternatives',
+    });
+    await w.step({
+      who: elena,
+      say: 'tries to start a new places import the same day',
+      method: 'POST',
+      path: '/v2/imports/preview',
+      form: form('places', `name\n${w.runId} Second-day place\n`),
+      expect: 429,
+      negative: true,
+      covers: ['C30'],
+      check: refusedByD1Limit,
+    });
+  }
   await w.step({
     who: elena,
     say: 'opens the list of imports',

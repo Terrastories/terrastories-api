@@ -1,5 +1,6 @@
 import { it, expect } from 'vitest';
 import {
+  applyD1Migrations,
   bundleWorkerModule,
   startWorkerRuntime,
 } from '../helpers/worker-runtime.js';
@@ -109,5 +110,114 @@ it('still serves in development mode without a public origin', async () => {
     expect(healthy.status).toBe(200);
   } finally {
     await mf.dispose();
+  }
+});
+
+it('refuses to serve when WORKERS_PLAN is invalid and serves when free or paid', async () => {
+  const bundled = await bundleWorkerModule(
+    `import worker from './src/worker.js'; export default {fetch:(r,e)=>worker.fetch(r,e)};`
+  );
+  const badMf = startWorkerRuntime(bundled, {
+    ENVIRONMENT: 'development',
+    WORKERS_PLAN: 'enterprise',
+  });
+  try {
+    const refused = await badMf.dispatchFetch('https://worker.test/health');
+    expect(refused.status).toBe(503);
+    expect(await refused.json()).toEqual({
+      error: 'Service unavailable',
+      code: 'config-refused',
+    });
+  } finally {
+    await badMf.dispose();
+  }
+
+  for (const WORKERS_PLAN of ['free', 'paid'] as const) {
+    const okMf = startWorkerRuntime(bundled, {
+      ENVIRONMENT: 'development',
+      WORKERS_PLAN,
+    });
+    try {
+      const healthy = await okMf.dispatchFetch('https://worker.test/health');
+      expect(healthy.status).toBe(200);
+    } finally {
+      await okMf.dispose();
+    }
+  }
+});
+
+it('validates WORKERS_PLAN independently in scheduled() without requiring HTTP-only settings', async () => {
+  const bundled = await bundleWorkerModule(
+    `import worker from './src/worker.js'; export default worker;`
+  );
+
+  // Missing PUBLIC_ORIGIN / AUTH_SERVER_SECRET / BOOTSTRAP_SECRET must NOT
+  // block scheduled() when WORKERS_PLAN is unset, free, or paid.
+  for (const bindings of [
+    {},
+    { WORKERS_PLAN: 'free' },
+    { WORKERS_PLAN: 'paid' },
+  ] as const) {
+    const mf = startWorkerRuntime(bundled, bindings, {
+      unsafeTriggerHandlers: true,
+    });
+    try {
+      const res = await mf.dispatchFetch(
+        'http://localhost/cdn-cgi/handler/scheduled?cron=*/1+*+*+*+*',
+        { method: 'POST' }
+      );
+      expect(res.status).toBe(200);
+    } finally {
+      await mf.dispose();
+    }
+  }
+
+  // A bad config (invalid WORKERS_PLAN and missing HTTP-only settings) logs
+  // a content-free warning once and falls back to 'free' so crons —
+  // including the erasure sweep — still run, while fetch() still refuses.
+  const badMf = startWorkerRuntime(
+    bundled,
+    { WORKERS_PLAN: 'enterprise' },
+    { unsafeTriggerHandlers: true }
+  );
+  try {
+    const db = await badMf.getD1Database('DB');
+    await applyD1Migrations(db);
+    const now = Date.now();
+    const requestId = crypto.randomUUID();
+    await db.batch([
+      db.prepare(
+        "INSERT INTO communities(id,name,slug,is_active,created_at,updated_at) VALUES(1,'Erased','erased',0,0,0)"
+      ),
+      db
+        .prepare(
+          "INSERT INTO community_sovereignty_requests(id,community_id,kind,state,initiated_by_role,requested_at,effective_at,updated_at) VALUES(?,1,'erasure','requested','admin',?,?,?)"
+        )
+        .bind(requestId, now, now, now),
+    ]);
+    const res = await badMf.dispatchFetch(
+      `http://localhost/cdn-cgi/handler/scheduled?cron=*/1+*+*+*+*&time=${now}`,
+      { method: 'POST' }
+    );
+    expect(res.status).toBe(200);
+    expect(
+      await db.prepare('SELECT id FROM communities WHERE id=1').first()
+    ).toBeNull();
+    const records = await badMf.getR2Bucket('ERASURE_RECORDS');
+    const record = await records.get('erasures/1-completed.json');
+    expect(await record?.json()).toMatchObject({
+      communityId: 1,
+      requestId,
+      outcome: 'completed',
+    });
+
+    const refused = await badMf.dispatchFetch('https://worker.test/health');
+    expect(refused.status).toBe(503);
+    expect(await refused.json()).toEqual({
+      error: 'Service unavailable',
+      code: 'config-refused',
+    });
+  } finally {
+    await badMf.dispose();
   }
 });

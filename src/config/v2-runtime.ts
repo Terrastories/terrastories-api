@@ -29,13 +29,41 @@ export type V2RuntimeEnvironment =
   | 'field-kit'
   | 'offline';
 
-const KNOWN_ENVIRONMENTS: readonly V2RuntimeEnvironment[] = [
+export const KNOWN_ENVIRONMENTS: readonly V2RuntimeEnvironment[] = [
   'development',
   'test',
   'production',
   'field-kit',
   'offline',
 ];
+
+/**
+ * Hosted Workers plan tier (#295, docs/WORKERS-PAID-PROFILE.md §3 step 6).
+ * Unset or empty resolves to `'free'` everywhere.
+ * SPEC-V2 §5 and §7 (amended 2026-11-24 in #302) approve the Paid profile; the
+ * `'paid'` constants apply only when `WORKERS_PLAN=paid`.
+ */
+export type WorkersPlan = 'free' | 'paid';
+
+export const KNOWN_WORKERS_PLANS: readonly WorkersPlan[] = ['free', 'paid'];
+
+/**
+ * Parse and validate `WORKERS_PLAN` (`'free'` default | `'paid'`).
+ * Throws `V2RuntimeConfigError` (fail closed) on any unrecognised value without
+ * echoing the value.
+ */
+export function parseWorkersPlan(
+  raw: string | undefined,
+  settingName = 'WORKERS_PLAN'
+): WorkersPlan {
+  if (raw === undefined || raw === '') return 'free';
+  if (KNOWN_WORKERS_PLANS.includes(raw as WorkersPlan)) {
+    return raw as WorkersPlan;
+  }
+  throw new V2RuntimeConfigError([
+    `${settingName} must be one of ${KNOWN_WORKERS_PLANS.join(', ')} (or unset for free)`,
+  ]);
+}
 
 /** Throw of this type means: refuse to start (Node) / refuse to serve (Workers). */
 export class V2RuntimeConfigError extends Error {
@@ -464,6 +492,11 @@ export function validateNodeV2Runtime(env: NodeV2Env): NodeV2RuntimeConfig {
 /** Worker V2 binding set (`src/worker.ts`). */
 export interface WorkerV2Env {
   ENVIRONMENT?: string | undefined;
+  /**
+   * Optional Workers plan selector (`'free'` default | `'paid'`; #295,
+   * docs/WORKERS-PAID-PROFILE.md §3 step 6).
+   */
+  WORKERS_PLAN?: string | undefined;
   PUBLIC_ORIGIN?: string | undefined;
   CORS_ORIGINS?: string | undefined;
   AUTH_SERVER_SECRET?: string | undefined;
@@ -479,15 +512,28 @@ export interface WorkerV2Env {
   MEDIA?: unknown;
 }
 
+export interface WorkerV2RuntimeConfig extends V2RuntimeConfig {
+  workersPlan: WorkersPlan;
+}
+
 /**
  * Validate the Worker binding set. Unset `ENVIRONMENT` means production — the
  * hosted profile is always HTTPS, so the plain-HTTP opt-in does not exist
  * here. Missing service bindings are refused by name like any other setting.
  */
-export function validateWorkerV2Runtime(env: WorkerV2Env): V2RuntimeConfig {
+export function validateWorkerV2Runtime(
+  env: WorkerV2Env
+): WorkerV2RuntimeConfig {
   const problems: string[] = [];
   if (env.DB === undefined) problems.push('DB D1 binding is missing');
   if (env.MEDIA === undefined) problems.push('MEDIA R2 binding is missing');
+  let workersPlan: WorkersPlan = 'free';
+  try {
+    workersPlan = parseWorkersPlan(env.WORKERS_PLAN);
+  } catch (error) {
+    if (!(error instanceof V2RuntimeConfigError)) throw error;
+    problems.push(...error.problems);
+  }
   let config: V2RuntimeConfig;
   try {
     config = validateV2RuntimeCore({
@@ -514,5 +560,5 @@ export function validateWorkerV2Runtime(env: WorkerV2Env): V2RuntimeConfig {
     throw new V2RuntimeConfigError(problems);
   }
   if (problems.length > 0) throw new V2RuntimeConfigError(problems);
-  return config;
+  return { ...config, workersPlan };
 }

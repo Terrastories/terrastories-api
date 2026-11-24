@@ -108,10 +108,12 @@ import {
 } from '../shared/utils/csv-parser.js';
 import {
   D1_BUDGET_ALTERNATIVES_MESSAGE,
+  D1_MAX_COMMITTED_IMPORTS_PER_UTC_DAY,
   planImportCommit,
   utcDayWindowMs,
   type D1BudgetViolation,
 } from '../shared/utils/import-commit-plan.js';
+import type { WorkersPlan } from '../config/v2-runtime.js';
 import {
   deriveDescriptionForWrite,
   deriveTopicColumns,
@@ -140,6 +142,28 @@ const D1_DAILY_IMPORT_LIMIT_BODY: V2ErrorResponse = {
   error: `Daily D1 database import limit of 1 committed import per UTC day reached. ${D1_BUDGET_ALTERNATIVES_MESSAGE}`,
   code: 'd1_daily_import_limit',
 };
+
+/**
+ * Workers Free D1 allows 100,000 rows written/day, so V2 caps committed imports
+ * at 1 per UTC day across the D1 database (SPEC-V2 §4, §5). Although Workers
+ * Paid replaces the daily D1 write quota with a 50M/month included allowance
+ * (docs/WORKERS-PAID-PROFILE.md §2), SPEC-V2 §4 requires one import per hosted
+ * database per UTC day, §5 defines Free as the hosted launch profile, §7 leaves
+ * Paid backup retention open, and open-preview / per-batch limits alone would
+ * not throttle repeated commits. Keep the 1/UTC-day precheck and atomic commit
+ * guard on Paid until SPEC-V2 §4, §5, and §7 are amended with a Paid import
+ * throttle policy.
+ */
+export const WORKER_FREE_DAILY_IMPORT_LIMIT =
+  D1_MAX_COMMITTED_IMPORTS_PER_UTC_DAY;
+export const WORKER_PAID_DAILY_IMPORT_LIMIT =
+  D1_MAX_COMMITTED_IMPORTS_PER_UTC_DAY;
+
+export function workerDailyImportLimit(plan: WorkersPlan = 'free'): number {
+  return plan === 'paid'
+    ? WORKER_PAID_DAILY_IMPORT_LIMIT
+    : WORKER_FREE_DAILY_IMPORT_LIMIT;
+}
 
 export type ImportServiceResult<T> =
   | { status: 200 | 201; body: T }
@@ -486,12 +510,14 @@ export function serializeImportManifestDetail(
 export interface ImportsServiceOptions {
   now?: () => Date;
   enforceD1Budget?: boolean;
+  workersPlan?: WorkersPlan;
 }
 
 export class ImportsService {
   private readonly mediaRepository: MediaWritesRepository;
   private readonly now: () => Date;
   private readonly enforceD1Budget: boolean;
+  private readonly workersPlan: WorkersPlan;
 
   constructor(
     private readonly repository: ImportsRepository,
@@ -502,10 +528,20 @@ export class ImportsService {
     this.mediaRepository = new MediaWritesRepository(repository.connection);
     this.now = options.now ?? (() => new Date());
     this.enforceD1Budget = options.enforceD1Budget ?? false;
+    this.workersPlan = options.workersPlan ?? 'free';
   }
 
   private isD1Enforced(): boolean {
     return this.repository.hasD1Batch() || this.enforceD1Budget;
+  }
+
+  private dailyLimitWindow(
+    now: Date
+  ): { startMs: number; endMs: number } | null {
+    if (!this.isD1Enforced()) return null;
+    return workerDailyImportLimit(this.workersPlan) > 0
+      ? utcDayWindowMs(now)
+      : null;
   }
 
   private async cleanupUploadedStorageKeys(
@@ -673,7 +709,7 @@ export class ImportsService {
 
     const d1Enforced = this.isD1Enforced();
     const requestNow = this.now();
-    const dailyWindow = d1Enforced ? utcDayWindowMs(requestNow) : null;
+    const dailyWindow = this.dailyLimitWindow(requestNow);
     if (dailyWindow) {
       const hitDaily = await this.repository.hasCommittedImportInWindow(
         dailyWindow.startMs,
@@ -1718,7 +1754,7 @@ export class ImportsService {
     }
 
     const requestNow = this.now();
-    const dailyWindow = d1Enforced ? utcDayWindowMs(requestNow) : null;
+    const dailyWindow = this.dailyLimitWindow(requestNow);
     if (dailyWindow) {
       const hitDaily = await this.repository.hasCommittedImportInWindow(
         dailyWindow.startMs,

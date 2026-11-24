@@ -7,6 +7,8 @@
  * storage-key layouts.
  */
 
+import type { WorkersPlan } from '../config/v2-runtime.js';
+
 /** Export manifest format version (§7). */
 export const COMMUNITY_EXPORT_FORMAT_VERSION = '2.0';
 
@@ -52,6 +54,29 @@ export const WORKERS_EXPORT_MAX_FILES = 30;
 export const WORKERS_EXPORT_MAX_MEDIA_BYTES = 50 * 1024 * 1024; // 50 MiB
 export const WORKERS_EXPORT_MAX_ARCHIVE_BYTES = 64 * 1024 * 1024; // 64 MiB
 
+/**
+ * Workers Paid export feasibility limits (docs/WORKERS-PAID-PROFILE.md §2, §3 steps 6–7):
+ * SPEC-V2 §7 Export (amended 2026-11-24 in #302): per-plan caps live here; a Paid
+ * deployment keeps the Free caps until they are measured.
+ * TODO: Keep the Free export ceilings (10,000 rows, 30 files, 50 MiB media,
+ * 64 MiB archive) on Paid as interim values; raise only after a production
+ * memory/CPU measurement.
+ *
+ * Workers Paid raises CPU per request to 30 s default (up to 5 min) and
+ * subrequests to 10,000, but keeps the same 128 MB isolate memory limit.
+ * D1 materializes the snapshot rows in isolate memory before the final
+ * row-count check (the SQL byte guard measures field contents only, not V8
+ * object overhead), and ZIP/media streaming buffers a 5 MiB R2 multipart chunk
+ * plus a copied upload part while running two pure-JS SHA-256 passes and CRC32
+ * over media.
+ */
+export const WORKERS_PAID_EXPORT_MAX_ROWS = WORKERS_EXPORT_MAX_ROWS;
+export const WORKERS_PAID_EXPORT_MAX_FILES = WORKERS_EXPORT_MAX_FILES;
+export const WORKERS_PAID_EXPORT_MAX_MEDIA_BYTES =
+  WORKERS_EXPORT_MAX_MEDIA_BYTES;
+export const WORKERS_PAID_EXPORT_MAX_ARCHIVE_BYTES =
+  WORKERS_EXPORT_MAX_ARCHIVE_BYTES;
+
 /** Node self-hosted / field-kit archive bound (ZIP32 safe ceiling, 2 GiB). */
 export const NODE_EXPORT_MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024;
 
@@ -59,6 +84,24 @@ export const NODE_EXPORT_MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024;
 export const EXPORT_SWEEP_BATCH_LIMIT = 20;
 /** Smaller per-tick batch for Workers Free scheduled crons (50-subrequest cap). */
 export const WORKER_EXPORT_SWEEP_BATCH_LIMIT = 5;
+/**
+ * Workers Paid per-tick export expiry sweep batch limit (docs/WORKERS-PAID-PROFILE.md §2):
+ * Paid raises cron subrequests to 10,000, D1 queries to 1,000, and cron CPU to
+ * 30 s default. Reclaiming 20 expired exports per minute tick (~120 subrequests,
+ * ~60 D1 queries) matches EXPORT_SWEEP_BATCH_LIMIT while using < 2% of Paid's
+ * subrequest budget and < 10% of Paid's D1 query budget.
+ * SPEC-V2 §5 (amended 2026-11-24 in #302) approves the Paid profile; active only
+ * with WORKERS_PLAN=paid.
+ */
+export const WORKER_PAID_EXPORT_SWEEP_BATCH_LIMIT = EXPORT_SWEEP_BATCH_LIMIT;
+
+export function workerExportSweepBatchLimit(
+  plan: WorkersPlan = 'free'
+): number {
+  return plan === 'paid'
+    ? WORKER_PAID_EXPORT_SWEEP_BATCH_LIMIT
+    : WORKER_EXPORT_SWEEP_BATCH_LIMIT;
+}
 
 /** Content-free AuditEntry actions emitted across the export lifecycle (§7). */
 export const EXPORT_AUDIT_ACTIONS = {
@@ -94,13 +137,21 @@ export interface ExportRateLimits {
   maxPerAccount: number;
 }
 
-export function exportLimitsForProfile(isWorkers: boolean): ExportLimits {
+export function exportLimitsForProfile(
+  isWorkers: boolean,
+  plan: WorkersPlan = 'free'
+): ExportLimits {
   if (isWorkers) {
+    const paid = plan === 'paid';
     return {
-      maxRows: WORKERS_EXPORT_MAX_ROWS,
-      maxFiles: WORKERS_EXPORT_MAX_FILES,
-      maxMediaBytes: WORKERS_EXPORT_MAX_MEDIA_BYTES,
-      maxArchiveBytes: WORKERS_EXPORT_MAX_ARCHIVE_BYTES,
+      maxRows: paid ? WORKERS_PAID_EXPORT_MAX_ROWS : WORKERS_EXPORT_MAX_ROWS,
+      maxFiles: paid ? WORKERS_PAID_EXPORT_MAX_FILES : WORKERS_EXPORT_MAX_FILES,
+      maxMediaBytes: paid
+        ? WORKERS_PAID_EXPORT_MAX_MEDIA_BYTES
+        : WORKERS_EXPORT_MAX_MEDIA_BYTES,
+      maxArchiveBytes: paid
+        ? WORKERS_PAID_EXPORT_MAX_ARCHIVE_BYTES
+        : WORKERS_EXPORT_MAX_ARCHIVE_BYTES,
       maxManifestBytes: 8 * 1024 * 1024,
     };
   }

@@ -12,10 +12,41 @@ import {
 } from './erasure-record-store.js';
 import { writeAuditEntry } from '../repositories/audit-entry.repository.js';
 import { SOVEREIGNTY_AUDIT_ACTIONS } from '../shared/sovereignty-policy.js';
+import type { WorkersPlan } from '../config/v2-runtime.js';
 
 export const ERASURE_BATCH_SIZE = 1000;
 export const WORKER_ERASURE_STORAGE_BUDGET = 15;
+/**
+ * Workers Paid raises subrequests per invocation to 10,000, D1 queries per
+ * invocation to 1,000, and cron CPU to 30 s default (docs/WORKERS-PAID-PROFILE.md §2).
+ * Both storage operations and D1 queries are capped at 400 per pass (with
+ * `ERASURE_PASS_MAX_WALL_MS` headroom before the 60 s cron interval) so one
+ * Paid cron invocation stays safely below the 1,000 D1 query cap and 10,000
+ * subrequest cap.
+ * SPEC-V2 §5 and §7 Backups (#187, amended 2026-11-24 in #302) approve the Paid
+ * profile and its 31-day worst-case erasure bound; active only with WORKERS_PLAN=paid.
+ */
+export const WORKER_PAID_ERASURE_STORAGE_BUDGET = 400;
+export const WORKER_PAID_ERASURE_D1_BUDGET = 400;
 export const ERASURE_COMMUNITIES_PER_PASS = 2;
+/** Stop a 1-minute cron erasure pass with 15 s headroom before the next cron tick. */
+export const ERASURE_PASS_MAX_WALL_MS = 45_000;
+/** Conservative D1 query count for `eraseRows()` batch statements. */
+const ERASURE_ROWS_D1_COST = 23;
+/** Conservative D1 query count for `activateDueErasures()` + `erasureWork()`. */
+const ERASURE_SWEEP_STARTUP_D1_COST = 19;
+
+export function workerErasureStorageBudget(plan: WorkersPlan = 'free'): number {
+  return plan === 'paid'
+    ? WORKER_PAID_ERASURE_STORAGE_BUDGET
+    : WORKER_ERASURE_STORAGE_BUDGET;
+}
+
+export function workerErasureD1Budget(
+  plan: WorkersPlan = 'free'
+): number | undefined {
+  return plan === 'paid' ? WORKER_PAID_ERASURE_D1_BUDGET : undefined;
+}
 
 /** Idempotent passes. No database ownership/byte pointers are lost before byte deletion. */
 export class CommunityErasureService {
@@ -62,14 +93,18 @@ export class CommunityErasureService {
 
   private async deleteLegacyFiles(
     communityId: number,
-    budget: number
+    budget: number,
+    pastDeadline: () => boolean = () => false,
+    d1Budget?: { remaining: number }
   ): Promise<number> {
     let unaddressable = 0;
     try {
       return await this.deleteLegacyFilesBatch(
         communityId,
         budget,
-        () => unaddressable++
+        pastDeadline,
+        () => unaddressable++,
+        d1Budget
       );
     } finally {
       if (unaddressable > 0)
@@ -83,24 +118,41 @@ export class CommunityErasureService {
   private async deleteLegacyFilesBatch(
     communityId: number,
     budget: number,
-    unaddressableSeen: () => void
+    pastDeadline: () => boolean,
+    unaddressableSeen: () => void,
+    d1Budget?: { remaining: number }
   ): Promise<number> {
+    if (d1Budget) {
+      if (d1Budget.remaining < 1) return 0;
+      d1Budget.remaining -= 1;
+    }
     for (const file of await this.repository.erasureLegacyFiles(communityId)) {
-      const cost = (this.storage.erasureDeleteCost ?? 1) + 1;
-      if (budget < cost) return 0;
+      if (pastDeadline()) return 0;
       const key = file.storageKey ?? file.path;
+      const cost = (this.storage.erasureDeleteCost ?? 1) + 1;
       if (!validStorageKey(key) && !validLegacyStorageKey(key)) {
+        if (d1Budget) {
+          if (budget < 1 || d1Budget.remaining < 1) return 0;
+          d1Budget.remaining -= 1;
+        } else if (budget < cost) {
+          return 0;
+        }
         // Cannot address bytes through any adapter: drop the pointer only.
         unaddressableSeen();
         await this.repository.clearErasureLegacyFile(communityId, file.id);
         budget -= 1;
         continue;
       }
+      const d1Cost = d1Budget
+        ? (/^users\/[1-9][0-9]*\//.test(key) ? 2 : 1) + 1
+        : 0;
+      if (budget < cost || (d1Budget && d1Budget.remaining < d1Cost)) return 0;
       // Never delete bytes another tenant/row still references, nor keys
       // outside legacy/, this community's prefix or its users' prefixes.
       if (!(await this.repository.erasureMayDeleteKey(communityId, key))) {
         await this.repository.clearErasureLegacyFile(communityId, file.id);
         budget -= 1;
+        if (d1Budget) d1Budget.remaining -= d1Cost;
         continue;
       }
       await this.storage.delete!(key);
@@ -110,12 +162,33 @@ export class CommunityErasureService {
       if (remaining.entries.some((entry) => entry.key === key))
         throw new Error('Legacy erasure incomplete');
       budget -= cost;
+      if (d1Budget) d1Budget.remaining -= d1Cost;
       await this.repository.clearErasureLegacyFile(communityId, file.id);
     }
     return budget;
   }
 
-  async sweep(now: Date, storageBudget = 25): Promise<void> {
+  async sweep(
+    now: Date,
+    storageBudget = 25,
+    d1QueryBudget?: number,
+    workersPlan?: WorkersPlan
+  ): Promise<void> {
+    const isPaid = workersPlan === 'paid';
+    const passStartMs = isPaid ? this.clock().getTime() : 0;
+    const pastDeadline = isPaid
+      ? () => this.clock().getTime() - passStartMs >= ERASURE_PASS_MAX_WALL_MS
+      : () => false;
+    const effectiveD1Budget =
+      workersPlan === 'free'
+        ? undefined
+        : isPaid
+          ? (d1QueryBudget ?? WORKER_PAID_ERASURE_D1_BUDGET)
+          : d1QueryBudget;
+    const d1Budget =
+      effectiveD1Budget !== undefined
+        ? { remaining: effectiveD1Budget }
+        : undefined;
     await this.repository.activateDueErasures(now);
     const records = await this.store.list();
     for (const row of await this.repository.erasureWork(5, now)) {
@@ -131,6 +204,9 @@ export class CommunityErasureService {
         await this.store.write(record);
         records.push(record);
       }
+    }
+    if (d1Budget) {
+      d1Budget.remaining -= ERASURE_SWEEP_STARTUP_D1_COST;
     }
     // Wall-clock round robin survives isolate/process restarts and keeps a
     // large community from starving every community behind it.
@@ -148,6 +224,7 @@ export class CommunityErasureService {
       ...records.filter((record) => record.completedAt !== null),
     ];
     for (let record of ordered) {
+      if (pastDeadline()) return;
       if (record.completedAt !== null) {
         const redacted = redactErasureActor(record, now);
         if (
@@ -164,19 +241,29 @@ export class CommunityErasureService {
       if (!this.storage.fenceCommunity)
         throw new Error('Erasure writer fencing unavailable');
       if (storageBudget < 2) return;
+      if (d1Budget && d1Budget.remaining < 1) return;
       await this.storage.fenceCommunity(record.communityId);
       storageBudget--;
+      if (d1Budget) d1Budget.remaining -= 1;
       record = await this.preserveCustody(record);
       storageBudget = await this.deleteLegacyFiles(
         record.communityId,
-        storageBudget
+        storageBudget,
+        pastDeadline,
+        d1Budget
       );
-      if (
-        storageBudget < 2 ||
-        (await this.repository.erasureLegacyFiles(record.communityId)).length
-      )
+      if (pastDeadline() || storageBudget < 2) return;
+      if (d1Budget) {
+        if (d1Budget.remaining < 1) return;
+        d1Budget.remaining -= 1;
+      }
+      if ((await this.repository.erasureLegacyFiles(record.communityId)).length)
         return;
       const prefix = `communities/${record.communityId}/`;
+      if (d1Budget) {
+        if (d1Budget.remaining < 1) return;
+        d1Budget.remaining -= 1;
+      }
       for (const upload of await this.repository.erasureUploads(
         record.communityId
       )) {
@@ -186,9 +273,17 @@ export class CommunityErasureService {
           !this.storage.abortMultipartUpload
         )
           throw new Error('Erasure multipart abort unavailable');
+        if (pastDeadline()) return;
+        if (d1Budget && d1Budget.remaining < 1) return;
         if (--storageBudget < 0) return;
+        if (d1Budget) d1Budget.remaining -= 1;
         await this.storage.abortMultipartUpload(upload.key, upload.uploadId);
         await this.repository.clearErasureUpload(upload.id, upload.uploadId);
+      }
+      if (pastDeadline()) return;
+      if (d1Budget) {
+        if (d1Budget.remaining < 1) return;
+        d1Budget.remaining -= 1;
       }
       if ((await this.repository.erasureUploads(record.communityId)).length)
         return;
@@ -205,6 +300,7 @@ export class CommunityErasureService {
         if (!object.key.startsWith(prefix))
           throw new Error('Invalid erasure listing');
       }
+      if (pastDeadline()) return;
       if (this.storage.deleteMany) {
         const keys: string[] = [];
         for (const object of page.entries) {
@@ -221,13 +317,17 @@ export class CommunityErasureService {
         }
       } else {
         for (const object of page.entries) {
-          if (storageBudget < deleteCost) break;
+          if (pastDeadline() || storageBudget < deleteCost) break;
           await this.storage.delete(object.key);
           storageBudget -= deleteCost;
         }
       }
       // A fresh empty listing verifies absence, and also catches interrupted uploads.
-      if (page.entries.length || page.truncated) continue;
+      if (page.entries.length || page.truncated || pastDeadline()) continue;
+      if (d1Budget) {
+        if (d1Budget.remaining < ERASURE_ROWS_D1_COST) return;
+        d1Budget.remaining -= ERASURE_ROWS_D1_COST;
+      }
       await this.repository.eraseRows(record.communityId, now);
       await this.store.write({
         ...record,

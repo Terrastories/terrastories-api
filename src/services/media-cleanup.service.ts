@@ -55,6 +55,8 @@ import {
   type FoundationStorage,
 } from './hono-foundation.service.js';
 
+import type { WorkersPlan } from '../config/v2-runtime.js';
+
 export type MediaCleanupReason =
   | 'upload_rollback'
   | 'file_deleted'
@@ -369,6 +371,25 @@ export const ORPHAN_SWEEP_SUBREQUEST_BUDGET = 2000;
  * Free 50.
  */
 export const WORKER_SWEEP_SUBREQUEST_BUDGET = 40;
+
+/**
+ * Workers Paid allows 10,000 subrequests (including internal services R2/D1)
+ * and 1,000 D1 queries per invocation by default (docs/WORKERS-PAID-PROFILE.md §2).
+ * Sizing the hourly orphan sweep at 1,000 subrequests keeps a pure-reference
+ * run (~834 D1 queries + ~166 R2 list pages) below the 1,000 D1 query limit and
+ * an all-orphan run (~1,000 subrequests) 10x below the 10,000 subrequest limit.
+ * SPEC-V2 §5 (amended 2026-11-24 in #302) approves the Paid profile; active only
+ * with WORKERS_PLAN=paid.
+ */
+export const WORKER_PAID_SWEEP_SUBREQUEST_BUDGET = 1000;
+
+export function workerSweepSubrequestBudget(
+  plan: WorkersPlan = 'free'
+): number {
+  return plan === 'paid'
+    ? WORKER_PAID_SWEEP_SUBREQUEST_BUDGET
+    : WORKER_SWEEP_SUBREQUEST_BUDGET;
+}
 
 /** Storage prefixes that can hold community/system bytes. */
 export const ORPHAN_SWEEP_PREFIXES = ['communities/', 'users/'] as const;

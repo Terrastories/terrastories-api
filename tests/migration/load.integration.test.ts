@@ -572,6 +572,48 @@ describeWithPostgres('Rails -> V2 load (stage 3)', () => {
       });
       expect(allowed.sqlFiles).toBeGreaterThan(2);
       expect(allowed.instructions!.join(' ')).toContain('wipe-and-retry.sql');
+
+      const paidEnvDry = await loadTransformOutput({
+        transformDir: outDir,
+        target: 'd1',
+        sqlOut: next('d1'),
+        dryRun: true,
+        env: { WORKERS_PLAN: 'paid' },
+      });
+      expect(paidEnvDry.warnings).toEqual([]);
+
+      const paidOverDry = await loadTransformOutput({
+        transformDir: outDir,
+        target: 'd1',
+        sqlOut: next('d1'),
+        dryRun: true,
+        rowBudget: 10,
+        env: { WORKERS_PLAN: 'paid' },
+      });
+      expect(paidOverDry.warnings![0]).toMatch(
+        /exceed the Workers Paid preflight threshold of 10 \(the monthly included rows-written allowance before billable overage\)/
+      );
+      await expect(
+        loadTransformOutput({
+          transformDir: outDir,
+          target: 'd1',
+          sqlOut: next('d1'),
+          rowBudget: 10,
+          workersPlan: 'paid',
+        })
+      ).rejects.toThrow(
+        /Workers Paid preflight threshold of 10 \(the monthly included rows-written allowance before billable overage\); pass --allow-over-budget/
+      );
+
+      await expect(
+        loadTransformOutput({
+          transformDir: outDir,
+          target: 'd1',
+          sqlOut: next('d1'),
+          dryRun: true,
+          env: { WORKERS_PLAN: 'invalid-plan' },
+        })
+      ).rejects.toThrow(/WORKERS_PLAN must be one of free, paid/);
     });
 
     it('refuses an existing output directory and a dry run writes nothing', async () => {

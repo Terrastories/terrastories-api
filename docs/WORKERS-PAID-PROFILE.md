@@ -41,12 +41,12 @@ Switch only when one of these holds and the Free-path fixes (#295, codex diagnos
 
 ### Erasure bound: decided (#187)
 
-SPEC-V2 Section 7 (Backups) states the Paid bound as an open question. On Paid, Time Travel keeps 30 days, counted from when each DELETE lands. Live deletion completes at C, at most T + 24 hours after the request T. A deleted row then stays in Time Travel history until C + 30 days: up to 31 days after the request, not 30. Section 7 still forbids using it: operator tooling refuses every restore while an erasure is pending, refuses any point before completion, and reconciles erasures after an allowed restore before serving. The bound is about how long a copy exists, not about a permitted restore. The owner must choose one of these before Paid serves real communities:
+SPEC-V2 Section 7 (Backups) stated the Paid bound as an open question until the 2026-11-24 decision below. On Paid, Time Travel keeps 30 days, counted from when each DELETE lands. Live deletion completes at C, at most T + 24 hours after the request T. A deleted row then stays in Time Travel history until C + 30 days: up to 31 days after the request, not 30. Section 7 still forbids using it: operator tooling refuses every restore while an erasure is pending, refuses any point before completion, and reconciles erasures after an allowed restore before serving. The bound is about how long a copy exists, not about a permitted restore. The owner had to choose one of these before Paid serves real communities:
 
 1. **Accept 31 days.** Amend the 30-day request-anchored promise for the Paid profile (Sections 4, 6.7, 7, 12, 14) and tell communities.
 2. **Keep 30 days.** Use a shorter Time Travel or backup policy on Paid. The Time Travel page does not say retention can be shortened (see Open Questions), so this option may not exist on D1.
 
-This gate blocks go-live. Neither the walkthrough nor smoke can pass it.
+This gate is closed by the decision below; it no longer blocks go-live. Neither the walkthrough nor smoke could have passed it.
 
 **Decided 2026-11-24 ([#187](https://github.com/Terrastories/terrastories-api/issues/187)):** option 1. The 31-day worst case is accepted for Workers Paid; Workers Free and the self-hosted/field-kit profiles keep 30 days from the request; the restore refusal and reconciliation rules are unchanged. SPEC-V2 Sections 4, 6.7 to 6.9, 7, 12 and 14 state it. Communities hosted on Paid must be told the bound.
 

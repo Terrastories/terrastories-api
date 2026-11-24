@@ -63,6 +63,7 @@ import {
 import { CONFLICT_BODY } from './community-writes.service.js';
 import type { CreateCommunityExportResponse } from '../shared/schemas/community-export.js';
 import type { V2ErrorResponse } from '../shared/schemas/public-communities.js';
+import type { WorkersPlan } from '../config/v2-runtime.js';
 
 export type CommunityExportCreateResult =
   | { status: 201; body: CreateCommunityExportResponse }
@@ -78,6 +79,7 @@ export type CommunityExportCreateResult =
 
 export interface CommunityExportServiceOptions {
   isWorkers?: boolean;
+  workersPlan?: WorkersPlan;
   now?: () => Date;
   limits?: Partial<ExportLimits>;
   rateLimits?: Partial<ExportRateLimits>;
@@ -126,7 +128,10 @@ export class CommunityExportService {
   ) {
     this.isWorkers = options.isWorkers ?? false;
     this.now = options.now ?? (() => new Date());
-    const defaults = exportLimitsForProfile(this.isWorkers);
+    const defaults = exportLimitsForProfile(
+      this.isWorkers,
+      options.workersPlan
+    );
     this.limits = {
       maxRows: options.limits?.maxRows ?? defaults.maxRows,
       maxManifestBytes:

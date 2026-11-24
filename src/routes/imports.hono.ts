@@ -15,6 +15,7 @@ import {
   ImportsService,
   type ImportServiceResult,
 } from '../services/imports.service.js';
+import type { WorkersPlan } from '../config/v2-runtime.js';
 
 export interface ImportRoutesOptions {
   repository: ImportsRepository;
@@ -22,6 +23,7 @@ export interface ImportRoutesOptions {
   cleanup: MediaCleanupCoordinator;
   now?: () => Date;
   enforceD1Budget?: boolean;
+  workersPlan?: WorkersPlan;
 }
 
 function respondImportResult<T>(c: Context, result: ImportServiceResult<T>) {
@@ -40,6 +42,7 @@ export function registerImportRoutes(
     {
       now: options.now,
       enforceD1Budget: options.enforceD1Budget,
+      workersPlan: options.workersPlan,
     }
   );
 

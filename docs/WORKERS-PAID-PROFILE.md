@@ -73,11 +73,16 @@ Snapshot every changed file under `backups/` first. Each step lands as its own r
    - Update the guard tests for both plans.
 5. **`scripts/staging/provision.sh`.** Lines 23 to 24 document `OTHER_CRON_TRIGGERS` against the Free limit of 5. Line 56 runs `guard crons ... "${OTHER_CRON_TRIGGERS:-0}"`. Pass the plan to that guard. `provision.sh` does not call `guard d1-size` today (the command exists in `guards.ts`): wire it to the size from `wrangler d1 info`, with the plan. Print the plan in the dry run.
    **`scripts/staging/smoke.sh`.** `cpu_procedure` states the Free 10 ms budget and "Any 1102 is a NO-GO on Free". Add the Paid pass rule: zero `exceededCpu`, p99 per route under half of `limits.cpu_ms`. Keep the Free rule as the default.
-6. **Free-only constants in code** (later profile-switched PRs; read the plan from one config value, never fork the code):
-   - `src/services/media-cleanup.service.ts` `WORKER_SWEEP_SUBREQUEST_BUDGET = 40` (sized under Free 50).
-   - `src/shared/export-policy.ts` `WORKERS_EXPORT_MAX_*` and `WORKER_EXPORT_SWEEP_BATCH_LIMIT = 5`.
-   - `src/services/community-erasure.service.ts` `WORKER_ERASURE_STORAGE_BUDGET = 15`.
-   - `src/migration/v2/load.ts` `D1_FREE_DAILY_ROWS_WRITTEN` and the one-import-per-UTC-day rule in `src/services/imports.service.ts`.
+6. **Free-only constants in code** (switched by the single Worker var `WORKERS_PLAN`, validated once in `validateWorkerV2Runtime` in `src/config/v2-runtime.ts`: `'free'` default when unset/empty | `'paid'`; invalid values fail closed at init; Node/self-hosted profiles are unaffected):
+   - `src/services/media-cleanup.service.ts` `workerSweepSubrequestBudget`: free `WORKER_SWEEP_SUBREQUEST_BUDGET = 40`, paid `WORKER_PAID_SWEEP_SUBREQUEST_BUDGET = 1000`.
+   - `src/shared/export-policy.ts` `exportLimitsForProfile` (`maxRows`): free `WORKERS_EXPORT_MAX_ROWS = 10_000`, paid `WORKERS_PAID_EXPORT_MAX_ROWS = 100_000`.
+   - `src/shared/export-policy.ts` `exportLimitsForProfile` (`maxFiles`): free `WORKERS_EXPORT_MAX_FILES = 30`, paid `WORKERS_PAID_EXPORT_MAX_FILES = 1_000`.
+   - `src/shared/export-policy.ts` `exportLimitsForProfile` (`maxMediaBytes`): free `WORKERS_EXPORT_MAX_MEDIA_BYTES = 50 MiB` (`52_428_800`), paid `WORKERS_PAID_EXPORT_MAX_MEDIA_BYTES = 500 MiB` (`524_288_000`).
+   - `src/shared/export-policy.ts` `exportLimitsForProfile` (`maxArchiveBytes`): free `WORKERS_EXPORT_MAX_ARCHIVE_BYTES = 64 MiB` (`67_108_864`), paid `WORKERS_PAID_EXPORT_MAX_ARCHIVE_BYTES = 512 MiB` (`536_870_912`).
+   - `src/shared/export-policy.ts` `workerExportSweepBatchLimit`: free `WORKER_EXPORT_SWEEP_BATCH_LIMIT = 5`, paid `WORKER_PAID_EXPORT_SWEEP_BATCH_LIMIT = 20`.
+   - `src/services/community-erasure.service.ts` `workerErasureStorageBudget`: free `WORKER_ERASURE_STORAGE_BUDGET = 15`, paid `WORKER_PAID_ERASURE_STORAGE_BUDGET = 500`.
+   - `src/migration/v2/load.ts` `d1RowsWrittenBudget`: free `D1_FREE_DAILY_ROWS_WRITTEN = 100_000`, paid `D1_PAID_INCLUDED_ROWS_WRITTEN = 50_000_000`.
+   - `src/services/imports.service.ts` `workerDailyImportLimit`: free `WORKER_FREE_DAILY_IMPORT_LIMIT = 1` (1 committed import per UTC day, `429 d1_daily_import_limit`), paid `WORKER_PAID_DAILY_IMPORT_LIMIT = null` (daily cap off).
    - If the import rule becomes plan-dependent, make the walkthrough plan-aware too. `scripts/walkthrough/run.ts --d1` (chapter `scripts/walkthrough/chapters/editor.ts`) commits one import and asserts `429 d1_daily_import_limit` for the second, so on Paid it would fail on correct behavior. Add a plan option to the walkthrough and have `smoke.sh` pass it.
 
    What simplifies: with 30 s CPU and 10,000 subrequests, export and erasure can stay synchronous as built. Codex diagnosis steps 4 and 5 (bounded erasure hand-off, capped synchronous export) become optional. Moving export generation to Queues or Workflows is not needed. It would also change the Section 7 Delivery contract (generation on request returns the download tokens) and the Section 9 API contract, so do it only with a spec amendment. Erasure already retries on the `*/1 * * * *` cron and stays there. The client-side password KDF stays: it is a protocol decision (Section 7, Section 14), not only a Free workaround.

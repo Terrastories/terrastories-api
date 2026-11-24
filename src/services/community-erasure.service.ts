@@ -12,10 +12,26 @@ import {
 } from './erasure-record-store.js';
 import { writeAuditEntry } from '../repositories/audit-entry.repository.js';
 import { SOVEREIGNTY_AUDIT_ACTIONS } from '../shared/sovereignty-policy.js';
+import type { WorkersPlan } from '../config/v2-runtime.js';
 
 export const ERASURE_BATCH_SIZE = 1000;
 export const WORKER_ERASURE_STORAGE_BUDGET = 15;
+/**
+ * Workers Paid raises subrequests per invocation to 10,000, D1 queries per
+ * invocation to 1,000, and cron CPU to 30 s default (docs/WORKERS-PAID-PROFILE.md §2).
+ * A storage budget of 500 keeps even D1-paired operations (1 D1 query per
+ * multipart abort or 2 per legacy file check) comfortably below the 1,000 D1
+ * query cap and 10,000 subrequest cap per minute cron tick.
+ * TODO(SPEC-V2 §5, §7 Backups #187): inert unless WORKERS_PLAN=paid after SPEC-V2 §5 and §7 (31-day Time Travel bound) are amended.
+ */
+export const WORKER_PAID_ERASURE_STORAGE_BUDGET = 500;
 export const ERASURE_COMMUNITIES_PER_PASS = 2;
+
+export function workerErasureStorageBudget(plan: WorkersPlan = 'free'): number {
+  return plan === 'paid'
+    ? WORKER_PAID_ERASURE_STORAGE_BUDGET
+    : WORKER_ERASURE_STORAGE_BUDGET;
+}
 
 /** Idempotent passes. No database ownership/byte pointers are lost before byte deletion. */
 export class CommunityErasureService {

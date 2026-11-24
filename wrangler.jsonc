@@ -23,6 +23,10 @@
     // The bucket needs CORS for the frontend origin: PUT, header
     // exposed header ETag (SPEC-V2 section 6.7).
     "R2_BUCKET_NAME": "replace-with-your-bucket",
+    // Optional Workers plan selector (docs/WORKERS-PAID-PROFILE.md section 3 step 6):
+    // WORKERS_PLAN defaults to "free" when unset; set to "paid" only in an
+    // environment deployed to a Workers Paid account after the SPEC-V2
+    // section 5 and section 7 amendments are approved.
   },
   // Secrets are never `vars`. Set the prelogin HMAC key with:
   //   npx wrangler secret put AUTH_SERVER_SECRET --env staging

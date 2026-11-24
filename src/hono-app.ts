@@ -64,6 +64,7 @@ import {
 import { HonoAuthRepository } from './repositories/hono-auth.repository.js';
 import { HonoAuthService } from './services/hono-auth.service.js';
 import { CONFLICT_BODY } from './services/community-writes.service.js';
+import type { WorkersPlan } from './config/v2-runtime.js';
 
 export type RequestHandler = (request: Request) => Promise<Response>;
 export interface FoundationOptions {
@@ -96,6 +97,8 @@ export interface FoundationOptions {
   now?: () => Date;
   /** Cloudflare Workers: `cf-connecting-ip` is set by the platform (finding E). */
   isWorkers?: boolean;
+  /** Workers plan tier (`'free'` default | `'paid'`, #295). */
+  workersPlan?: WorkersPlan;
   /** A trusted reverse proxy is configured, so `x-forwarded-for` is usable. */
   trustProxy?: boolean;
   /**
@@ -661,6 +664,7 @@ export function createHonoApp(options: FoundationOptions) {
     cleanup: mediaCleanup,
     now,
     enforceD1Budget: options.enforceD1Budget ?? options.isWorkers,
+    workersPlan: options.workersPlan,
   });
   registerUserManagementRoutes(app, {
     repository: new UserManagementRepository(options.repository.connection),
@@ -671,6 +675,7 @@ export function createHonoApp(options: FoundationOptions) {
     repository: new CommunityExportRepository(options.repository.connection),
     storage: options.storage,
     isWorkers: options.isWorkers,
+    workersPlan: options.workersPlan,
     now,
   });
   registerCommunitySovereigntyRoutes(app, {

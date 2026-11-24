@@ -111,3 +111,36 @@ it('still serves in development mode without a public origin', async () => {
     await mf.dispose();
   }
 });
+
+it('refuses to serve when WORKERS_PLAN is invalid and serves when free or paid', async () => {
+  const bundled = await bundleWorkerModule(
+    `import worker from './src/worker.js'; export default {fetch:(r,e)=>worker.fetch(r,e)};`
+  );
+  const badMf = startWorkerRuntime(bundled, {
+    ENVIRONMENT: 'development',
+    WORKERS_PLAN: 'enterprise',
+  });
+  try {
+    const refused = await badMf.dispatchFetch('https://worker.test/health');
+    expect(refused.status).toBe(503);
+    expect(await refused.json()).toEqual({
+      error: 'Service unavailable',
+      code: 'config-refused',
+    });
+  } finally {
+    await badMf.dispose();
+  }
+
+  for (const WORKERS_PLAN of ['free', 'paid'] as const) {
+    const okMf = startWorkerRuntime(bundled, {
+      ENVIRONMENT: 'development',
+      WORKERS_PLAN,
+    });
+    try {
+      const healthy = await okMf.dispatchFetch('https://worker.test/health');
+      expect(healthy.status).toBe(200);
+    } finally {
+      await okMf.dispose();
+    }
+  }
+});

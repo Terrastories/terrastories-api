@@ -33,6 +33,8 @@ import { fsyncPath } from '../rails/fsync.js';
 import { sha256OfFile, MEDIA_DIRECTORY } from './media.js';
 import { V2_DATABASE_FILENAME, type TransformManifest } from './transform.js';
 
+import { parseWorkersPlan, type WorkersPlan } from '../../config/v2-runtime.js';
+
 type BodyInit = NonNullable<RequestInit['body']>;
 
 export type LoadTarget = 'node-sqlite' | 'd1' | 'r2';
@@ -65,9 +67,11 @@ export interface LoadOptions {
   sleepImpl?: (ms: number) => Promise<void>;
   /** d1: proceed although the estimated rows written exceed the Free daily budget. */
   allowOverBudget?: boolean;
-  /** Test seam: rows-written budget (default D1_FREE_DAILY_ROWS_WRITTEN). */
+  /** Test seam: rows-written budget (default d1RowsWrittenBudget(workersPlan)). */
   rowBudget?: number;
-  /** Environment source for R2 credentials (default process.env). */
+  /** Workers plan ('free' default | 'paid') selecting the default D1 rows-written budget. */
+  workersPlan?: WorkersPlan;
+  /** Environment source for R2 credentials and WORKERS_PLAN (default process.env). */
   env?: Record<string, string | undefined>;
   /** Test seam replacing fetch. */
   fetchImpl?: typeof fetch;
@@ -107,6 +111,18 @@ export const D1_MAX_STATEMENT_BYTES = 90_000;
 const D1_DEFAULT_FILE_BYTES = 1024 * 1024;
 /** Workers Free plan: 100,000 D1 rows written per day. */
 export const D1_FREE_DAILY_ROWS_WRITTEN = 100_000;
+/**
+ * Workers Paid plan: 50,000,000 D1 rows written per month included before
+ * overage, with no daily hard cap (docs/WORKERS-PAID-PROFILE.md §2).
+ * TODO(SPEC-V2 §5): inert unless WORKERS_PLAN=paid after SPEC-V2 §5 is amended to permit the Paid profile.
+ */
+export const D1_PAID_INCLUDED_ROWS_WRITTEN = 50_000_000;
+
+export function d1RowsWrittenBudget(plan: WorkersPlan = 'free'): number {
+  return plan === 'paid'
+    ? D1_PAID_INCLUDED_ROWS_WRITTEN
+    : D1_FREE_DAILY_ROWS_WRITTEN;
+}
 export const D1_LEDGER_TABLE = '_rails_migration_load';
 export const R2_MULTIPART_THRESHOLD_BYTES = 100 * 1024 * 1024;
 export const R2_PART_SIZE_BYTES = 64 * 1024 * 1024;
@@ -752,7 +768,10 @@ async function loadD1(
   const estimatedRowsWritten =
     rows + indexEntries + files.length + sequences.length * 2;
   const warnings: string[] = [];
-  const rowBudget = options.rowBudget ?? D1_FREE_DAILY_ROWS_WRITTEN;
+  const plan =
+    options.workersPlan ??
+    parseWorkersPlan((options.env ?? process.env).WORKERS_PLAN);
+  const rowBudget = options.rowBudget ?? d1RowsWrittenBudget(plan);
   const overBudget = estimatedRowsWritten > rowBudget;
   if (overBudget && !options.allowOverBudget) {
     const message =

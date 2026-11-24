@@ -1,7 +1,7 @@
 import { createWorkerErasureRecordStore } from './worker-erasure-record-store.js';
 import {
   CommunityErasureService,
-  WORKER_ERASURE_STORAGE_BUDGET,
+  workerErasureStorageBudget,
 } from './services/community-erasure.service.js';
 import type {
   D1Database,
@@ -26,9 +26,9 @@ import {
 } from './services/hono-foundation.service.js';
 import {
   MediaCleanupCoordinator,
-  WORKER_SWEEP_SUBREQUEST_BUDGET,
+  workerSweepSubrequestBudget,
 } from './services/media-cleanup.service.js';
-import { WORKER_EXPORT_SWEEP_BATCH_LIMIT } from './shared/export-policy.js';
+import { workerExportSweepBatchLimit } from './shared/export-policy.js';
 import {
   validateWorkerV2Runtime,
   V2RuntimeConfigError,
@@ -53,6 +53,11 @@ export interface WorkerBindings {
    * the strictest rules apply; only `development` and `test` relax them.
    */
   ENVIRONMENT?: string;
+  /**
+   * Optional Workers plan selector (`'free'` default | `'paid'`; #295,
+   * docs/WORKERS-PAID-PROFILE.md §3 step 6).
+   */
+  WORKERS_PLAN?: string;
   PUBLIC_ORIGIN?: string;
   CORS_ORIGINS?: string;
   /**
@@ -517,6 +522,7 @@ export function createWorker() {
       corsOrigins: runtimeConfig.corsOrigins,
       // workerd sets `cf-connecting-ip` and a client cannot forge it (finding E).
       isWorkers: true,
+      workersPlan: runtimeConfig.workersPlan,
       storage: createR2Storage(env.MEDIA, r2DirectUploadConfigFrom(env)),
       erasureStore: env.ERASURE_RECORDS
         ? createWorkerErasureRecordStore(env.ERASURE_RECORDS)
@@ -578,6 +584,7 @@ export function createWorker() {
     ) => {
       ctx.waitUntil(
         (async () => {
+          const { workersPlan } = validateWorkerV2Runtime(env);
           const client = new Proxy(env.DB, {
             get(target, key, receiver) {
               const primary = env.DB.withSession('first-primary');
@@ -599,7 +606,10 @@ export function createWorker() {
                   new CommunitySovereigntyRepository(db),
                   r2Storage,
                   createWorkerErasureRecordStore(env.ERASURE_RECORDS)
-                ).sweep(scheduledNow(), WORKER_ERASURE_STORAGE_BUDGET);
+                ).sweep(
+                  scheduledNow(),
+                  workerErasureStorageBudget(workersPlan)
+                );
               } catch {
                 // eslint-disable-next-line no-console -- content-free retry signal
                 console.warn('maintenance: community erasure sweep failed');
@@ -622,10 +632,11 @@ export function createWorker() {
                 r2Storage,
                 {
                   isWorkers: true,
+                  workersPlan,
                   now: scheduledNow,
                 }
               ).cleanupExpiredExports({
-                limit: WORKER_EXPORT_SWEEP_BATCH_LIMIT,
+                limit: workerExportSweepBatchLimit(workersPlan),
               });
             } catch {
               // eslint-disable-next-line no-console -- content-free operator channel
@@ -638,7 +649,7 @@ export function createWorker() {
             // Subrequest-budgeted run; the sweeper also honours an
             // ORPHAN_SWEEP_PAUSED binding / `system/orphan-sweep-hold`
             // marker for the restore hold.
-            subrequestBudget: WORKER_SWEEP_SUBREQUEST_BUDGET,
+            subrequestBudget: workerSweepSubrequestBudget(workersPlan),
             sweepPaused: envFlagEnabled(env.ORPHAN_SWEEP_PAUSED),
           });
           try {

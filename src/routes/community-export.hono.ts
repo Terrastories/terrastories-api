@@ -24,6 +24,7 @@ import type {
   ExportLimits,
   ExportRateLimits,
 } from '../shared/export-policy.js';
+import type { WorkersPlan } from '../config/v2-runtime.js';
 import { actorOf } from './community-writes.hono.js';
 import { BAD_REQUEST_BODY } from '../services/public-communities.service.js';
 
@@ -31,6 +32,7 @@ export interface CommunityExportRoutesOptions {
   repository: CommunityExportRepository;
   storage: FoundationStorage;
   isWorkers?: boolean;
+  workersPlan?: WorkersPlan;
   now?: () => Date;
   limits?: Partial<ExportLimits>;
   rateLimits?: Partial<ExportRateLimits>;
@@ -58,6 +60,7 @@ export function registerCommunityExportRoutes(
     options.storage,
     {
       isWorkers: options.isWorkers,
+      workersPlan: options.workersPlan,
       now: options.now,
       limits: options.limits,
       rateLimits: options.rateLimits,

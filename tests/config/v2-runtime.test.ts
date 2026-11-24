@@ -1,11 +1,53 @@
 import { describe, it, expect } from 'vitest';
 import {
+  KNOWN_WORKERS_PLANS,
   V2RuntimeConfigError,
+  parseWorkersPlan,
   validateNodeV2Runtime,
   validateV2RuntimeCore,
   validateWorkerV2Runtime,
   v2RuntimeModeNotice,
 } from '../../src/config/v2-runtime.js';
+import {
+  type MediaCleanupCoordinator,
+  WORKER_PAID_SWEEP_SUBREQUEST_BUDGET,
+  WORKER_SWEEP_SUBREQUEST_BUDGET,
+  workerSweepSubrequestBudget,
+} from '../../src/services/media-cleanup.service.js';
+import {
+  EXPORT_SWEEP_BATCH_LIMIT,
+  NODE_EXPORT_MAX_ARCHIVE_BYTES,
+  WORKER_EXPORT_SWEEP_BATCH_LIMIT,
+  WORKER_PAID_EXPORT_SWEEP_BATCH_LIMIT,
+  WORKERS_EXPORT_MAX_ARCHIVE_BYTES,
+  WORKERS_EXPORT_MAX_FILES,
+  WORKERS_EXPORT_MAX_MEDIA_BYTES,
+  WORKERS_EXPORT_MAX_ROWS,
+  WORKERS_PAID_EXPORT_MAX_ARCHIVE_BYTES,
+  WORKERS_PAID_EXPORT_MAX_FILES,
+  WORKERS_PAID_EXPORT_MAX_MEDIA_BYTES,
+  WORKERS_PAID_EXPORT_MAX_ROWS,
+  exportLimitsForProfile,
+  workerExportSweepBatchLimit,
+} from '../../src/shared/export-policy.js';
+import {
+  WORKER_ERASURE_STORAGE_BUDGET,
+  WORKER_PAID_ERASURE_STORAGE_BUDGET,
+  workerErasureStorageBudget,
+} from '../../src/services/community-erasure.service.js';
+import {
+  D1_FREE_DAILY_ROWS_WRITTEN,
+  D1_PAID_INCLUDED_ROWS_WRITTEN,
+  d1RowsWrittenBudget,
+} from '../../src/migration/v2/load.js';
+import {
+  ImportsService,
+  WORKER_FREE_DAILY_IMPORT_LIMIT,
+  WORKER_PAID_DAILY_IMPORT_LIMIT,
+  workerDailyImportLimit,
+} from '../../src/services/imports.service.js';
+import type { ImportsRepository } from '../../src/repositories/imports.repository.js';
+import type { FoundationStorage } from '../../src/services/hono-foundation.service.js';
 
 /** A valid production origin for the happy paths. */
 const okOrigin = 'https://api.terrastories.org';
@@ -807,6 +849,211 @@ describe('V2 runtime configuration gate (#150)', () => {
         BOOTSTRAP_SECRET: paddedValid,
       });
       expect(nodeConfig.bootstrapSecret).toBe(okBootstrapSecret);
+    });
+  });
+
+  describe('Workers: WORKERS_PLAN and plan-switched constants (#295)', () => {
+    const bindings = {
+      DB: {},
+      MEDIA: {},
+    } as unknown as Parameters<typeof validateWorkerV2Runtime>[0];
+
+    it('defaults WORKERS_PLAN to free when unset or empty', () => {
+      expect(KNOWN_WORKERS_PLANS).toEqual(['free', 'paid']);
+      expect(parseWorkersPlan(undefined)).toBe('free');
+      expect(parseWorkersPlan('')).toBe('free');
+      expect(
+        validateWorkerV2Runtime({
+          ...bindings,
+          ENVIRONMENT: 'test',
+        }).workersPlan
+      ).toBe('free');
+      expect(
+        validateWorkerV2Runtime({
+          ...bindings,
+          ENVIRONMENT: 'test',
+          WORKERS_PLAN: '',
+        }).workersPlan
+      ).toBe('free');
+    });
+
+    it('accepts explicit free and paid WORKERS_PLAN values', () => {
+      for (const WORKERS_PLAN of ['free', 'paid'] as const) {
+        expect(parseWorkersPlan(WORKERS_PLAN)).toBe(WORKERS_PLAN);
+        const config = validateWorkerV2Runtime({
+          ...bindings,
+          PUBLIC_ORIGIN: okOrigin,
+          AUTH_SERVER_SECRET: okSecret,
+          BOOTSTRAP_SECRET: okBootstrapSecret,
+          WORKERS_PLAN,
+        });
+        expect(config.workersPlan).toBe(WORKERS_PLAN);
+      }
+    });
+
+    it.each(['enterprise', 'FREE', 'PAID', ' free ', 'paid ', 'true', '1'])(
+      'fails closed on invalid WORKERS_PLAN=%s without echoing the value',
+      (invalidPlan) => {
+        const parseErr = refusal(() => parseWorkersPlan(invalidPlan));
+        expect(parseErr.message).toContain('WORKERS_PLAN');
+        expect(parseErr.message).toContain('must be one of free, paid');
+        if (!['free', 'paid'].includes(invalidPlan.trim().toLowerCase())) {
+          expect(parseErr.message).not.toContain(invalidPlan);
+        }
+
+        const workerErr = refusal(() =>
+          validateWorkerV2Runtime({
+            ...bindings,
+            ENVIRONMENT: 'test',
+            WORKERS_PLAN: invalidPlan,
+          })
+        );
+        expect(workerErr.message).toContain('WORKERS_PLAN');
+        expect(workerErr.message).toContain('must be one of free, paid');
+      }
+    );
+
+    it('preserves Free constants by default and switches each constant on paid', () => {
+      // 1. Media cleanup orphan sweep subrequest budget
+      expect(WORKER_SWEEP_SUBREQUEST_BUDGET).toBe(40);
+      expect(WORKER_PAID_SWEEP_SUBREQUEST_BUDGET).toBe(1000);
+      expect(workerSweepSubrequestBudget()).toBe(40);
+      expect(workerSweepSubrequestBudget('free')).toBe(40);
+      expect(workerSweepSubrequestBudget('paid')).toBe(1000);
+
+      // 2. Community export limits & sweep batch limit
+      expect(WORKERS_EXPORT_MAX_ROWS).toBe(10_000);
+      expect(WORKERS_EXPORT_MAX_FILES).toBe(30);
+      expect(WORKERS_EXPORT_MAX_MEDIA_BYTES).toBe(50 * 1024 * 1024);
+      expect(WORKERS_EXPORT_MAX_ARCHIVE_BYTES).toBe(64 * 1024 * 1024);
+      expect(WORKERS_PAID_EXPORT_MAX_ROWS).toBe(100_000);
+      expect(WORKERS_PAID_EXPORT_MAX_FILES).toBe(1_000);
+      expect(WORKERS_PAID_EXPORT_MAX_MEDIA_BYTES).toBe(500 * 1024 * 1024);
+      expect(WORKERS_PAID_EXPORT_MAX_ARCHIVE_BYTES).toBe(512 * 1024 * 1024);
+
+      expect(exportLimitsForProfile(true)).toEqual({
+        maxRows: 10_000,
+        maxFiles: 30,
+        maxMediaBytes: 50 * 1024 * 1024,
+        maxArchiveBytes: 64 * 1024 * 1024,
+        maxManifestBytes: 8 * 1024 * 1024,
+      });
+      expect(exportLimitsForProfile(true, 'free')).toEqual(
+        exportLimitsForProfile(true)
+      );
+      expect(exportLimitsForProfile(true, 'paid')).toEqual({
+        maxRows: 100_000,
+        maxFiles: 1_000,
+        maxMediaBytes: 500 * 1024 * 1024,
+        maxArchiveBytes: 512 * 1024 * 1024,
+        maxManifestBytes: 8 * 1024 * 1024,
+      });
+
+      // Node/self-hosted profiles are unaffected regardless of plan
+      const expectedNodeLimits = {
+        maxRows: Number.MAX_SAFE_INTEGER,
+        maxFiles: Number.MAX_SAFE_INTEGER,
+        maxMediaBytes: NODE_EXPORT_MAX_ARCHIVE_BYTES,
+        maxArchiveBytes: NODE_EXPORT_MAX_ARCHIVE_BYTES,
+        maxManifestBytes: 64 * 1024 * 1024,
+      };
+      expect(exportLimitsForProfile(false)).toEqual(expectedNodeLimits);
+      expect(exportLimitsForProfile(false, 'free')).toEqual(expectedNodeLimits);
+      expect(exportLimitsForProfile(false, 'paid')).toEqual(expectedNodeLimits);
+
+      expect(WORKER_EXPORT_SWEEP_BATCH_LIMIT).toBe(5);
+      expect(WORKER_PAID_EXPORT_SWEEP_BATCH_LIMIT).toBe(
+        EXPORT_SWEEP_BATCH_LIMIT
+      );
+      expect(workerExportSweepBatchLimit()).toBe(5);
+      expect(workerExportSweepBatchLimit('free')).toBe(5);
+      expect(workerExportSweepBatchLimit('paid')).toBe(20);
+
+      // 3. Community erasure storage budget
+      expect(WORKER_ERASURE_STORAGE_BUDGET).toBe(15);
+      expect(WORKER_PAID_ERASURE_STORAGE_BUDGET).toBe(500);
+      expect(workerErasureStorageBudget()).toBe(15);
+      expect(workerErasureStorageBudget('free')).toBe(15);
+      expect(workerErasureStorageBudget('paid')).toBe(500);
+
+      // 4. Migration load D1 rows-written budget
+      expect(D1_FREE_DAILY_ROWS_WRITTEN).toBe(100_000);
+      expect(D1_PAID_INCLUDED_ROWS_WRITTEN).toBe(50_000_000);
+      expect(d1RowsWrittenBudget()).toBe(100_000);
+      expect(d1RowsWrittenBudget('free')).toBe(100_000);
+      expect(d1RowsWrittenBudget('paid')).toBe(50_000_000);
+
+      // 5. Daily committed imports limit on D1
+      expect(WORKER_FREE_DAILY_IMPORT_LIMIT).toBe(1);
+      expect(WORKER_PAID_DAILY_IMPORT_LIMIT).toBeNull();
+      expect(workerDailyImportLimit()).toBe(1);
+      expect(workerDailyImportLimit('free')).toBe(1);
+      expect(workerDailyImportLimit('paid')).toBeNull();
+    });
+
+    it('keeps 429 d1_daily_import_limit on Free and disables the daily cap on Paid in ImportsService', async () => {
+      const fakeRepo = {
+        connection: {},
+        hasD1Batch: () => true,
+        activeCommunityExists: async () => true,
+        hasCommittedImportInWindow: async () => true,
+        countOpenPreviews: async () => 0,
+      } as unknown as ImportsRepository;
+      const fakeStorage: FoundationStorage = {
+        read: async () => null,
+        put: async () => ({ size: 0 }),
+        delete: async () => {},
+      };
+      const fakeCleanup = {
+        deleteStorageBestEffort: async () => {},
+        deleteFilesBestEffort: async () => {},
+      } as unknown as MediaCleanupCoordinator;
+      const actor = {
+        id: 1,
+        email: 'admin@community.local',
+        username: 'admin',
+        displayName: 'Admin',
+        role: 'admin',
+        communityId: 1,
+      };
+
+      const freeService = new ImportsService(
+        fakeRepo,
+        fakeStorage,
+        fakeCleanup,
+        {
+          enforceD1Budget: true,
+          workersPlan: 'free',
+        }
+      );
+      const freePreview = await freeService.previewImport({
+        actor,
+        contentTypeHeader: 'multipart/form-data; boundary=---x',
+        contentLengthHeader: '10',
+        body: null,
+      });
+      expect(freePreview.status).toBe(429);
+      expect(freePreview.body).toMatchObject({
+        code: 'd1_daily_import_limit',
+      });
+
+      const paidService = new ImportsService(
+        fakeRepo,
+        fakeStorage,
+        fakeCleanup,
+        {
+          enforceD1Budget: true,
+          workersPlan: 'paid',
+        }
+      );
+      const paidPreview = await paidService.previewImport({
+        actor,
+        contentTypeHeader: 'multipart/form-data; boundary=---x',
+        contentLengthHeader: '10',
+        body: null,
+      });
+      // Proceeds past the daily limit check to multipart validation (400 for null body).
+      expect(paidPreview.status).toBe(400);
     });
   });
 });

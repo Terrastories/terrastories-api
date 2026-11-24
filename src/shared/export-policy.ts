@@ -7,6 +7,8 @@
  * storage-key layouts.
  */
 
+import type { WorkersPlan } from '../config/v2-runtime.js';
+
 /** Export manifest format version (§7). */
 export const COMMUNITY_EXPORT_FORMAT_VERSION = '2.0';
 
@@ -52,6 +54,32 @@ export const WORKERS_EXPORT_MAX_FILES = 30;
 export const WORKERS_EXPORT_MAX_MEDIA_BYTES = 50 * 1024 * 1024; // 50 MiB
 export const WORKERS_EXPORT_MAX_ARCHIVE_BYTES = 64 * 1024 * 1024; // 64 MiB
 
+/**
+ * Workers Paid export feasibility limits (docs/WORKERS-PAID-PROFILE.md §2, §3 step 6):
+ * TODO(SPEC-V2 §5, §7 Export): inert unless WORKERS_PLAN=paid after SPEC-V2 §5 and §7 are amended to state per-plan caps.
+ *
+ * - WORKERS_PAID_EXPORT_MAX_ROWS (100,000): Paid raises CPU per request from
+ *   10 ms to 30 s default (up to 5 min) and D1 rows read from 5M/day to
+ *   25B/month included, while isolate memory remains 128 MB; 100k rows (10x
+ *   Free) fits inside the unchanged 128 MB isolate memory and 8 MiB manifest cap.
+ * - WORKERS_PAID_EXPORT_MAX_FILES (1,000): Paid raises subrequests per
+ *   invocation from 50 to 10,000 default (internal services R2/D1 included) and
+ *   D1 queries to 1,000; 1,000 R2 object reads plus ~105 multipart ZIP upload
+ *   parts and ~20 D1 snapshot queries (~1,125 subrequests) stays ~9x below the
+ *   10,000 subrequest default.
+ * - WORKERS_PAID_EXPORT_MAX_MEDIA_BYTES (500 MiB): Paid provides 30 s CPU and
+ *   10,000 subrequests while keeping the 128 MB isolate memory cap; because the
+ *   ZIP streams through 5 MiB R2 multipart upload parts without full-archive
+ *   buffering, 500 MiB uses ~100 uploadPart subrequests and a 5 MiB buffer.
+ * - WORKERS_PAID_EXPORT_MAX_ARCHIVE_BYTES (512 MiB): 500 MiB media allowance
+ *   plus 12 MiB headroom for deterministic ZIP headers across up to 1,000 files,
+ *   streamed in 5 MiB R2 multipart parts (~103 parts << 10,000 subrequests).
+ */
+export const WORKERS_PAID_EXPORT_MAX_ROWS = 100_000;
+export const WORKERS_PAID_EXPORT_MAX_FILES = 1_000;
+export const WORKERS_PAID_EXPORT_MAX_MEDIA_BYTES = 500 * 1024 * 1024; // 500 MiB
+export const WORKERS_PAID_EXPORT_MAX_ARCHIVE_BYTES = 512 * 1024 * 1024; // 512 MiB
+
 /** Node self-hosted / field-kit archive bound (ZIP32 safe ceiling, 2 GiB). */
 export const NODE_EXPORT_MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024;
 
@@ -59,6 +87,23 @@ export const NODE_EXPORT_MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024;
 export const EXPORT_SWEEP_BATCH_LIMIT = 20;
 /** Smaller per-tick batch for Workers Free scheduled crons (50-subrequest cap). */
 export const WORKER_EXPORT_SWEEP_BATCH_LIMIT = 5;
+/**
+ * Workers Paid per-tick export expiry sweep batch limit (docs/WORKERS-PAID-PROFILE.md §2):
+ * Paid raises cron subrequests to 10,000, D1 queries to 1,000, and cron CPU to
+ * 30 s default. Reclaiming 20 expired exports per minute tick (~120 subrequests,
+ * ~60 D1 queries) matches EXPORT_SWEEP_BATCH_LIMIT while using < 2% of Paid's
+ * subrequest budget and < 10% of Paid's D1 query budget.
+ * TODO(SPEC-V2 §5, §7 Export): inert unless WORKERS_PLAN=paid after SPEC-V2 §5 and §7 are amended.
+ */
+export const WORKER_PAID_EXPORT_SWEEP_BATCH_LIMIT = EXPORT_SWEEP_BATCH_LIMIT;
+
+export function workerExportSweepBatchLimit(
+  plan: WorkersPlan = 'free'
+): number {
+  return plan === 'paid'
+    ? WORKER_PAID_EXPORT_SWEEP_BATCH_LIMIT
+    : WORKER_EXPORT_SWEEP_BATCH_LIMIT;
+}
 
 /** Content-free AuditEntry actions emitted across the export lifecycle (§7). */
 export const EXPORT_AUDIT_ACTIONS = {
@@ -94,13 +139,21 @@ export interface ExportRateLimits {
   maxPerAccount: number;
 }
 
-export function exportLimitsForProfile(isWorkers: boolean): ExportLimits {
+export function exportLimitsForProfile(
+  isWorkers: boolean,
+  plan: WorkersPlan = 'free'
+): ExportLimits {
   if (isWorkers) {
+    const paid = plan === 'paid';
     return {
-      maxRows: WORKERS_EXPORT_MAX_ROWS,
-      maxFiles: WORKERS_EXPORT_MAX_FILES,
-      maxMediaBytes: WORKERS_EXPORT_MAX_MEDIA_BYTES,
-      maxArchiveBytes: WORKERS_EXPORT_MAX_ARCHIVE_BYTES,
+      maxRows: paid ? WORKERS_PAID_EXPORT_MAX_ROWS : WORKERS_EXPORT_MAX_ROWS,
+      maxFiles: paid ? WORKERS_PAID_EXPORT_MAX_FILES : WORKERS_EXPORT_MAX_FILES,
+      maxMediaBytes: paid
+        ? WORKERS_PAID_EXPORT_MAX_MEDIA_BYTES
+        : WORKERS_EXPORT_MAX_MEDIA_BYTES,
+      maxArchiveBytes: paid
+        ? WORKERS_PAID_EXPORT_MAX_ARCHIVE_BYTES
+        : WORKERS_EXPORT_MAX_ARCHIVE_BYTES,
       maxManifestBytes: 8 * 1024 * 1024,
     };
   }

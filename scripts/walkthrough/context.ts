@@ -10,6 +10,8 @@ import {
 } from './kdf.js';
 import { dig, type Walk } from './walk.js';
 
+export type WorkersPlan = 'free' | 'paid';
+
 export interface Config {
   baseUrl: string;
   /**
@@ -30,9 +32,14 @@ export interface Config {
   /**
    * The target is a Cloudflare D1 database (a Worker deployment): one committed
    * import per UTC day for the whole database. The import chapter then commits
-   * once and asserts the refusal of the second. Set by --d1 (or WT_D1=1).
+   * once and asserts the refusal of the second on Workers Free. Set by --d1 (or WT_D1=1).
    */
   d1?: boolean;
+  /**
+   * Workers plan for `--d1` runs (`'free'` or `'paid'`, default `'free'`).
+   * Set by `--workers-plan`.
+   */
+  workersPlan?: WorkersPlan;
 }
 
 /** The disposable community every mutating chapter runs in. */

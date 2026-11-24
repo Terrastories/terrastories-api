@@ -3,7 +3,7 @@
 Status: draft for review. Offline authoring: no Cloudflare or Heroku call was made to write it, and none of the numbers below were re-measured here. Contract: [SPEC-V2 §10](./SPEC-V2.md) and §13 step 9, maintenance-window cutover only (#197). Migration mechanics: [RAILS-MIGRATION.md](./RAILS-MIGRATION.md). Staging background: [CLOUDFLARE-STAGING.md](./CLOUDFLARE-STAGING.md).
 
 Source: Heroku app `terrastories`, Heroku Postgres essential-1 (PG17), ActiveStorage on S3 `us-east-2`, about 30 GB media, 89 communities, 289 users.
-Target: Cloudflare Workers Free + D1 + R2.
+Target: Cloudflare Workers (Free default, or Workers Paid per section 5 "Workers Paid go-live") + D1 + R2.
 
 **Markers.** Every step that is destructive, outward-facing (users see it), spends money, or touches production is tagged **REQUIRES HUMAN APPROVAL**. An agent or script must stop at that tag and ask a person. Nothing in this runbook authorises it by itself.
 
@@ -125,7 +125,7 @@ Owner decision and any payment method change: **REQUIRES HUMAN APPROVAL**. Recor
 
 ### B. Workers Free CPU
 
-Upload routes must stay within the Free CPU budget (about 10 ms per invocation). If section 5 measurements fail, the options are Workers Paid or a design change; either needs approval. The Workers Paid switch plan (triggers, config, cost, rollback) is in [`WORKERS-PAID-PROFILE.md`](WORKERS-PAID-PROFILE.md).
+Upload routes must stay within the Free CPU budget (about 10 ms per invocation). If section 5 measurements fail, the options are Workers Paid or a design change; either needs approval. The Workers Paid switch plan (triggers, config, cost, rollback) is in [`WORKERS-PAID-PROFILE.md`](WORKERS-PAID-PROFILE.md); the operator checklist is under [Workers Paid go-live](#workers-paid-go-live) in section 5.
 
 ## 5. Go/no-go checklist
 
@@ -148,9 +148,60 @@ All must be true on the final rehearsal, with evidence attached. A single NO is 
 - [ ] V2 frontend accepted (section 0), custom domain access confirmed, community approvals and custodians recorded, Mapbox notice sent.
 - [ ] Rollback rehearsed (section 9) and the Heroku DB and S3 confirmed intact.
 
+### Workers Paid go-live
+
+Use this checklist when deploying production on the Workers Paid profile (`SPEC-V2.md` §5, §7, §12; [`WORKERS-PAID-PROFILE.md`](WORKERS-PAID-PROFILE.md)).
+
+1. **Subscribe the production account to Workers Paid.** **REQUIRES HUMAN APPROVAL** (payment method). Subscribe only the production Cloudflare account. Staging stays on its separate Workers Free account, so staging cannot rehearse Paid limits. The first Paid CPU measurement happens on the production deployment before it serves communities. Export the production 32-hex `CLOUDFLARE_ACCOUNT_ID` and confirm with `env -u CLOUDFLARE_API_TOKEN npx wrangler whoami`.
+2. **Fill `env.production` in `wrangler.jsonc` and validate it.** Copy the `env.production` block from `scripts/production/wrangler.env.production.example.jsonc` into `wrangler.jsonc` under `env`. Keep `limits` inside `env.production`, never at the top level (`limits` is inheritable and would break `env.staging` on Free). Replace every `REPLACE-WITH-PROD-*` placeholder (`name`, `DB` `database_name` and `database_id`, `MEDIA` and distinct `ERASURE_RECORDS` bucket names, `vars.PUBLIC_ORIGIN`, `vars.R2_BUCKET_NAME`). Add `"WORKERS_PLAN": "paid"` under `env.production.vars` (unset defaults to `"free"` in `src/config/v2-runtime.ts`). Set `env.production.limits` to `{ "cpu_ms": 30000 }` (the Paid default; leave `limits.subrequests` unset for the 10,000 default). Keep `triggers.crons` as `["0 * * * *", "* * * * *", "*/1 * * * *"]` and keep `ENVIRONMENT` unset. Run both config guards and the deploy dry run:
+
+   ```bash
+   npx --no-install tsx scripts/staging/guards.ts prod-config wrangler.jsonc paid
+   npx --no-install tsx scripts/staging/guards.ts config wrangler.jsonc free
+   env -u CLOUDFLARE_API_TOKEN npx wrangler deploy --env production --dry-run
+   ```
+
+3. **Provision with `WORKERS_PLAN=paid` (and what `scripts/staging/provision.sh` refuses).** `scripts/staging/provision.sh` is staging-only and refuses production runs for two reasons: `assertStagingName` rejects any name without the `terrastories-staging-` prefix, and running `WORKERS_PLAN=paid scripts/staging/provision.sh` fails at `guard config wrangler.jsonc paid` (`assertStagingConfig` in `scripts/staging/guards.ts`) because `env.staging` stays Free with no `limits.cpu_ms` (`resolve_workers_plan` in `scripts/staging/lib.sh` also refuses empty or unknown values). Create the production D1 database (`DB`), `MEDIA` R2 bucket, and dedicated `ERASURE_RECORDS` R2 bucket (no lifecycle expiration rule, excluded from backups) by hand with `wrangler d1 create` and `wrangler r2 bucket create` (**REQUIRES HUMAN APPROVAL**). Configure `MEDIA` CORS (`PUT`, `x-amz-content-sha256`, expose `ETag`, `maxAgeSeconds >= 3600`, exact frontend origin) and the 1-day abort-incomplete-multipart lifecycle rule by hand. Then verify the Paid cron and D1 budgets (`1,000` crons per account, 90% of `10 GB` D1) and confirm `version: production` for Time Travel:
+
+   ```bash
+   npx --no-install tsx scripts/staging/guards.ts crons wrangler.jsonc production 0 paid
+   env -u CLOUDFLARE_API_TOKEN npx wrangler d1 info <prod-db-name> --json --config wrangler.jsonc \
+     | npx --no-install tsx scripts/staging/guards.ts d1-size --json paid
+   ```
+
+4. **Set secrets and deploy.** Set every production secret by hand (`env -u CLOUDFLARE_API_TOKEN npx wrangler secret put <NAME> --env production` for `AUTH_SERVER_SECRET`, `BOOTSTRAP_SECRET`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and optional `MAPBOX_ACCESS_TOKEN`) and confirm with `env -u CLOUDFLARE_API_TOKEN npx wrangler secret list --env production`. Apply D1 migrations and deploy (**REQUIRES HUMAN APPROVAL**):
+
+   ```bash
+   env -u CLOUDFLARE_API_TOKEN npx wrangler d1 migrations apply <prod-db-name> --remote --env production
+   env -u CLOUDFLARE_API_TOKEN npx wrangler deploy --env production
+   ```
+
+   Verify `GET /health` returns `200` and `GET` and `HEAD /dev/seed` return `404` before attaching `our.terrastories.app` or serving communities.
+
+5. **Run the CPU procedure against the Paid deployment and check `SPEC-V2.md` §12 Paid gates.** Print the Paid steps with `WORKERS_PLAN=paid scripts/staging/smoke.sh --cpu-procedure`. Note that `scripts/staging/smoke.sh` and `scripts/staging/upload-large.ts` refuse `our.terrastories.app` via `assertStagingUrl` in `scripts/staging/guards.ts`; on a pre-cutover production URL, either pass `STAGING_ALLOW_HOST=<host>` to `upload-large.ts` or run the curl calls directly with credentials kept out of the repo. Stream logs from the production Worker while exercising the 90 MB raw `POST /v2/media` upload (no `role` param), the 300 MB multipart `/v2/media/uploads` flow (`create`, parts, `complete`, `DELETE`), every #295 route (`login`, `claim`, `story write`, `POST /v2/community/export` and artifact download), and one erasure in a throwaway production community:
+
+   ```bash
+   env -u CLOUDFLARE_API_TOKEN npx wrangler tail <prod-worker-name> --format json > cpu-tail.json
+   # run the route and erasure calls in another terminal, then stop the tail
+   node scripts/staging/parse-tail.mjs cpu-tail.json
+   ```
+
+   Pass gates (`SPEC-V2.md` §12): **zero `exceededCpu` outcomes** across all measured routes and crons, and **p99 `cpuTime` per route under half of `limits.cpu_ms`** (under `15,000 ms` at `30,000 ms`). Record route, size, p50/p99 `cpuTime`, `wallTime`, and outcome in the operator-private evidence sheet. Lower `env.production.limits.cpu_ms` to about `5x` the slowest route's measured p99, redeploy with `--env production`, and rerun this check before cutover.
+
+6. **Run export, erasure, and 31-day notice checks.**
+   - _Interim export caps:_ With `WORKERS_PLAN=paid`, `src/shared/export-policy.ts` keeps the Free export ceilings (`WORKERS_PAID_EXPORT_MAX_ROWS = 10_000`, `WORKERS_PAID_EXPORT_MAX_FILES = 30`, `WORKERS_PAID_EXPORT_MAX_MEDIA_BYTES = 50 MiB`, `WORKERS_PAID_EXPORT_MAX_ARCHIVE_BYTES = 64 MiB`); exceeding any cap fails closed with `422`. The minute export-expiry cron batch (`workerExportSweepBatchLimit`) rises from `5` to `20`.
+   - _Erasure pass budgets:_ `src/services/community-erasure.service.ts` sets `WORKER_PAID_ERASURE_STORAGE_BUDGET = 400`, `WORKER_PAID_ERASURE_D1_BUDGET = 400`, and `ERASURE_PASS_MAX_WALL_MS = 45_000` on the `*/1 * * * *` cron, and `src/services/media-cleanup.service.ts` raises `WORKER_PAID_SWEEP_SUBREQUEST_BUDGET` to `1000` on the hourly cron (`0 * * * *`). Confirm `ERASURE_RECORDS` is bound and the throwaway erasure finishes inside 24 hours.
+   - _31-day worst-case erasure bound:_ On Paid, D1 Time Travel keeps 30 days from when each `DELETE` lands. Live deletion finishes within 24 hours of request `T` (`C <= T + 24 h`), so deleted rows stay recoverable in Time Travel until `C + 30 days` — up to **31 days** after `T` (`SPEC-V2.md` §7 Backups). **Tell every community hosted on Workers Paid this 31-day worst-case bound** (**REQUIRES HUMAN APPROVAL**). Restore refusal and `CommunityErasureService.verifyRestorePoint` / `reconcileRestore` rules (section 9.3) stay unchanged.
+7. **Keep the one-import-per-UTC-day guard.** In `src/services/imports.service.ts`, `WORKER_PAID_DAILY_IMPORT_LIMIT` stays `1` (`429 d1_daily_import_limit`). Both the precheck and atomic commit guard remain active on Paid until `SPEC-V2.md` §4, §5, and §7 add a Paid import rate policy. Do not schedule two committed CSV imports on the same UTC day, and pass `--workers-plan paid` when running `npm run walkthrough -- --base-url <url> --d1 --workers-plan paid --super-credentials-env` (which skips the Free-only second-import `429` assertions in `scripts/walkthrough/chapters/editor.ts`; omit `--allow-destructive` once real data is loaded). Note `d1RowsWrittenBudget('paid')` in `src/migration/v2/load.ts` uses `D1_PAID_INCLUDED_ROWS_WRITTEN = 50_000_000`.
+8. **When and how to raise the export caps.** Workers Paid keeps the **128 MB isolate memory limit**; D1 materializes snapshot rows in memory while ZIP streaming buffers a 5 MiB multipart chunk with two SHA-256 passes and CRC32. Raise the interim caps only when a real community exceeds them and the self-hosted/field-kit profile is not acceptable: (a) measure isolate memory and CPU on a Paid deployment at the target row, file, and byte sizes without hitting error `1102`, (b) update `WORKERS_PAID_EXPORT_MAX_*` in `src/shared/export-policy.ts` with tests, and (c) amend `docs/SPEC-V2.md` (§7 and §12) in the same change.
+9. **Rollback.**
+   - _Roll back Worker version only:_ Redeploy the prior commit with `env -u CLOUDFLARE_API_TOKEN npx wrangler deploy --env production` (or revert to the prior recorded Worker version). A code rollback does not undo D1 writes or R2 changes; use section 9.3 Time Travel and erasure reconciliation for database state.
+   - _Switch `WORKERS_PLAN=free` (keep Paid account or prepare downgrade):_ Set `"WORKERS_PLAN": "free"` (or remove it) in `wrangler.jsonc` `env.production.vars` and redeploy. In `src/worker.ts` and `src/services/*`, this drops `workerSweepSubrequestBudget` from `1000` to `40`, `workerExportSweepBatchLimit` from `20` to `5`, `workerErasureStorageBudget` from `400` to `15`, unsets `workerErasureD1Budget` and the `45_000 ms` erasure wall deadline, and drops `d1RowsWrittenBudget` in `src/migration/v2/load.ts` from `50_000_000` to `100_000` when `WORKERS_PLAN` is unset/`free`. Export caps and the 1/UTC-day import limit stay unchanged.
+   - _Downgrade the Cloudflare account to Free (**REQUIRES HUMAN APPROVAL**):_ First verify every D1 database is under `500 MB`, account D1 storage is under `5 GB`, at most `10` D1 databases exist, total account crons are at most `5`, and Free CPU fixes hold (otherwise `1102` returns). Remove `env.production.limits` (Free refuses `limits`), set `WORKERS_PLAN` to `"free"`, run `npx --no-install tsx scripts/staging/guards.ts prod-config wrangler.jsonc free`, redeploy with `--env production`, and downgrade the Cloudflare plan last. Downgrading reduces D1 Time Travel retention from `30` days to `7` days.
+
 ## 6. Production resources (create-only; before the window)
 
-Production D1 and R2 names do not use the staging prefix, so the staging scripts will not touch them. Create them by hand after the go decision, including a **production `ERASURE_RECORDS` R2 bucket** (a dedicated bucket, no lifecycle expiration rule, excluded from backups, never restored or copied with D1/MEDIA; without it erasure answers 503): **REQUIRES HUMAN APPROVAL**. **Cron limit:** Workers Free allows 5 cron triggers per account. The Worker dispatches 3 exact crons (`0 * * * *`, `* * * * *`, `*/1 * * * *`), staging holds 3, production needs 3, so 6 > 5. Before deploying production, redeploy staging with its `triggers.crons` emptied (or delete the staging Worker after the rehearsal is closed; deletion **REQUIRES HUMAN APPROVAL**), or take a paid decision. Never run production without all three crons: the `*/1` entry is the erasure retry. Use the top-level `wrangler.jsonc` block with real ids, set production secrets (section 2.3), configure bucket CORS and lifecycle by hand with the same values as section 2.4 (the kit only ever touches `terrastories-staging-*`), and deploy the Worker without a route. Confirm that `PUBLIC_ORIGIN` is the final custom origin, not `https://example.org` (the Worker returns `503 config-refused` otherwise). Run the production dry-run: `npx wrangler deploy --dry-run`.
+Production D1 and R2 names do not use the staging prefix, so the staging scripts will not touch them. Create them by hand after the go decision, including a **production `ERASURE_RECORDS` R2 bucket** (a dedicated bucket, no lifecycle expiration rule, excluded from backups, never restored or copied with D1/MEDIA; without it erasure answers 503): **REQUIRES HUMAN APPROVAL**. **Cron limit:** Workers Free allows 5 cron triggers per account. The Worker dispatches 3 exact crons (`0 * * * *`, `* * * * *`, `*/1 * * * *`), staging holds 3, production needs 3, so 6 > 5. Before deploying production on Free, redeploy staging with its `triggers.crons` emptied (or delete the staging Worker after the rehearsal is closed; deletion **REQUIRES HUMAN APPROVAL**), or use the Workers Paid profile (section 5, "Workers Paid go-live"). Never run production without all three crons: the `*/1` entry is the erasure retry. On Free, use the top-level `wrangler.jsonc` block with real ids; on Paid, use `env.production` from `scripts/production/wrangler.env.production.example.jsonc` with `--env production`. Set production secrets (section 2.3), configure bucket CORS and lifecycle by hand with the same values as section 2.4 (the kit only ever touches `terrastories-staging-*`), and deploy the Worker without a route. Confirm that `PUBLIC_ORIGIN` is the final custom origin, not `https://example.org` (the Worker returns `503 config-refused` otherwise). Run the production dry-run: `npx wrangler deploy --dry-run` (or `--env production --dry-run` on Paid).
 
 ## 7. Maintenance window (blocked on frontend, section 0)
 
@@ -192,7 +243,7 @@ After DNS switch, within the retention window:
    3. `wrangler d1 time-travel restore <db> --bookmark=<id>` (destructive, overwrites the database).
    4. Before serving: `CommunityErasureService.reconcileRestore(targetTimestamp, now)` re-applies every retained erasure (objects, multipart uploads, rows, sessions). A failure keeps the deployment closed.
    5. Verify D1 and R2 agree, then lift the hold and reopen.
-      The `ERASURE_RECORDS` bucket is never restored, rotated or copied with D1 or MEDIA. Time Travel keeps 7 days on Free. **REQUIRES HUMAN APPROVAL.**
+      The `ERASURE_RECORDS` bucket is never restored, rotated or copied with D1 or MEDIA. Time Travel keeps 7 days on Free and 30 days on Paid (see section 5 "Workers Paid go-live" step 9 for Paid rollback). **REQUIRES HUMAN APPROVAL.**
 4. A Worker code rollback does not undo database writes (CLOUDFLARE-STAGING.md, "Teardown and rollback").
 
 ## 10. Known gaps

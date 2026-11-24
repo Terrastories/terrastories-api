@@ -27,6 +27,7 @@ import {
   assertD1Size,
   assertMediaBucket,
   assertPlanLimits,
+  assertProductionConfig,
   assertStagingConfig,
   assertStagingD1Id,
   assertStagingName,
@@ -1721,7 +1722,44 @@ describe('Workers plan-aware guards (free and paid)', () => {
       ).toThrow(GuardError);
     }
 
-    // Non-inheritable keys: bindings, vars and triggers NEVER inherit from top-level
+    // env.staging.limits: null falls back to top-level limits (Wrangler inheritable ?? semantics)
+    const nullFallback = baseConfig();
+    nullFallback.limits = { cpu_ms: 30000 };
+    nullFallback.env.staging.limits = null;
+    expect(resolveEffectiveEnvConfig(nullFallback, 'staging').limits).toEqual({
+      cpu_ms: 30000,
+    });
+    expect(() => assertStagingConfig(nullFallback, 'paid')).not.toThrow();
+    expect(() => assertStagingConfig(nullFallback, 'free')).toThrow(
+      /effective limits block/
+    );
+
+    // Inheritable triggers and derived <root-name>-<env> name in resolveEffectiveEnvConfig
+    const inheritedTriggers = baseConfig();
+    delete inheritedTriggers.env.staging.triggers;
+    expect(
+      resolveEffectiveEnvConfig(inheritedTriggers, 'staging').triggers
+    ).toEqual(inheritedTriggers.triggers);
+    expect(countCrons(inheritedTriggers, 'staging')).toBe(3);
+    // Explicit staging guard still requires env.staging to declare triggers explicitly
+    expect(() => assertStagingConfig(inheritedTriggers, 'free')).toThrow(
+      /crons must be exactly/
+    );
+    // Explicit empty triggers overrides top-level triggers
+    const clearedTriggers = baseConfig();
+    clearedTriggers.env.staging.triggers = { crons: [] };
+    expect(countCrons(clearedTriggers, 'staging')).toBe(0);
+
+    const derivedNameCfg = baseConfig();
+    delete derivedNameCfg.env.staging.name;
+    expect(resolveEffectiveEnvConfig(derivedNameCfg, 'staging').name).toBe(
+      'terrastories-v2-template-staging'
+    );
+    expect(() => assertStagingConfig(derivedNameCfg, 'free')).toThrow(
+      /name is not terrastories-staging-api/
+    );
+
+    // Non-inheritable keys: bindings and vars NEVER inherit from top-level
     const noBindings = baseConfig();
     noBindings.env.staging.limits = { cpu_ms: 30000 };
     noBindings.d1_databases = noBindings.env.staging.d1_databases;
@@ -1885,11 +1923,13 @@ esac
     return { run, calls };
   };
 
-  it('prints the plan in both dry-run and apply modes and rejects invalid WORKERS_PLAN', () => {
+  it('prints the plan in both dry-run and apply modes and rejects invalid or empty WORKERS_PLAN', () => {
     const { run, calls } = setup({});
-    const bad = run({ WORKERS_PLAN: 'enterprise' });
-    expect(bad.status).not.toBe(0);
-    expect(bad.stderr).toMatch(/WORKERS_PLAN must be 'free' or 'paid'/);
+    for (const invalidPlan of ['', 'enterprise']) {
+      const bad = run({ WORKERS_PLAN: invalidPlan });
+      expect(bad.status, JSON.stringify(invalidPlan)).not.toBe(0);
+      expect(bad.stderr).toMatch(/WORKERS_PLAN must be 'free' or 'paid'/);
+    }
     expect(calls()).toBe('');
 
     const dry = run({});
@@ -2006,10 +2046,12 @@ describe('smoke.sh WORKERS_PLAN handling (fake npm)', () => {
       },
     });
 
-  it('rejects invalid WORKERS_PLAN values', () => {
-    const r = run(['--cpu-procedure'], { WORKERS_PLAN: 'pro' });
-    expect(r.status).not.toBe(0);
-    expect(r.stderr).toMatch(/WORKERS_PLAN must be 'free' or 'paid'/);
+  it('rejects invalid or empty WORKERS_PLAN values', () => {
+    for (const invalidPlan of ['', 'pro']) {
+      const r = run(['--cpu-procedure'], { WORKERS_PLAN: invalidPlan });
+      expect(r.status, JSON.stringify(invalidPlan)).not.toBe(0);
+      expect(r.stderr).toMatch(/WORKERS_PLAN must be 'free' or 'paid'/);
+    }
   });
 
   it('keeps cpu_procedure identical on unset vs free and switches pass rule on paid', () => {
@@ -2040,12 +2082,16 @@ describe('smoke.sh WORKERS_PLAN handling (fake npm)', () => {
 });
 
 describe('scripts/production/wrangler.env.production.example.jsonc', () => {
-  it('parses cleanly, matches wrangler.jsonc crons, and passes paid effective-config checks', () => {
+  it('parses cleanly, matches wrangler.jsonc crons, documents preflight, and refuses unreplaced placeholders', () => {
     const examplePath = join(
       ROOT,
       'scripts/production/wrangler.env.production.example.jsonc'
     );
-    const example = parseJsonc(readFileSync(examplePath, 'utf8'));
+    const exampleText = readFileSync(examplePath, 'utf8');
+    expect(exampleText).toContain(
+      'scripts/staging/guards.ts prod-config wrangler.jsonc paid'
+    );
+    const example = parseJsonc(exampleText);
     const mainWrangler = parseJsonc(
       readFileSync(join(ROOT, 'wrangler.jsonc'), 'utf8')
     ) as {
@@ -2054,21 +2100,24 @@ describe('scripts/production/wrangler.env.production.example.jsonc', () => {
     };
 
     const effective = resolveEffectiveEnvConfig(example, 'production');
-    expect(effective.name).toBeTruthy();
+    expect(effective.name).toBe('REPLACE-WITH-PROD-WORKER-NAME');
     expect(
       effective.d1_databases?.find((d) => d.binding === 'DB')
     ).toMatchObject({
       binding: 'DB',
+      database_name: 'REPLACE-WITH-PROD-DB-NAME',
       database_id: 'REPLACE-WITH-PROD-D1-ID',
     });
     expect(
       effective.r2_buckets?.find((b) => b.binding === 'MEDIA')?.bucket_name
-    ).toBeTruthy();
+    ).toBe('REPLACE-WITH-PROD-MEDIA-BUCKET');
     expect(
       effective.r2_buckets?.find((b) => b.binding === 'ERASURE_RECORDS')
         ?.bucket_name
-    ).toBeTruthy();
-    expect(effective.vars?.PUBLIC_ORIGIN).toBeTruthy();
+    ).toBe('REPLACE-WITH-PROD-ERASURE-BUCKET');
+    expect(effective.vars?.PUBLIC_ORIGIN).toBe(
+      'https://REPLACE-WITH-PROD-ORIGIN'
+    );
     expect(effective.vars?.CORS_ORIGINS).toBe('');
     expect(effective.vars?.R2_BUCKET_NAME).toBe(
       effective.r2_buckets?.find((b) => b.binding === 'MEDIA')?.bucket_name
@@ -2078,6 +2127,67 @@ describe('scripts/production/wrangler.env.production.example.jsonc', () => {
       mainWrangler.env?.staging?.triggers?.crons
     );
     expect(effective.limits).toEqual({ cpu_ms: 30000 });
+
+    // Preflight refuses the unedited template because of REPLACE-WITH-PROD-* placeholders
+    expect(() => assertProductionConfig(example, 'paid')).toThrow(
+      /unreplaced placeholder/
+    );
+
+    // Replacing every placeholder passes Paid preflight and fails Free preflight
+    const filledText = exampleText
+      .replaceAll('REPLACE-WITH-PROD-WORKER-NAME', 'terrastories-prod-api')
+      .replaceAll('REPLACE-WITH-PROD-DB-NAME', 'terrastories-prod-db')
+      .replaceAll(
+        'REPLACE-WITH-PROD-D1-ID',
+        '11111111-1111-4111-8111-111111111111'
+      )
+      .replaceAll('REPLACE-WITH-PROD-MEDIA-BUCKET', 'terrastories-prod-media')
+      .replaceAll(
+        'REPLACE-WITH-PROD-ERASURE-BUCKET',
+        'terrastories-prod-erasure-records'
+      )
+      .replaceAll('REPLACE-WITH-PROD-ORIGIN', 'api.terrastories.app');
+    const filled = parseJsonc(filledText);
+    expect(() => assertProductionConfig(filled, 'paid')).not.toThrow();
+    expect(() => assertProductionConfig(filled, 'free')).toThrow(
+      /effective limits block/
+    );
+
+    // Leaving any single placeholder in place is refused by assertProductionConfig
+    const placeholderReplacements: Array<[string, string]> = [
+      ['terrastories-prod-api', 'REPLACE-WITH-PROD-WORKER-NAME'],
+      ['terrastories-prod-db', 'REPLACE-WITH-PROD-DB-NAME'],
+      ['11111111-1111-4111-8111-111111111111', 'REPLACE-WITH-PROD-D1-ID'],
+      ['terrastories-prod-media', 'REPLACE-WITH-PROD-MEDIA-BUCKET'],
+      ['terrastories-prod-erasure-records', 'REPLACE-WITH-PROD-ERASURE-BUCKET'],
+      ['api.terrastories.app', 'REPLACE-WITH-PROD-ORIGIN'],
+    ];
+    for (const [realVal, placeholder] of placeholderReplacements) {
+      const partial = parseJsonc(filledText.replace(realVal, placeholder));
+      expect(
+        () => assertProductionConfig(partial, 'paid'),
+        placeholder
+      ).toThrow(/unreplaced placeholder/);
+    }
+
+    // CLI prod-config refuses the committed template and accepts the filled config
+    const tsx = join(ROOT, 'node_modules/.bin/tsx');
+    const work = mkdtempSync(join(tmpdir(), 'prod-config-cli-'));
+    const filledPath = join(work, 'wrangler-prod.jsonc');
+    writeFileSync(filledPath, filledText);
+    const templateRes = spawnSync(
+      tsx,
+      ['scripts/staging/guards.ts', 'prod-config', examplePath, 'paid'],
+      { cwd: ROOT, encoding: 'utf8' }
+    );
+    expect(templateRes.status).toBe(1);
+    expect(templateRes.stderr).toMatch(/unreplaced placeholder/);
+    const filledRes = spawnSync(
+      tsx,
+      ['scripts/staging/guards.ts', 'prod-config', filledPath, 'paid'],
+      { cwd: ROOT, encoding: 'utf8' }
+    );
+    expect(filledRes.status, filledRes.stderr).toBe(0);
 
     // Effective-config plan validation accepts it for Paid and refuses it for Free
     expect(() =>
@@ -2092,10 +2202,10 @@ describe('scripts/production/wrangler.env.production.example.jsonc', () => {
       ...(mainWrangler as Record<string, unknown>),
       env: {
         ...mainWrangler.env,
-        production: (example as { env: { production: unknown } }).env
-          .production,
+        production: (filled as { env: { production: unknown } }).env.production,
       },
     };
     expect(() => assertStagingConfig(combined, 'free')).not.toThrow();
+    expect(() => assertProductionConfig(combined, 'paid')).not.toThrow();
   });
 });

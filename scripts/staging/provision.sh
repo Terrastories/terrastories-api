@@ -50,10 +50,16 @@ PART_UPLOAD_HEADER="x-amz-content-sha256"
 LIFECYCLE_RULE="terrastories-staging-abort-incomplete-multipart"
 LIFECYCLE_DAYS=1
 
+WRANGLER_CONFIG="$REPO_ROOT/wrangler.jsonc"
+WRANGLER_REDIRECT="$REPO_ROOT/.wrangler/deploy/config.json"
+if [ -e "$WRANGLER_REDIRECT" ] || [ -L "$WRANGLER_REDIRECT" ]; then
+  die "Wrangler deploy config redirect exists: $WRANGLER_REDIRECT"
+fi
+
 guard name "$D1_NAME" "$BUCKET" "$ERASURE_BUCKET" "$WORKER" "$LIFECYCLE_RULE"
-guard config "$REPO_ROOT/wrangler.jsonc"
+guard config "$WRANGLER_CONFIG"
 check_account
-guard crons "$REPO_ROOT/wrangler.jsonc" staging "${OTHER_CRON_TRIGGERS:-0}"
+guard crons "$WRANGLER_CONFIG" staging "${OTHER_CRON_TRIGGERS:-0}"
 need_env STAGING_FRONTEND_ORIGIN
 guard origin "$STAGING_FRONTEND_ORIGIN"
 info "mode: $([ "$APPLY" = 1 ] && echo APPLY || echo DRY-RUN)"
@@ -62,7 +68,7 @@ cd "$REPO_ROOT"
 
 # Existing resources (read-only listings; failures mean "unknown", create anyway
 # would fail loudly, so treat as hard errors).
-d1_list="$(npx wrangler d1 list --json 2>/dev/null)" || die "wrangler d1 list failed"
+d1_list="$(npx wrangler d1 list --json --config "$WRANGLER_CONFIG" 2>/dev/null)" || die "wrangler d1 list failed"
 r2_list="$(npx wrangler r2 bucket list 2>/dev/null)" || die "wrangler r2 bucket list failed"
 
 if printf '%s' "$d1_list" | has_name "$D1_NAME"; then
@@ -136,21 +142,21 @@ else
   fi
 fi
 
-if grep -q 'REPLACE-WITH-STAGING-D1-ID' wrangler.jsonc; then
+if grep -q 'REPLACE-WITH-STAGING-D1-ID' "$WRANGLER_CONFIG"; then
   info "wrangler.jsonc still has the placeholder staging database_id: not deploying the Worker"
   info "after pasting the id and PUBLIC_ORIGIN, rerun: run deploy dry-run below"
-  echo "+ npx wrangler deploy --env staging --dry-run"
+  echo "+ npx wrangler deploy --env staging --config \"$WRANGLER_CONFIG\" --dry-run"
 else
   if [ "$APPLY" = 1 ]; then
-    d1_check_list="$(npx wrangler d1 list --json 2>/dev/null)" \
+    d1_check_list="$(npx wrangler d1 list --json --config "$WRANGLER_CONFIG" 2>/dev/null)" \
       || die "wrangler d1 list failed"
-    printf '%s' "$d1_check_list" | guard d1-id "$REPO_ROOT/wrangler.jsonc"
+    printf '%s' "$d1_check_list" | guard d1-id "$WRANGLER_CONFIG"
     info "D1 database_id verified: wrangler.jsonc env.staging DB matches $D1_NAME in account"
   else
-    echo "+ npx wrangler d1 list --json   (verify env.staging DB database_id matches $D1_NAME)"
+    echo "+ npx wrangler d1 list --json --config \"$WRANGLER_CONFIG\"   (verify env.staging DB database_id matches $D1_NAME)"
   fi
-  run npx wrangler deploy --env staging --dry-run
-  run npx wrangler deploy --env staging
+  run npx wrangler deploy --env staging --config "$WRANGLER_CONFIG" --dry-run
+  run npx wrangler deploy --env staging --config "$WRANGLER_CONFIG"
 fi
 info "secrets by hand, never by this script (npx wrangler secret put <NAME> --env staging): AUTH_SERVER_SECRET BOOTSTRAP_SECRET R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY, optional MAPBOX_ACCESS_TOKEN"
 info "done ($WORKER)"

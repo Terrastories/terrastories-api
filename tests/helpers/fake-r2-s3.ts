@@ -159,6 +159,7 @@ export interface FakeS3Options {
   bucketName: string;
   accessKeyId: string;
   secretAccessKey: string;
+  now?: () => number;
 }
 
 export interface MultipartUploadBucket {
@@ -177,6 +178,7 @@ export interface MultipartUploadBucket {
  * Verify a presigned R2 UploadPart request the way real R2 does (#291):
  * - 501 for any `x-amz-checksum-sha256` header;
  * - SigV4 query signature over `UNSIGNED-PAYLOAD` (403 otherwise);
+ * - 403 AccessDenied for expired URLs;
  * - signed `content-length` and `x-amz-content-sha256` headers;
  * - `x-amz-content-sha256` matched against the body bytes
  *   (400 `XAmzContentSHA256Mismatch` otherwise);
@@ -246,6 +248,23 @@ export async function handleFakeR2PartRequest(
     !(q.get('X-Amz-Credential') ?? '').startsWith(options.accessKeyId + '/')
   ) {
     return { status: 403 };
+  }
+  const signedAt = Date.parse(
+    amzDate.replace(
+      /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/,
+      '$1-$2-$3T$4:$5:$6Z'
+    )
+  );
+  const expires = q.get('X-Amz-Expires') ?? '';
+  const expiresAt = signedAt + Number(expires) * 1000;
+  if (!/^\d+$/.test(expires) || !Number.isFinite(expiresAt)) {
+    return { status: 403 };
+  }
+  if ((options.now ?? Date.now)() > expiresAt) {
+    return {
+      status: 403,
+      body: '<Error><Code>AccessDenied</Code><Message>Request has expired</Message></Error>',
+    };
   }
   if (
     !signedHeaderNames.includes('content-length') ||

@@ -125,7 +125,7 @@ Owner decision and any payment method change: **REQUIRES HUMAN APPROVAL**. Recor
 
 ### B. Workers Free CPU
 
-Upload routes must stay within the Free CPU budget (about 10 ms per invocation). If section 5 measurements fail, the options are Workers Paid or a design change; either needs approval.
+Upload routes must stay within the Free CPU budget (about 10 ms per invocation). If section 5 measurements fail, the options are Workers Paid or a design change; either needs approval. The Workers Paid switch plan (triggers, config, cost, rollback) is in [`WORKERS-PAID-PROFILE.md`](WORKERS-PAID-PROFILE.md).
 
 ## 5. Go/no-go checklist
 

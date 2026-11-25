@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
@@ -33,8 +33,14 @@ type RequestState =
   | 'completed'
   | 'cancelled';
 
+const openDbs: Sqlite.Database[] = [];
+afterEach(() => {
+  while (openDbs.length > 0) openDbs.pop()?.close();
+});
+
 async function setup() {
   const sqlite = new Sqlite(':memory:');
+  openDbs.push(sqlite);
   sqlite.pragma('foreign_keys = ON');
   const db = drizzle(sqlite);
   migrate(db, { migrationsFolder: 'src/db/migrations' });
@@ -62,7 +68,7 @@ async function setup() {
         .sort();
       const entries = keys
         .slice(0, limit)
-        .map((key) => ({ key, size: 1, lastModified: NOW }));
+        .map((key) => ({ key, size: 1, uploaded: NOW }));
       const truncated = keys.length > limit;
       return {
         entries,

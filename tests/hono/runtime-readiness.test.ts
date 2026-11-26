@@ -297,6 +297,21 @@ describe('Node server process', () => {
     expect(output()).toMatch(/AUTH_SERVER_SECRET|HONO_PUBLIC_ORIGIN/);
   }, 120_000);
 
+  it('refuses a partially migrated database (last migration not applied)', async () => {
+    const port = await freePort();
+    const file = migratedDbFile();
+    const sqlite = new Sqlite(file);
+    sqlite
+      .prepare(
+        'DELETE FROM __drizzle_migrations WHERE created_at = (SELECT max(created_at) FROM __drizzle_migrations)'
+      )
+      .run();
+    sqlite.close();
+    const { exited, output } = start(baseEnv(file, port));
+    expect(await exited).toBe(1);
+    expect(output()).toContain('not migrated');
+  }, 120_000);
+
   it('exits non-zero with a clear message when the database is not migrated', async () => {
     const port = await freePort();
     const dir = makeTmpDir();

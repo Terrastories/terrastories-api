@@ -9,6 +9,9 @@ import { serve } from '@hono/node-server';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import { createLocalStorage } from './node-storage.js';
 import { closeDb, getDb } from './db/index.js';
+import { allMigrationsApplied } from './db/migration-status.js';
+import { getMigrationPlan } from './db/migrate.js';
+import { getConfig } from './shared/config/index.js';
 import { withDeadline } from './shared/deadline.js';
 import { createShutdown, trackInFlight } from './node-shutdown.js';
 import { createHonoApp } from './hono-app.js';
@@ -55,6 +58,11 @@ const readinessTimeoutMs = Number(process.env.READINESS_TIMEOUT_MS) || 3000;
 // database is unreachable, instead of serving 503 from /ready forever.
 try {
   await withDeadline(repository.readiness(), readinessTimeoutMs);
+  const migrationsOk = await withDeadline(
+    allMigrationsApplied(db, getMigrationPlan(getConfig().database.url)),
+    readinessTimeoutMs
+  );
+  if (!migrationsOk) throw new Error('migrations pending');
 } catch {
   // eslint-disable-next-line no-console -- startup failure, content-free
   console.error(

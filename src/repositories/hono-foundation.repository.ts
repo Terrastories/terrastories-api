@@ -718,8 +718,7 @@ export class HonoFoundationRepository {
      */
     gates?: { erasurePending: boolean; recoveryCodesActive: boolean };
   } | null> {
-    const { users, communities, communitySovereigntyRequests, loginCodes } =
-      this.tables;
+    const { users, communities } = this.tables;
     const sessions = this.sessions;
     const nowMs = now.getTime();
     const rows: (RawFoundationUser & {
@@ -733,14 +732,7 @@ export class HonoFoundationRepository {
     })[] = await this.database
       .select({
         ...this.projection(),
-        ...(withGates
-          ? {
-              // Same predicates as `erasurePending` and
-              // `hasActiveRecoveryCodes`, evaluated in the session read.
-              erasurePending: sql`exists (select 1 from ${communitySovereigntyRequests} where ${communitySovereigntyRequests.communityId} = ${users.communityId} and ${communitySovereigntyRequests.kind} = 'erasure' and ${communitySovereigntyRequests.state} in ('requested', 'executing'))`,
-              recoveryCodesActive: sql`exists (select 1 from ${loginCodes} where ${loginCodes.userId} = ${users.id} and ${loginCodes.purpose} = 'recovery' and ${loginCodes.usedAt} is null and ${loginCodes.supersededAt} is null)`,
-            }
-          : {}),
+        ...(withGates ? this.gateColumns() : {}),
         expiresAt: sessions.expiresAt,
         idleExpiresAt: sessions.idleExpiresAt,
         absoluteExpiresAt: sessions.absoluteExpiresAt,
@@ -814,7 +806,38 @@ export class HonoFoundationRepository {
     // conditions or answer as unauthenticated — never return stale authority.
     if (touched.length === 0)
       return this.sessionContext(tokenHash, now, false, withGates);
+    // The touch awaited a write after the gate read: an erasure fence (or a
+    // recovery-code change) that committed in between must not be missed, so
+    // re-read the gate state once the session is confirmed live.
+    if (withGates) result.gates = await this.readGates(user.id);
     return result;
+  }
+
+  /**
+   * Same predicates as `CommunitySovereigntyRepository.erasurePending` and
+   * `hasActiveRecoveryCodes`, as correlated `exists` columns over `users`.
+   */
+  private gateColumns() {
+    const { users, communitySovereigntyRequests, loginCodes } = this.tables;
+    return {
+      erasurePending: sql`exists (select 1 from ${communitySovereigntyRequests} where ${communitySovereigntyRequests.communityId} = ${users.communityId} and ${communitySovereigntyRequests.kind} = 'erasure' and ${communitySovereigntyRequests.state} in ('requested', 'executing'))`,
+      recoveryCodesActive: sql`exists (select 1 from ${loginCodes} where ${loginCodes.userId} = ${users.id} and ${loginCodes.purpose} = 'recovery' and ${loginCodes.usedAt} is null and ${loginCodes.supersededAt} is null)`,
+    };
+  }
+
+  private async readGates(
+    userId: number
+  ): Promise<{ erasurePending: boolean; recoveryCodesActive: boolean }> {
+    const { users } = this.tables;
+    const [row] = await this.database
+      .select(this.gateColumns())
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    return {
+      erasurePending: isTruthy(row?.erasurePending),
+      recoveryCodesActive: isTruthy(row?.recoveryCodesActive),
+    };
   }
 
   async session(

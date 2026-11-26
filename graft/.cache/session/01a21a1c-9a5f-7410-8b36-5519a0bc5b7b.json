@@ -1,0 +1,9 @@
+{
+  "lastQuery": "Senior review of PR #310 (branch checked out here) against origin/main. Run git diff origin/main...HEAD. Focus on correctness, authorization semantics, security, test validity (tests that would pass even if broken), Node+Workers compatibility, scope vs issue #295 (gh issue view 295 read-only). Severity-tagged findings with file:line. End with exactly one line: VERDICT: READY or VERDICT: NOT READY.",
+  "perAgentQuery": {},
+  "graftReads": 0,
+  "sourceReads": 0,
+  "savedTokens": 0,
+  "injectedPointers": [],
+  "nudges": 0
+}

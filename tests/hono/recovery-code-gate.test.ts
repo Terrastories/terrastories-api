@@ -26,7 +26,8 @@ describe('recovery-code gate (#254)', () => {
   async function setup(
     role: 'admin' | 'member',
     gate: boolean,
-    dropGates = false
+    dropGates = false,
+    staleSeen = false
   ) {
     const sqlite = new Sqlite(':memory:');
     sqlite.pragma('foreign_keys = ON');
@@ -70,7 +71,7 @@ describe('recovery-code gate (#254)', () => {
         user.id,
         nowMs + 12 * 3600_000,
         nowMs,
-        nowMs,
+        staleSeen ? nowMs - 3600_000 : nowMs,
         nowMs + 12 * 3600_000,
         nowMs + 30 * 24 * 3600_000
       );
@@ -108,7 +109,7 @@ describe('recovery-code gate (#254)', () => {
         supersededAt: null,
       });
     };
-    return { get, grantCode };
+    return { get, grantCode, sqlite, communityId: community.id, db };
   }
 
   it('denies an administrator without recovery codes everything but /v2/auth/*', async () => {
@@ -143,6 +144,64 @@ describe('recovery-code gate (#254)', () => {
     expect((await get('/v2/stories')).status).toBe(403);
     const admin = await setup('admin', true, true);
     expect((await admin.get('/v2/stories')).status).toBe(403);
+  });
+
+  const insertErasure = (
+    sqlite: Sqlite.Database,
+    communityId: number,
+    state: string
+  ) =>
+    sqlite
+      .prepare(
+        `INSERT INTO community_sovereignty_requests (id, community_id, kind, state, initiated_by_role, requested_at, updated_at)
+         VALUES (?, ?, 'erasure', ?, 'admin', 1, 1)`
+      )
+      .run(`req-${communityId}-${state}`, communityId, state);
+
+  it('denies a member of a community with a pending erasure, from the real predicate', async () => {
+    for (const state of ['requested', 'executing']) {
+      const { get, sqlite, communityId } = await setup('member', true);
+      expect((await get('/v2/stories')).status).toBe(200);
+      insertErasure(sqlite, communityId, state);
+      expect((await get('/v2/stories')).status).toBe(403);
+    }
+  });
+
+  it('leaves a community without a pending erasure accessible', async () => {
+    const { get, sqlite } = await setup('member', true);
+    const other = sqlite
+      .prepare(
+        `INSERT INTO communities (name, slug, public_stories, is_active, created_at, updated_at) VALUES ('Other', 'other', 1, 1, 1, 1)`
+      )
+      .run().lastInsertRowid;
+    insertErasure(sqlite, Number(other), 'requested');
+    expect((await get('/v2/stories')).status).toBe(200);
+  });
+
+  it('denies recovery independently on an erasure-exempt path when gates are missing', async () => {
+    const { get } = await setup('admin', true, true);
+    const res = await get('/v2/community/sovereignty');
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({
+      code: 'recovery_codes_required',
+    });
+  });
+
+  it('sees an erasure fence committed during the session touch', async () => {
+    const { get, sqlite, communityId } = await setup(
+      'member',
+      true,
+      false,
+      true
+    );
+    // The erasure request commits while the session touch runs: after the
+    // joined read, before the response gate decision.
+    sqlite.exec(`CREATE TRIGGER fence_during_touch AFTER UPDATE OF last_seen_at ON sessions
+      BEGIN
+        INSERT INTO community_sovereignty_requests (id, community_id, kind, state, initiated_by_role, requested_at, updated_at)
+        VALUES ('req-race', ${communityId}, 'erasure', 'requested', 'admin', 1, 1);
+      END`);
+    expect((await get('/v2/stories')).status).toBe(403);
   });
 
   it('is enabled by both production entrypoints', () => {

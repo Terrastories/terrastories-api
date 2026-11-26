@@ -1,4 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { fromHtml } from 'hast-util-from-html';
+
+vi.mock('hast-util-from-html', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('hast-util-from-html')>();
+  return { ...actual, fromHtml: vi.fn(actual.fromHtml) };
+});
+
 import {
   descriptionPlainText,
   sanitizeDescriptionForMigration,
@@ -162,5 +169,22 @@ describe('plain-text description fast path', () => {
       expectSame(input);
     }
     expect(eligible).toBeGreaterThan(500);
+  });
+
+  it('bypasses the parser for plain text and still parses markup', () => {
+    const parse = vi.mocked(fromHtml);
+    parse.mockClear();
+    // Migration sanitising has no plain-text projection: the parser must not run.
+    sanitizeDescriptionForMigration('Another plain line\nwith a break.');
+    expect(parse).not.toHaveBeenCalled();
+    // Runtime writes parse once, for the plain-text projection only.
+    validateDescriptionForWrite('Just some plain text, nothing else.');
+    expect(parse).toHaveBeenCalledTimes(1);
+    parse.mockClear();
+    sanitizeDescriptionForMigration('<p>markup</p>');
+    expect(parse).toHaveBeenCalled();
+    parse.mockClear();
+    sanitizeDescriptionForMigration('a & b');
+    expect(parse).toHaveBeenCalled();
   });
 });

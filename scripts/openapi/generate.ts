@@ -9,7 +9,7 @@ import {
   routeKey,
   type RegistryRow,
 } from './registry.js';
-import { mountedRouteKeys } from './route-table.js';
+import { compareCodeUnits, mountedRoutes } from './route-table.js';
 import { SCHEMA_MAP } from './schema-map.js';
 import { V2ErrorResponseSchema } from '../../src/shared/schemas/public-communities.js';
 
@@ -22,41 +22,60 @@ import { V2ErrorResponseSchema } from '../../src/shared/schemas/public-communiti
  */
 export const OPENAPI_PATH = 'docs/openapi/v2.json';
 
-/** Routes served without the `ts_session` gate (registry "Who may call"). */
-const UNAUTHENTICATED_V2 = new Set([
-  'POST /v2/auth/prelogin',
-  'POST /v2/auth/login',
-  'POST /v2/auth/recovery/redeem',
+/** Routes whose request takes no body, query or path input. */
+const NO_INPUT = new Set([
+  'GET /health',
+  'GET /ready',
+  'GET /v2/auth/me',
+  'POST /v2/auth/logout',
+  'POST /v2/auth/revoke',
+  'GET /v2/community',
+  'GET /v2/community/map-config',
+  'GET /v2/community/sovereignty',
   'GET /v2/bootstrap',
-  'POST /v2/bootstrap',
-  'POST /v2/bootstrap/claim',
 ]);
 
-/** Success status of routes that do not answer 200 (DELETE defaults to 204). */
-const SUCCESS_OVERRIDES: Record<string, number> = {
-  'POST /v2/auth/logout': 204,
-  'POST /v2/auth/revoke': 204,
-  'POST /v2/bootstrap': 201,
-  'POST /v2/bootstrap/claim': 201,
-  'POST /v2/auth/recovery-codes': 201,
-  'POST /v2/stories': 201,
-  'POST /v2/stories/:id/external-links': 201,
-  'POST /v2/places': 201,
-  'POST /v2/speakers': 201,
-  'POST /v2/users': 201,
-  'POST /v2/users/:id/login-codes': 201,
-  'POST /v2/media': 201,
-  'POST /v2/media/uploads': 201,
-  'POST /v2/attachments': 201,
-  'POST /v2/imports/preview': 201,
-  'POST /v2/community/export': 201,
-  'POST /v2/admin/communities': 201,
-  'POST /v2/admin/communities/:id/claim-tokens': 201,
+/** Routes that never go through the JSON body parser (raw or multipart). */
+const RAW_BODY = new Set([
+  'POST /v2/media',
+  'PUT /v2/media/uploads/:id/parts/:partNumber',
+]);
+
+/** Success statuses that differ from 200 (201 and 204 are listed per route). */
+const SUCCESS_STATUSES: Record<string, number[]> = {
+  'POST /v2/auth/logout': [204],
+  'POST /v2/auth/revoke': [204],
+  'POST /v2/bootstrap': [201],
+  'POST /v2/bootstrap/claim': [201],
+  'POST /v2/auth/recovery-codes': [201],
+  'POST /v2/stories': [201],
+  'POST /v2/stories/:id/external-links': [201],
+  'POST /v2/places': [201],
+  'POST /v2/speakers': [201],
+  'POST /v2/users': [201],
+  'POST /v2/users/:id/login-codes': [201],
+  'POST /v2/media': [201],
+  'POST /v2/media/uploads': [201],
+  'POST /v2/attachments': [201],
+  'POST /v2/imports/preview': [201],
+  'POST /v2/community/export': [201],
+  'POST /v2/admin/communities': [201],
+  'POST /v2/admin/communities/:id/claim-tokens': [201],
+  // community-sovereignty.service.ts: admins withdraw at once (200), a
+  // super_admin steward files a notice (202); erasure is always accepted (202).
+  'POST /v2/community/withdrawal': [200, 202],
+  'POST /v2/community/erasure': [202],
+};
+
+/** Hand-kept extras for routes whose codes the generic rules cannot see. */
+const EXTRA_STATUSES: Record<string, number[]> = {
+  'POST /v2/auth/login': [400, 401, 409, 413, 415, 503],
 };
 
 const STATUS_TEXT: Record<number, string> = {
   200: 'OK',
   201: 'Created',
+  202: 'Accepted',
   204: 'No Content',
   400: 'Bad Request',
   401: 'Unauthorized',
@@ -64,15 +83,10 @@ const STATUS_TEXT: Record<number, string> = {
   404: 'Not Found',
   409: 'Conflict',
   413: 'Payload Too Large',
+  415: 'Unsupported Media Type',
   422: 'Unprocessable Entity',
-  429: 'Too Many Requests',
+  503: 'Service Unavailable',
 };
-
-export function isAuthenticated(method: string, path: string): boolean {
-  if (!path.startsWith('/v2/')) return false;
-  if (path.startsWith('/v2/public/')) return false;
-  return !UNAUTHENTICATED_V2.has(routeKey(method, path));
-}
 
 /** Status codes the registry text calls out in backticks (e.g. `404`). */
 function statusCodesIn(text: string): number[] {
@@ -82,22 +96,45 @@ function statusCodesIn(text: string): number[] {
   return [...codes];
 }
 
-function successStatus(row: RegistryRow): number {
-  const key = routeKey(row.method, row.path);
-  const override = SUCCESS_OVERRIDES[key];
-  if (override) return override;
-  return row.method === 'DELETE' ? 204 : 200;
+export function successStatuses(row: RegistryRow): number[] {
+  return (
+    SUCCESS_STATUSES[routeKey(row.method, row.path)] ?? [
+      row.method === 'DELETE' ? 204 : 200,
+    ]
+  );
 }
 
-export function statusCodesFor(row: RegistryRow): number[] {
-  const codes = new Set<number>([successStatus(row)]);
-  for (const code of statusCodesIn(row.purpose)) {
+/**
+ * Every status a route may answer: its success codes, then a deliberately
+ * generous set from the shared pipeline (CSRF 403, session 401, body parser
+ * 400/413/415, service 404/409/422, outage 503). tests/openapi asserts real
+ * responses stay inside this set, so an undocumented status fails the suite.
+ */
+export function statusCodesFor(row: RegistryRow, secured: boolean): number[] {
+  const key = routeKey(row.method, row.path);
+  const codes = new Set<number>(successStatuses(row));
+  for (const code of statusCodesIn(row.purpose))
     if (code >= 400) codes.add(code);
-  }
-  if (isAuthenticated(row.method, row.path)) {
+  for (const code of EXTRA_STATUSES[key] ?? []) codes.add(code);
+  const writes = row.method !== 'GET';
+  const body = writes && !NO_INPUT.has(key);
+  if (key !== 'GET /health') codes.add(503);
+  if (writes) codes.add(403);
+  if (secured) {
     codes.add(401);
     if (!/^any authenticated/i.test(row.who)) codes.add(403);
   }
+  if (!NO_INPUT.has(key)) codes.add(400);
+  if (body && !RAW_BODY.has(key)) {
+    codes.add(413);
+    codes.add(415);
+  }
+  if (body && secured) {
+    codes.add(409);
+    codes.add(422);
+  }
+  if (row.path.includes(':') || row.path.startsWith('/v2/public/'))
+    codes.add(404);
   return [...codes].sort((a, b) => a - b);
 }
 
@@ -135,24 +172,25 @@ type Json = Record<string, unknown>;
 
 export function buildOpenApiDocument(): Json {
   const rows = readRegistry().filter((row) => isMountedStatus(row.status));
-  const mounted = new Set(mountedRouteKeys());
+  const mounted = new Map(mountedRoutes().map((route) => [route.key, route]));
   const paths: Record<string, Record<string, Json>> = {};
   const sorted = [...rows].sort(
-    (a, b) => a.path.localeCompare(b.path) || a.method.localeCompare(b.method)
+    (a, b) =>
+      compareCodeUnits(a.path, b.path) || compareCodeUnits(a.method, b.method)
   );
   for (const row of sorted) {
     const key = routeKey(row.method, row.path);
-    if (!mounted.has(key))
-      throw new Error(`Registry route is not mounted: ${key}`);
-    const secured = isAuthenticated(row.method, row.path);
+    const route = mounted.get(key);
+    if (!route) throw new Error(`Registry route is not mounted: ${key}`);
+    const secured = route.secured;
     const mapped = SCHEMA_MAP[key];
-    const success = successStatus(row);
+    const success = successStatuses(row);
     const responses: Record<string, Json> = {};
-    for (const code of statusCodesFor(row)) {
+    for (const code of statusCodesFor(row, secured)) {
       const response: Json = {
         description: STATUS_TEXT[code] ?? `HTTP ${code}`,
       };
-      if (code === success && mapped?.response) {
+      if (success.includes(code) && code !== 204 && mapped?.response) {
         response['content'] = {
           'application/json': {
             schema: jsonSchemaOf(mapped.response, 'output'),
@@ -185,7 +223,8 @@ export function buildOpenApiDocument(): Json {
     if (params.length) operation['parameters'] = params;
     if (mapped?.request) {
       operation['requestBody'] = {
-        required: true,
+        // Optional when the handler accepts an empty JSON object.
+        required: !mapped.request.safeParse({}).success,
         content: {
           'application/json': { schema: jsonSchemaOf(mapped.request, 'input') },
         },

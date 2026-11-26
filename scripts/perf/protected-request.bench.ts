@@ -20,7 +20,7 @@ import { communitiesSqlite } from '../../src/db/schema/communities.js';
 import { usersSqlite } from '../../src/db/schema/users.js';
 import {
   descriptionPlainText,
-  sanitizeDescriptionFullPipelineForTest,
+  runSanitiser,
   validateDescriptionForWrite,
 } from '../../src/shared/utils/safe-description.js';
 import {
@@ -107,9 +107,7 @@ for (const [name, text] of [
   ['plain ~1.1 KB', plain],
 ] as const) {
   const full = await time(`sanitizer FULL  ${name}`, () =>
-    descriptionPlainText(
-      sanitizeDescriptionFullPipelineForTest(text, 'runtime').html
-    )
+    descriptionPlainText(runSanitiser(text, 'runtime', false).html)
   );
   const fast = await time(`sanitizer FAST  ${name}`, () =>
     validateDescriptionForWrite(text)

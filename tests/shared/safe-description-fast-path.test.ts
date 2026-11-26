@@ -1,9 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   descriptionPlainText,
-  isPlainTextDescription,
   sanitizeDescriptionForMigration,
-  sanitizeDescriptionFullPipelineForTest,
+  runSanitiser,
   validateDescriptionForWrite,
 } from '../../src/shared/utils/safe-description.js';
 
@@ -118,6 +117,9 @@ const EDGE = [
   '\ue000',
 ];
 
+// Independent of the production predicate: no markup/entity/control chars.
+const isPlain = (s: string) => /^[^<>&\p{C}\u{2028}\u{2029}]*$/u.test(s);
+
 function build(r: () => number): string {
   const n = Math.floor(r() * 12);
   let s = '';
@@ -126,8 +128,8 @@ function build(r: () => number): string {
 }
 
 function expectSame(input: string) {
-  const viaFull = sanitizeDescriptionFullPipelineForTest(input, 'runtime');
-  const migFull = sanitizeDescriptionFullPipelineForTest(input, 'migration');
+  const viaFull = runSanitiser(input, 'runtime', false);
+  const migFull = runSanitiser(input, 'migration', false);
   const viaPublic = validateDescriptionForWrite(input);
   expect(viaPublic.html, JSON.stringify(input)).toBe(viaFull.html);
   expect(viaPublic.changed).toBe(viaFull.changed);
@@ -137,7 +139,7 @@ function expectSame(input: string) {
   expect(mig.changed).toBe(migFull.changed);
   expect(mig.droppedHrefs).toBe(migFull.droppedHrefs);
   expect(mig.removedNodes).toBe(migFull.removedNodes);
-  if (isPlainTextDescription(input)) {
+  if (isPlain(input)) {
     // The fast path returns the input verbatim, so the full pipeline must too.
     expect(viaFull.html, JSON.stringify(input)).toBe(input);
     expect(viaFull.changed).toBe(false);
@@ -156,14 +158,9 @@ describe('plain-text description fast path', () => {
     let eligible = 0;
     for (let i = 0; i < 5000; i++) {
       const input = build(r);
-      if (isPlainTextDescription(input)) eligible += 1;
+      if (isPlain(input)) eligible += 1;
       expectSame(input);
     }
     expect(eligible).toBeGreaterThan(500);
-  });
-
-  it('never takes the fast path for markup or entity starters', () => {
-    for (const s of ['<b>x</b>', 'a & b', 'a > b', '&amp;', '<', 'x\ru'])
-      expect(isPlainTextDescription(s)).toBe(false);
   });
 });

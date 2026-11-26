@@ -444,7 +444,8 @@ export function createHonoApp(options: FoundationOptions) {
       !['/v2/community/sovereignty', '/v2/community/erasure'].includes(
         c.req.path
       ) &&
-      session.gates?.erasurePending
+      // Fail closed: gates were requested, so a missing result denies.
+      (session.gates === undefined || session.gates.erasurePending)
     )
       return c.json({ error: 'Forbidden' }, 403);
     // SPEC-V2 §7: a community administrator must generate recovery codes

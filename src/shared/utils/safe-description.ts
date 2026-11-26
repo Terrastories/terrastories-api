@@ -672,20 +672,15 @@ function runSinglePass(
 const NOT_PLAIN_TEXT =
   /[<>&\u{2028}\u{2029}\x00-\x08\x0B-\x1F\x7F-\x9F\p{Cf}\p{Co}\p{Cn}]/u;
 
-/** Whether the fast path (no parse, no stabilisation) applies to `input`. */
-export function isPlainTextDescription(input: string): boolean {
+function isPlainTextDescription(input: string): boolean {
   return !NOT_PLAIN_TEXT.test(input);
 }
 
-/** Internal: the full parse/sanitise pipeline, bypassing the fast path. */
-export function sanitizeDescriptionFullPipelineForTest(
-  input: string,
-  mode: 'runtime' | 'migration'
-): ReturnType<typeof runSanitiser> {
-  return runSanitiser(input, mode, false);
-}
-
-function runSanitiser(
+/**
+ * The shared sanitiser pipeline. `allowFastPath = false` forces the full
+ * parse/sanitise path (used by the equivalence test).
+ */
+export function runSanitiser(
   input: string,
   mode: 'runtime' | 'migration',
   allowFastPath = true

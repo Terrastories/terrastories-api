@@ -23,7 +23,11 @@ describe('recovery-code gate (#254)', () => {
     while (openDbs.length > 0) openDbs.pop()?.close();
   });
 
-  async function setup(role: 'admin' | 'member', gate: boolean) {
+  async function setup(
+    role: 'admin' | 'member',
+    gate: boolean,
+    dropGates = false
+  ) {
     const sqlite = new Sqlite(':memory:');
     sqlite.pragma('foreign_keys = ON');
     openDbs.push(sqlite);
@@ -70,8 +74,18 @@ describe('recovery-code gate (#254)', () => {
         nowMs + 12 * 3600_000,
         nowMs + 30 * 24 * 3600_000
       );
+    const repository = new HonoFoundationRepository(db);
+    if (dropGates) {
+      // A repository that answers the session but omits the gate state.
+      const original = repository.sessionContext.bind(repository);
+      repository.sessionContext = async (...args) => {
+        const context = await original(...args);
+        if (context) delete context.gates;
+        return context;
+      };
+    }
     const app = createHonoApp({
-      repository: new HonoFoundationRepository(db),
+      repository,
       storage: { read: async () => null },
       serverSecret: makeServerSecret(),
       secureCookies: false,
@@ -122,6 +136,13 @@ describe('recovery-code gate (#254)', () => {
   it('is opt-in per app instance', async () => {
     const { get } = await setup('admin', false);
     expect((await get('/v2/stories')).status).toBe(200);
+  });
+
+  it('fails closed when the session read returns no gate state', async () => {
+    const { get } = await setup('member', true, true);
+    expect((await get('/v2/stories')).status).toBe(403);
+    const admin = await setup('admin', true, true);
+    expect((await admin.get('/v2/stories')).status).toBe(403);
   });
 
   it('is enabled by both production entrypoints', () => {

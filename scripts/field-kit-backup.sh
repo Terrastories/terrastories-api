@@ -9,9 +9,11 @@ set -e
 # Configuration for field deployment
 # The erasure-records volume (ERASURE_RECORDS_ROOT) is deliberately never mounted
 # here or backed up (src/services/ERASURE-OPERATIONS.md).
-BACKUP_DIR="/backups"
-DATA_DIR="/data"
-UPLOADS_DIR="/uploads"
+# Paths default to the field-kit container mounts; the restore drills
+# (tests/drills) override them to run the real procedure against a temp tree.
+BACKUP_DIR="${BACKUP_DIR:-/backups}"
+DATA_DIR="${DATA_DIR:-/data}"
+UPLOADS_DIR="${UPLOADS_DIR:-/uploads}"
 RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-3}"
 COMPRESSION="${BACKUP_COMPRESSION:-true}"
 
@@ -48,7 +50,7 @@ if [ -d "$UPLOADS_DIR" ]; then
 fi
 
 # Backup offline map tiles (critical for field operations)
-TILES_DIR="/tiles"
+TILES_DIR="${TILES_DIR:-/tiles}"
 if [ -d "$TILES_DIR" ]; then
     echo "Backing up offline map tiles..."
     # Backup tiles directory for offline mapping

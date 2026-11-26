@@ -138,6 +138,34 @@ Operator procedure for any restore (D1 Time Travel, retained D1 export, self-hos
 
 Neither hold touches the database; lifting the hold never deletes anything by itself — it only re-enables the normal sweep, which still honors the grace window, the reference check and the resume cursor.
 
+### 6.5 Restore drills, RPO/RTO targets and rollback policy
+
+Restores are rehearsed in CI, offline, by `tests/drills/*.test.ts` (`npm run test:drills`). Each drill seeds a two-community dataset, takes the profile's backup, restores into a fresh database, then asserts identical row counts and per-table SHA-256 checksums, the community-ownership invariants (edges, attachments, storage keys and sessions never cross a community), an integrity/foreign-key check, and writes `restore-drill-<profile>.json` (CI artifact `restore-drill-reports`) recording the schema/migration journal head, per-table digests and measured elapsed time.
+
+| Profile                                 | Drill                                                                                                                                                                                             | Backup under test                                          |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| Self-hosted / field kit (Node + SQLite) | `sqlite-restore.test.ts`: also an app smoke (login, story read, media metadata and bytes, public audience) on the restored file                                                                   | `scripts/field-kit-backup.sh` (real script, paths via env) |
+| Node + PostgreSQL                       | `postgres-restore.test.ts`: needs `DRILL_POSTGRES_URL` (dedicated `*test*` database), `ALLOW_POSTGRES_TEST_RESET=true`, `pg_dump`/`pg_restore`; skips with the reason in the suite name otherwise | `pg_dump --format=custom` / `pg_restore`                   |
+| Workers (D1)                            | `d1-restore.test.ts`: export-shaped SQL text replayed into a fresh SQLite, no Cloudflare call                                                                                                     | `wrangler d1 export` format (offline stand-in)             |
+
+**Targets, not guarantees.** The numbers below are operating targets to plan against; drills report measured times for the CI-sized dataset only and prove procedure and integrity, not production duration.
+
+| Profile                          | RPO target                                                                                   | RTO target |
+| -------------------------------- | -------------------------------------------------------------------------------------------- | ---------- |
+| Workers Free (staging default)   | 1 hour inside the 7-day Time Travel window; 24 hours from the last retained D1 export        | 4 hours    |
+| Workers Paid                     | 15 minutes inside the 30-day Time Travel window                                              | 2 hours    |
+| Self-hosted / field kit (SQLite) | 12 hours (backups run twice daily); uploads older than 7 days are not in the archive (below) | 4 hours    |
+| Node + PostgreSQL                | 24 hours (nightly `pg_dump`; continuous archiving is out of scope)                           | 4 hours    |
+
+**Forward-fix versus rollback.**
+
+1. Default to **forward-fix**. A defective migration or release is repaired by a new migration or code deploy (expand/contract, SPEC-V2 section 8); Worker/Node code rollback is separate from the data and never needs a restore.
+2. **Roll back data** (restore) only for loss or corruption that a forward change cannot repair, chosen by the community administrators with the operator (section 6.2). The restore point may never precede a recorded erasure's completion (SPEC-V2 section 7, Backups).
+3. Every restore follows 6.4 (hold the orphan sweep first), then: restore into a fresh database, **purge all `sessions` rows** (a backup carries tokens the community may have revoked since; revocation is delete-based, so a restored file would revive them — the drill asserts the purge), reconcile against the out-of-band erasure records, verify, then lift the hold and re-rotate or destroy the restored copy under the profile bound.
+4. Record the schema/migration version of the backup against the running release before restoring; a backup older than the deployed migration is restored, then migrated forward, never the reverse.
+
+**Known limitation (field kit).** `field-kit-backup.sh` copies only uploads modified in the last 7 days (it writes a manifest of all files). Media older than that is not restorable from the archive; the drill pins this behavior so a change to it is deliberate.
+
 ## 7. Change control
 
 Changes to this document follow the `docs/SOURCE-OF-TRUTH.md` change-control contract: retention numbers belong to `docs/SPEC-V2.md` and may only change there; validator rules change in the same commit as `src/config/v2-runtime.ts` and their tests.

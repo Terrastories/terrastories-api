@@ -388,6 +388,97 @@ describe('role matrix B: sovereignty writes', () => {
   );
 });
 
+describe('role matrix B: foreign admin acts only on own community', () => {
+  /** Alpha's stored state; the foreign admin's writes must leave it untouched. */
+  const alphaState = async (ctx: Awaited<ReturnType<typeof setup>>) => {
+    const alphaId = ctx.alpha.id;
+    const rows = <T extends { communityId?: number | null }>(all: T[]) =>
+      all.filter((r) => r.communityId === alphaId);
+    return JSON.stringify({
+      community: (await ctx.db.select().from(communitiesSqlite)).filter(
+        (c) => c.id === alphaId
+      ),
+      stewards: rows(await ctx.db.select().from(communityStewardsSqlite)),
+      requests: rows(
+        await ctx.db.select().from(communitySovereigntyRequestsSqlite)
+      ),
+      record: ctx.records.get(alphaId) ?? null,
+    });
+  };
+
+  /** Alpha has a steward notice pending, so cancel has a real target. */
+  async function alphaNotice() {
+    const ctx = await setup();
+    await ctx.designateSteward();
+    const res = await ctx.call(
+      'POST',
+      '/v2/community/withdrawal',
+      await ctx.loginCookie('steward'),
+      {
+        currentDerivedKey: ctx.people.steward.creds.derivedKey,
+      }
+    );
+    expect(res.status).toBe(202);
+    const requestId = (
+      (await res.json()) as { data: { request: { id: number } } }
+    ).data.request.id;
+    return { ctx, requestId };
+  }
+
+  it('foreign admin withdrawal deactivates only the foreign community', async () => {
+    const { ctx } = await alphaNotice();
+    const before = await alphaState(ctx);
+    const res = await ctx.call(
+      'POST',
+      '/v2/community/withdrawal',
+      await ctx.loginCookie('foreign_admin'),
+      {
+        currentDerivedKey: ctx.people.foreign_admin.creds.derivedKey,
+      }
+    );
+    expect(res.status).toBe(200);
+    const foreign = (await ctx.db.select().from(communitiesSqlite)).find(
+      (c) => c.id === ctx.foreign.id
+    );
+    expect(foreign?.isActive).toBe(false);
+    expect(await alphaState(ctx)).toBe(before);
+  });
+
+  it('foreign admin erasure writes only the foreign community record', async () => {
+    const { ctx } = await alphaNotice();
+    const before = await alphaState(ctx);
+    const res = await ctx.call(
+      'POST',
+      '/v2/community/erasure',
+      await ctx.loginCookie('foreign_admin'),
+      {
+        confirmFinality: true,
+        currentDerivedKey: ctx.people.foreign_admin.creds.derivedKey,
+      }
+    );
+    expect(res.status).toBe(202);
+    expect(ctx.records.has(ctx.foreign.id)).toBe(true);
+    expect(await alphaState(ctx)).toBe(before);
+  });
+
+  it('foreign admin cannot cancel alpha notice and leaves it pending', async () => {
+    const { ctx, requestId } = await alphaNotice();
+    const before = await alphaState(ctx);
+    const res = await ctx.call(
+      'POST',
+      '/v2/community/sovereignty/cancel',
+      await ctx.loginCookie('foreign_admin'),
+      {
+        requestId,
+        currentDerivedKey: ctx.people.foreign_admin.creds.derivedKey,
+      }
+    );
+    // Nothing cancellable in the foreign community: 409, alpha untouched.
+    expect(res.status).toBe(409);
+    expect(await alphaState(ctx)).toBe(before);
+  });
+});
+
 describe('role matrix B: super_admin erasure listing', () => {
   const ROLES: Role[] = [
     'anon',

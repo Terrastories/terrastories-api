@@ -157,7 +157,7 @@ beforeAll(async () => {
     cookies.editor,
     Uint8Array.from([...PNG, 0])
   );
-  // The field-kit script only copies uploads modified in the last 7 days.
+  // Age the file past 7 days: the backup must still contain it.
   const agedKey = path.join(
     liveUploads,
     `communities/${ids.alpha}/media/${media.aged}`
@@ -339,7 +339,7 @@ describe('SQLite field-kit restore drill (#136)', () => {
     ).toBe(0);
   });
 
-  it('records the 7-day upload window: manifest lists every file, bytes older than 7 days are not in the archive', () => {
+  it('restores media older than 7 days byte-identical and every manifest entry exists', () => {
     const { base, uploads } = restore('window', true);
     const manifest = readFileSync(
       path.join(base, 'uploads_manifest.txt'),
@@ -356,11 +356,15 @@ describe('SQLite field-kit restore drill (#136)', () => {
         path.join(uploads, `communities/${ids.alpha}/media/${media.recent}`)
       )
     ).toBe(true);
-    // Known limitation recorded in docs/OPERATIONS-GOVERNANCE.md 6.5.
-    expect(
-      existsSync(
-        path.join(uploads, `communities/${ids.alpha}/media/${media.aged}`)
-      )
-    ).toBe(false);
+    const agedRestored = path.join(
+      uploads,
+      `communities/${ids.alpha}/media/${media.aged}`
+    );
+    expect(existsSync(agedRestored)).toBe(true);
+    expect(sha256(readFileSync(agedRestored))).toBe(
+      sha256(Uint8Array.from([...PNG, 0]))
+    );
+    for (const entry of manifest)
+      expect(existsSync(path.join(base, entry))).toBe(true);
   });
 });

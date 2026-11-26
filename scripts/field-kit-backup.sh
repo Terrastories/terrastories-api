@@ -39,11 +39,11 @@ if [ -d "$DATA_DIR" ]; then
     cp -r "$DATA_DIR" "$BACKUP_PATH/data"
 fi
 
-# Backup uploaded files (sample only to save space)
+# Backup uploaded files (full copy: every file in the manifest is in the backup)
 if [ -d "$UPLOADS_DIR" ]; then
     echo "Backing up uploaded files..."
-    # Only backup recent uploads to save space in field conditions
-    find "$UPLOADS_DIR" -type f -mtime -7 -exec cp --parents {} "$BACKUP_PATH/" \;
+    # Full copy regardless of age: a restore must find every manifest entry.
+    find "$UPLOADS_DIR" -type f -exec cp --parents {} "$BACKUP_PATH/" \;
     
     # Create manifest of all files
     find "$UPLOADS_DIR" -type f > "$BACKUP_PATH/uploads_manifest.txt"

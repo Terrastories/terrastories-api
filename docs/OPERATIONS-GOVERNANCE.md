@@ -150,12 +150,12 @@ Restores are rehearsed in CI, offline, by `tests/drills/*.test.ts` (`npm run tes
 
 **Targets, not guarantees.** The numbers below are operating targets to plan against; drills report measured times for the CI-sized dataset only and prove procedure and integrity, not production duration.
 
-| Profile                          | RPO target                                                                                   | RTO target |
-| -------------------------------- | -------------------------------------------------------------------------------------------- | ---------- |
-| Workers Free (staging default)   | 1 hour inside the 7-day Time Travel window; 24 hours from the last retained D1 export        | 4 hours    |
-| Workers Paid                     | 15 minutes inside the 30-day Time Travel window                                              | 2 hours    |
-| Self-hosted / field kit (SQLite) | 12 hours (backups run twice daily); uploads older than 7 days are not in the archive (below) | 4 hours    |
-| Node + PostgreSQL                | 24 hours (nightly `pg_dump`; continuous archiving is out of scope)                           | 4 hours    |
+| Profile                          | RPO target                                                                            | RTO target |
+| -------------------------------- | ------------------------------------------------------------------------------------- | ---------- |
+| Workers Free (staging default)   | 1 hour inside the 7-day Time Travel window; 24 hours from the last retained D1 export | 4 hours    |
+| Workers Paid                     | 15 minutes inside the 30-day Time Travel window                                       | 2 hours    |
+| Self-hosted / field kit (SQLite) | 12 hours (backups run twice daily); uploads are copied in full                        | 4 hours    |
+| Node + PostgreSQL                | 24 hours (nightly `pg_dump`; continuous archiving is out of scope)                    | 4 hours    |
 
 **Forward-fix versus rollback.**
 
@@ -164,7 +164,7 @@ Restores are rehearsed in CI, offline, by `tests/drills/*.test.ts` (`npm run tes
 3. Every restore follows 6.4 (hold the orphan sweep first), then: restore into a fresh database, **purge all `sessions` rows** (a backup carries tokens the community may have revoked since; revocation is delete-based, so a restored file would revive them — the drill asserts the purge), reconcile against the out-of-band erasure records, verify, then lift the hold and re-rotate or destroy the restored copy under the profile bound.
 4. Record the schema/migration version of the backup against the running release before restoring; a backup older than the deployed migration is restored, then migrated forward, never the reverse.
 
-**Known limitation (field kit).** `field-kit-backup.sh` copies only uploads modified in the last 7 days (it writes a manifest of all files). Media older than that is not restorable from the archive; the drill pins this behavior so a change to it is deliberate.
+**Field-kit uploads.** `field-kit-backup.sh` copies every upload regardless of age and writes a manifest of all files; the drill ages a file past 7 days and asserts it restores byte-identical and that every manifest entry exists in the archive. Backup size grows with the media volume, so size the backup volume for a full copy per retained backup (`BACKUP_RETENTION_DAYS`).
 
 ## 7. Change control
 

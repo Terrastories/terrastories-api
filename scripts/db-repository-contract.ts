@@ -10,12 +10,18 @@ import assert from 'node:assert/strict';
  * Assert a timestamp read back from a repository is a real, usable Date:
  * `instanceof Date` alone also accepts `new Date(NaN)`.
  */
+/** Describe a value for the failure message; never throws (Invalid Date has no ISO form). */
+function describeNotDate(value: unknown): string {
+  if (!(value instanceof Date)) return typeof value;
+  return Number.isFinite(value.getTime())
+    ? value.toISOString()
+    : 'Invalid Date';
+}
+
 export function assertValidDate(value: unknown, label: string): void {
   assert.ok(
     value instanceof Date && Number.isFinite(value.getTime()),
-    `${label} must be a Date with a finite time, got ${
-      value instanceof Date ? value.toISOString() : typeof value
-    }`
+    `${label} must be a Date with a finite time, got ${describeNotDate(value)}`
   );
 }
 

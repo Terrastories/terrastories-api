@@ -424,6 +424,10 @@ describe('GET /v2/bootstrap and POST /v2/bootstrap (Slice 11b-B)', () => {
     const badJson = await postBootstrap('{broken');
     expect(badJson.status).toBe(400);
 
+    // Empty JSON body -> 400 (Hono equivalent of Fastify FST_ERR_CTP_EMPTY_JSON_BODY)
+    const emptyJson = await postBootstrap('');
+    expect(emptyJson.status).toBe(400);
+
     // Oversized body (>256KB) -> 413
     const huge = JSON.stringify({
       community: { name: 'Big', description: 'a'.repeat(270 * 1024) },

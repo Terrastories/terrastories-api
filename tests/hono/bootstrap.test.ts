@@ -427,6 +427,7 @@ describe('GET /v2/bootstrap and POST /v2/bootstrap (Slice 11b-B)', () => {
     // Empty JSON body -> 400 (Hono equivalent of Fastify FST_ERR_CTP_EMPTY_JSON_BODY)
     const emptyJson = await postBootstrap('');
     expect(emptyJson.status).toBe(400);
+    expect(await emptyJson.json()).toEqual({ error: 'Invalid request' });
 
     // Oversized body (>256KB) -> 413
     const huge = JSON.stringify({

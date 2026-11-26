@@ -107,11 +107,19 @@ const cleanup = new MediaCleanupCoordinator(db, storage, {
   // Explicit restore hold; see ORPHAN_SWEEP_HOLD_KEY in hono-foundation.service.ts.
   sweepPaused: envFlagEnabled(process.env.ORPHAN_SWEEP_PAUSED),
 });
+// Sweeps still running when shutdown starts; awaited before the DB closes.
+const inFlightSweeps = new Set<Promise<unknown>>();
+const trackSweep = (run: Promise<unknown>) => {
+  const tracked = run.finally(() => inFlightSweeps.delete(tracked));
+  inFlightSweeps.add(tracked);
+};
 const sweepOrphanObjects = () => {
-  void cleanup.sweepOrphanObjects().catch(() => {
-    // eslint-disable-next-line no-console -- operator channel; content-free
-    console.warn('media cleanup: orphan sweep failed');
-  });
+  trackSweep(
+    cleanup.sweepOrphanObjects().catch(() => {
+      // eslint-disable-next-line no-console -- operator channel; content-free
+      console.warn('media cleanup: orphan sweep failed');
+    })
+  );
 };
 const orphanSweepTimers = scheduleOrphanSweep(sweepOrphanObjects);
 
@@ -126,10 +134,12 @@ const maintenanceSweepTimers = scheduleMaintenanceSweeps(() => {
   // Each job already catches its own failure; this catch keeps any
   // unexpected throw from becoming an unhandled rejection that ends the
   // process.
-  runMaintenanceSweeps(db, { storage, erasureStore }).catch(() => {
-    // eslint-disable-next-line no-console -- operator channel; content-free
-    console.warn('maintenance sweeps: run failed');
-  });
+  trackSweep(
+    runMaintenanceSweeps(db, { storage, erasureStore }).catch(() => {
+      // eslint-disable-next-line no-console -- operator channel; content-free
+      console.warn('maintenance sweeps: run failed');
+    })
+  );
 });
 
 // Restart fallback: persisted exports are reclaimed within one minute of boot
@@ -149,20 +159,24 @@ let erasureSweepRunning = false;
 const exportExpiryTimer = setInterval(() => {
   if (erasureService && !erasureSweepRunning) {
     erasureSweepRunning = true;
-    void erasureService
-      .sweep(new Date())
-      .catch(() => {
-        // eslint-disable-next-line no-console -- content-free operator channel
-        console.warn('maintenance: community erasure sweep failed');
-      })
-      .finally(() => {
-        erasureSweepRunning = false;
-      });
+    trackSweep(
+      erasureService
+        .sweep(new Date())
+        .catch(() => {
+          // eslint-disable-next-line no-console -- content-free operator channel
+          console.warn('maintenance: community erasure sweep failed');
+        })
+        .finally(() => {
+          erasureSweepRunning = false;
+        })
+    );
   }
-  void exportExpiryService.cleanupExpiredExports().catch(() => {
-    // eslint-disable-next-line no-console -- content-free operator channel
-    console.warn('maintenance: expired export sweep failed');
-  });
+  trackSweep(
+    exportExpiryService.cleanupExpiredExports().catch(() => {
+      // eslint-disable-next-line no-console -- content-free operator channel
+      console.warn('maintenance: expired export sweep failed');
+    })
+  );
 }, EXPORT_EXPIRY_GRACE_MS);
 exportExpiryTimer.unref();
 
@@ -175,14 +189,23 @@ const shutdown = () => {
   clearInterval(orphanSweepTimers.interval);
   clearTimeout(maintenanceSweepTimers.first);
   clearInterval(maintenanceSweepTimers.interval);
+  // Test-only override (SHUTDOWN_DRAIN_TIMEOUT_MS); default is 10 s.
+  const drainMs = Number(process.env.SHUTDOWN_DRAIN_TIMEOUT_MS) || 10_000;
   const deadline = setTimeout(() => {
+    // eslint-disable-next-line no-console -- operator channel; content-free
+    console.error('shutdown: drain deadline exceeded, forcing exit');
     if ('closeAllConnections' in server) server.closeAllConnections();
     process.exit(1);
-  }, 10_000);
+  }, drainMs);
   server.close(() => {
-    void closeDb()
+    // No new sweeps are scheduled (timers cleared above); let running ones
+    // finish, bounded by the same deadline, before the database closes.
+    void Promise.allSettled([...inFlightSweeps])
+      .then(() => closeDb())
       .then(() => {
         clearTimeout(deadline);
+        // eslint-disable-next-line no-console -- operator channel; content-free
+        console.info('shutdown: database closed');
         process.exit(0);
       })
       .catch(() => process.exit(1));

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -50,9 +50,17 @@ describe('readiness', () => {
 
 describe('Node server process', () => {
   const children: ChildProcess[] = [];
+  const tmpDirs: string[] = [];
   afterEach(() => {
     for (const child of children.splice(0)) child.kill('SIGKILL');
+    for (const dir of tmpDirs.splice(0))
+      rmSync(dir, { recursive: true, force: true });
   });
+  const makeTmpDir = () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'tsapi-runtime-'));
+    tmpDirs.push(dir);
+    return dir;
+  };
 
   const baseEnv = (dbFile: string, port: number) => {
     mkdirSync(path.join(path.dirname(dbFile), 'uploads'), { recursive: true });
@@ -99,7 +107,7 @@ describe('Node server process', () => {
     throw new Error('server did not become ready');
   };
   const migratedDb = () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'tsapi-runtime-'));
+    const dir = makeTmpDir();
     const file = path.join(dir, 'app.db');
     const sqlite = new Sqlite(file);
     migrate(drizzle(sqlite), { migrationsFolder: 'src/db/migrations' });
@@ -109,7 +117,7 @@ describe('Node server process', () => {
 
   it('drains an in-flight request on SIGTERM, refuses new connections, exits 0', async () => {
     const port = await freePort();
-    const { child, exited } = start(baseEnv(migratedDb(), port));
+    const { child, exited, output } = start(baseEnv(migratedDb(), port));
     await waitReady(port);
 
     // Hold a request open: headers sent, body incomplete.
@@ -141,6 +149,32 @@ describe('Node server process', () => {
     await new Promise((r) => socket.on('close', r));
     expect(response).toMatch(/^HTTP\/1\.1 \d{3}/);
     expect(await exited).toBe(0);
+    expect(output()).toContain('shutdown: database closed');
+  }, 120_000);
+
+  it('force-exits 1 after the drain deadline when a request never finishes', async () => {
+    const port = await freePort();
+    const { child, exited, output } = start({
+      ...baseEnv(migratedDb(), port),
+      SHUTDOWN_DRAIN_TIMEOUT_MS: '1500',
+    });
+    await waitReady(port);
+    const socket = net.connect(port, '127.0.0.1');
+    socket.on('error', () => undefined);
+    await new Promise<void>((resolve) => socket.on('connect', resolve));
+    // Body never completes, so the request stays in flight.
+    socket.write(
+      'POST /v2/auth/prelogin HTTP/1.1\r\nHost: x\r\n' +
+        'Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{'
+    );
+    await new Promise((r) => setTimeout(r, 300));
+    const started = Date.now();
+    child.kill('SIGTERM');
+    expect(await exited).toBe(1);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1000);
+    expect(output()).toContain('drain deadline exceeded');
+    expect(output()).not.toContain('database closed');
+    socket.destroy();
   }, 120_000);
 
   it('exits non-zero when required production config is missing', async () => {
@@ -157,7 +191,7 @@ describe('Node server process', () => {
 
   it('exits non-zero with a clear message when the database is not migrated', async () => {
     const port = await freePort();
-    const dir = mkdtempSync(path.join(tmpdir(), 'tsapi-runtime-'));
+    const dir = makeTmpDir();
     const { exited, output } = start(baseEnv(path.join(dir, 'empty.db'), port));
     expect(await exited).toBe(1);
     expect(output()).toContain('not migrated');

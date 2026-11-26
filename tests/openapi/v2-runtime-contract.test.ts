@@ -83,6 +83,15 @@ describe('V2 OpenAPI runtime contract', () => {
         fenceCommunity: async () => {},
         read: async () => null,
         delete: async () => {},
+        put: async (
+          _key: string,
+          body: Uint8Array | ReadableStream<Uint8Array>
+        ) => ({
+          size:
+            body instanceof Uint8Array
+              ? body.byteLength
+              : (await new Response(body).arrayBuffer()).byteLength,
+        }),
         list: async () => ({ entries: [], truncated: false }),
       },
       erasureStore: { list: async () => [], write: async () => {} },
@@ -117,7 +126,36 @@ describe('V2 OpenAPI runtime contract', () => {
       );
       return `ts_session=${token![1]}`;
     };
-    return { call, derivedKey, login };
+    const addMember = async () => {
+      const memberKey = makeDerivedKey();
+      const [member] = await db
+        .insert(usersSqlite)
+        .values({
+          email: 'member@contract.test',
+          username: 'contract_member',
+          emailNormalized: normalizeSearchText('member@contract.test'),
+          usernameNormalized: normalizeSearchText('contract_member'),
+          firstName: 'Contract',
+          lastName: 'Member',
+          ...(await argon2Seed(memberKey)),
+          role: 'member',
+          communityId: community!.id,
+          isActive: true,
+        })
+        .returning();
+      const res = await call('POST', '/v2/auth/login', {
+        body: { identifier: 'contract_member', derivedKey: memberKey },
+      });
+      const token = /ts_session=([^;]+)/.exec(
+        res.headers.get('set-cookie') ?? ''
+      );
+      return {
+        id: member!.id,
+        derivedKey: memberKey,
+        cookie: `ts_session=${token![1]}`,
+      };
+    };
+    return { call, derivedKey, login, addMember };
   }
 
   /** Assert the status is documented and a mapped schema accepts the body. */
@@ -191,6 +229,53 @@ describe('V2 OpenAPI runtime contract', () => {
     const t = '/v2/community/erasure';
     const body = { confirmFinality: true, currentDerivedKey: derivedKey };
     await check(await call('POST', t, { cookie, body }), 'POST', t, 202);
+  });
+
+  it('withdrawal is 200 for an admin and 202 for a steward member', async () => {
+    const t = '/v2/community/withdrawal';
+    const admin = await setup();
+    const adminCookie = await admin.login();
+    await check(
+      await admin.call('POST', t, {
+        cookie: adminCookie,
+        body: { currentDerivedKey: admin.derivedKey },
+      }),
+      'POST',
+      t,
+      200
+    );
+    const { call, login, derivedKey, addMember } = await setup();
+    const cookie = await login();
+    const member = await addMember();
+    const designated = await call('PUT', '/v2/community/steward', {
+      cookie,
+      body: { stewardUserId: member.id, currentDerivedKey: derivedKey },
+    });
+    expect(designated.status).toBe(200);
+    await check(
+      await call('POST', t, {
+        cookie: member.cookie,
+        body: { currentDerivedKey: member.derivedKey },
+      }),
+      'POST',
+      t,
+      202
+    );
+  });
+
+  it('export is rate limited with 429', async () => {
+    const { call, login } = await setup();
+    const cookie = await login();
+    const t = '/v2/community/export';
+    const statuses: number[] = [];
+    for (let i = 0; i < 8 && !statuses.includes(429); i += 1) {
+      const res = await call('POST', t, { cookie });
+      statuses.push(res.status);
+      expect(Object.keys(operationFor('POST', t).responses)).toContain(
+        String(res.status)
+      );
+    }
+    expect(statuses).toContain(429);
   });
 
   it('security flags and statuses hold for every operation anonymously', async () => {

@@ -29,9 +29,6 @@ const NO_INPUT = new Set([
   'GET /v2/auth/me',
   'POST /v2/auth/logout',
   'POST /v2/auth/revoke',
-  'GET /v2/community',
-  'GET /v2/community/map-config',
-  'GET /v2/community/sovereignty',
   'GET /v2/bootstrap',
 ]);
 
@@ -70,6 +67,27 @@ const SUCCESS_STATUSES: Record<string, number[]> = {
 /** Hand-kept extras for routes whose codes the generic rules cannot see. */
 const EXTRA_STATUSES: Record<string, number[]> = {
   'POST /v2/auth/login': [400, 401, 409, 413, 415, 503],
+  // community-export.service.ts: quota exceeded; imports.service.ts: too many
+  // open previews.
+  'POST /v2/community/export': [429],
+  'POST /v2/imports/preview': [429],
+  'POST /v2/imports/:id/commit': [429],
+  // direct-upload.service.ts and media-writes.service.ts.
+  'POST /v2/media': [411, 413, 415, 422],
+  'POST /v2/media/uploads': [410, 411, 413, 422, 501],
+  'POST /v2/media/uploads/:id/parts/presign': [410, 411, 422, 501],
+  'PUT /v2/media/uploads/:id/parts/:partNumber': [410, 411, 413, 422, 501],
+  'POST /v2/media/uploads/:id/complete': [410, 422, 501],
+  'DELETE /v2/media/uploads/:id': [410],
+  // Range reads and expired download tokens.
+  'GET /v2/community/export/download/:token': [416],
+  'GET /v2/media/:id': [416],
+  'GET /v2/public/communities/:slug/media/:fileId': [416],
+  'GET /explore/media/:fileId': [416],
+  // Unauthenticated routes that still answer a uniform 401 on bad credentials.
+  'POST /v2/bootstrap': [401],
+  'POST /v2/bootstrap/claim': [401],
+  'POST /v2/auth/recovery/redeem': [401],
 };
 
 const STATUS_TEXT: Record<number, string> = {
@@ -82,9 +100,15 @@ const STATUS_TEXT: Record<number, string> = {
   403: 'Forbidden',
   404: 'Not Found',
   409: 'Conflict',
+  410: 'Gone',
+  411: 'Length Required',
   413: 'Payload Too Large',
   415: 'Unsupported Media Type',
+  416: 'Range Not Satisfiable',
   422: 'Unprocessable Entity',
+  429: 'Too Many Requests',
+  500: 'Internal Server Error',
+  501: 'Not Implemented',
   503: 'Service Unavailable',
 };
 
@@ -105,10 +129,12 @@ export function successStatuses(row: RegistryRow): number[] {
 }
 
 /**
- * Every status a route may answer: its success codes, then a deliberately
- * generous set from the shared pipeline (CSRF 403, session 401, body parser
- * 400/413/415, service 404/409/422, outage 503). tests/openapi asserts real
- * responses stay inside this set, so an undocumented status fails the suite.
+ * Every status a route may answer: its success codes, the registry text, the
+ * hand-kept EXTRA_STATUSES (codes returned by one service, e.g. 429), then a
+ * deliberately generous set from the shared pipeline: CSRF 403 on writes,
+ * session 401 and role 403, body parser 400/413/415, service 404/409/422,
+ * 500 for persistence failures and 503 for outages. tests/openapi asserts
+ * real responses stay inside this set, so an undocumented status fails.
  */
 export function statusCodesFor(row: RegistryRow, secured: boolean): number[] {
   const key = routeKey(row.method, row.path);
@@ -129,12 +155,11 @@ export function statusCodesFor(row: RegistryRow, secured: boolean): number[] {
     codes.add(413);
     codes.add(415);
   }
-  if (body && secured) {
-    codes.add(409);
-    codes.add(422);
-  }
-  if (row.path.includes(':') || row.path.startsWith('/v2/public/'))
-    codes.add(404);
+  if (body) codes.add(409);
+  if (body && secured) codes.add(422);
+  if (key !== 'GET /health' && key !== 'GET /ready') codes.add(404);
+  // Services map unexpected persistence failures to 500.
+  if (row.path.startsWith('/v2/')) codes.add(500);
   return [...codes].sort((a, b) => a - b);
 }
 

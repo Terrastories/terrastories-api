@@ -447,3 +447,14 @@ async function directUpload(apiBase: string, file: File) {
   return (await completeRes.json()).data; // { id, url, checksum, ... }
 }
 ```
+
+## 11. Media adversarial hardening: decisions (#140)
+
+Covered by `tests/hono/media-adversarial.test.ts` and the `media_editor` persona steps.
+
+- SVG, HTML and JS are rejected with 400 at upload (never stored). Nothing active can be served inline.
+- Every download is `Content-Disposition: attachment` with no filename, `nosniff`, `Content-Security-Policy: default-src 'none'; sandbox` and `no-store`. Stored filenames are display metadata only and are never reflected in a header, so CRLF, quote and unicode names cannot inject headers.
+- Filenames are reduced to `[A-Za-z0-9._ -]` (max 180) and the storage key is server generated. A name whose extension is lost by truncation, or that has no extension, is rejected with 400.
+- Polyglots (valid image/PDF header plus an HTML, JS or zip tail) are accepted: only the first 8 KiB is sniffed. Safety rests on the download headers above, not on rejecting them. Out of scope: deep content validation or re-encoding.
+- Image and archive bombs: the API never decodes or unpacks uploads (no decoder is imported by any Hono-side module; `sharp` is used only by the legacy Fastify `file.service`). Size is bounded by the per-type caps (images 10 MiB, 413 above) instead of dimension or ratio limits. Out of scope: pixel caps, zip-ratio limits, malware scanning.
+- Out of scope: client-disconnect mid-stream abort tests, transform/variant endpoints (none exist), and reverse row-without-bytes reconciliation beyond export fail-closed.

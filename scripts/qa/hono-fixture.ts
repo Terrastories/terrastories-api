@@ -6089,6 +6089,13 @@ export async function createFixture(
       0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
       0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89,
     ]);
+    const qaPolyglotBytes = (() => {
+      const tail = new TextEncoder().encode('<html><script>1</script></html>');
+      const out = new Uint8Array(mediaPngBytes.byteLength + tail.byteLength);
+      out.set(mediaPngBytes, 0);
+      out.set(tail, mediaPngBytes.byteLength);
+      return out;
+    })();
     // 11 MiB exceeds the 10 MiB image cap and is small enough to stream in
     // every backend without allocating the 100 MiB request ceiling.
     const mediaOversizeBytes = (() => {
@@ -9665,6 +9672,76 @@ export async function createFixture(
               delete raw.headers['x-content-sha256'];
               return raw;
             })(),
+          },
+          {
+            name: 'accept a PNG+HTML polyglot and keep its bytes inert',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 201,
+            captureId: 'qaPolyglot',
+            ...qaRawUpload({
+              filename: 'qa-polyglot.png',
+              contentType: 'image/png',
+              bytes: qaPolyglotBytes,
+            }),
+            check: (body) => MediaUploadResponseSchema.safeParse(body).success,
+          },
+          {
+            name: 'serve the polyglot only as a sandboxed attachment',
+            method: 'GET',
+            path: '/v2/media/{qaPolyglot}',
+            expected: 200,
+            checkHeaders: (headers) =>
+              headers.get('content-type') === 'image/png' &&
+              headers.get('content-disposition') === 'attachment' &&
+              headers.get('x-content-type-options') === 'nosniff' &&
+              headers.get('content-security-policy') ===
+                "default-src 'none'; sandbox",
+            checkBytes: (bytes) =>
+              bytes.byteLength === qaPolyglotBytes.byteLength &&
+              bytes.every((b, i) => b === qaPolyglotBytes[i]),
+          },
+          {
+            name: 'reject an SVG with script',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 400,
+            ...qaRawUpload({
+              filename: 'qa-xss.svg',
+              contentType: 'image/svg+xml',
+              bytes: new TextEncoder().encode(
+                '<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>'
+              ),
+            }),
+          },
+          {
+            name: 'reject a zero-byte upload',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 400,
+            ...qaRawUpload({
+              filename: 'qa-empty.png',
+              contentType: 'image/png',
+              bytes: new Uint8Array(0),
+            }),
+          },
+          {
+            name: 'sanitize a CRLF and traversal filename',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 201,
+            ...qaRawUpload({
+              filename: '../a\r\nSet-Cookie: x=1.png',
+              contentType: 'image/png',
+              bytes: mediaPngBytes,
+            }),
+            check: (body) => {
+              const parsed = MediaUploadResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                /^[A-Za-z0-9._ -]+$/.test(parsed.data.data.originalName)
+              );
+            },
           },
           {
             name: 'create a direct multipart upload for a video over 100 MiB',

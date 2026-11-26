@@ -69,9 +69,9 @@ import type { WorkersPlan } from './config/v2-runtime.js';
 /** JSON API: nothing loads, nothing frames it, downloads are sandboxed. */
 const V2_CONTENT_SECURITY_POLICY =
   "default-src 'none'; frame-ancestors 'none'; sandbox";
-/** The two media byte routes a frontend embeds from another origin. */
+/** The media byte routes a frontend embeds from another origin. */
 const MEDIA_EMBED_PATH =
-  /^\/v2\/(?:media\/[^/]+|public\/communities\/[^/]+\/media\/[^/]+)$/;
+  /^\/(?:v2\/(?:media\/[^/]+|public\/communities\/[^/]+\/media\/[^/]+)|explore\/media\/[^/]+)$/;
 
 export type RequestHandler = (request: Request) => Promise<Response>;
 export interface FoundationOptions {
@@ -262,6 +262,10 @@ export function createHonoApp(options: FoundationOptions) {
   // it runs unchanged on Node and Workers.
   app.use('*', async (c, next) => {
     await next();
+    // Preflights are answered by cors() below, before the later no-store
+    // middleware runs, so no-store is also guaranteed here.
+    if (!c.res.headers.has('Cache-Control'))
+      c.header('Cache-Control', 'no-store');
     c.header('X-Content-Type-Options', 'nosniff');
     c.header('Content-Security-Policy', V2_CONTENT_SECURITY_POLICY);
     c.header('X-Frame-Options', 'DENY');

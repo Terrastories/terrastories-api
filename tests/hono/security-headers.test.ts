@@ -206,6 +206,7 @@ describe('V2 security response headers (#138)', () => {
     });
     expect(res.status).toBe(204);
     expect(res.headers.get('access-control-allow-origin')).toBe(CLIENT_ORIGIN);
+    expect(res.headers.get('cache-control')).toBe('no-store');
     expectBaseline(res);
   });
 
@@ -221,5 +222,27 @@ describe('V2 security response headers (#138)', () => {
       headers: { 'x-forwarded-proto': 'https' },
     });
     expect(forwarded.headers.get('strict-transport-security')).toBeNull();
+  });
+
+  it('honours x-forwarded-proto https only with trustProxy', async () => {
+    const proxied = createHonoApp({
+      repository: new HonoFoundationRepository(db),
+      serverSecret: makeServerSecret(),
+      secureCookies: false,
+      publicOrigin: API_ORIGIN,
+      corsOrigins: [CLIENT_ORIGIN],
+      storage,
+      trustProxy: true,
+    });
+    const https = await proxied.request('http://api.example.test/health', {
+      headers: { 'x-forwarded-proto': 'https' },
+    });
+    expect(https.headers.get('strict-transport-security')).toMatch(
+      /^max-age=\d+/
+    );
+    const http = await proxied.request('http://api.example.test/health', {
+      headers: { 'x-forwarded-proto': 'http' },
+    });
+    expect(http.headers.get('strict-transport-security')).toBeNull();
   });
 });

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import net from 'node:net';
@@ -8,26 +8,58 @@ import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { createHonoApp } from '../../src/hono-app.js';
+import { createShutdown, trackInFlight } from '../../src/node-shutdown.js';
+import { withDeadline } from '../../src/shared/deadline.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
 
 const storage = { read: async () => null };
 
+const migratedDb = () => {
+  const sqlite = new Sqlite(':memory:');
+  const db = drizzle(sqlite);
+  migrate(db, { migrationsFolder: 'src/db/migrations' });
+  return { sqlite, db };
+};
+
+/** Live DB for middleware queries; the /ready probe is replaced by `probe`. */
+const appWithProbe = (
+  probe: () => Promise<void>,
+  readinessTimeoutMs?: number
+) => {
+  const { db } = migratedDb();
+  const repository = new HonoFoundationRepository(db);
+  const readiness = vi.fn(probe);
+  repository.readiness = readiness;
+  return {
+    readiness,
+    app: createHonoApp({ repository, storage, readinessTimeoutMs }),
+  };
+};
+
 describe('readiness', () => {
-  it('reports a closed SQLite database as not ready while remaining live', async () => {
-    const sqlite = new Sqlite(':memory:');
-    const db = drizzle(sqlite);
-    migrate(db, { migrationsFolder: 'src/db/migrations' });
-    const app = createHonoApp({
-      repository: new HonoFoundationRepository(db),
-      storage,
-    });
+  it('is ready when the probe succeeds', async () => {
+    const { app, readiness } = appWithProbe(async () => undefined);
     expect((await app.request('/ready')).status).toBe(200);
-    sqlite.close();
-    expect((await app.request('/ready')).status).toBe(503);
+    expect(readiness).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns 503 when the SQLite probe hits a closed database, health stays 200', async () => {
+    const live = migratedDb();
+    const closed = migratedDb();
+    closed.sqlite.close();
+    const closedRepo = new HonoFoundationRepository(closed.db);
+    const probe = vi.fn(() => closedRepo.readiness());
+    const repository = new HonoFoundationRepository(live.db);
+    repository.readiness = probe;
+    const app = createHonoApp({ repository, storage });
+    // Middleware queries succeed on the live database; only the probe fails.
+    const res = await app.request('/ready');
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(503);
     expect((await app.request('/health')).status).toBe(200);
   });
 
-  it('reports an unreachable PostgreSQL client as not ready while remaining live', async () => {
+  it('returns 503 when the PostgreSQL client rejects at the probe', async () => {
     const failing = {
       select: () => ({
         from: () => ({
@@ -35,16 +67,81 @@ describe('readiness', () => {
         }),
       }),
     };
-    const repository = new HonoFoundationRepository(
+    const pgRepo = new HonoFoundationRepository(
       failing as unknown as ConstructorParameters<
         typeof HonoFoundationRepository
       >[0]
     );
-    const app = createHonoApp({ repository, storage });
-    const ready = await app.request('/ready');
-    expect(ready.status).toBe(503);
-    expect(await ready.json()).toEqual({ error: 'Service unavailable' });
+    const { app, readiness } = appWithProbe(() => pgRepo.readiness());
+    const res = await app.request('/ready');
+    expect(readiness).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: 'Service unavailable' });
     expect((await app.request('/health')).status).toBe(200);
+  });
+
+  it('returns 503 within the deadline when the probe never settles', async () => {
+    const { app, readiness } = appWithProbe(() => new Promise(() => {}), 100);
+    const started = Date.now();
+    const res = await app.request('/ready');
+    expect(readiness).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(503);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect((await app.request('/health')).status).toBe(200);
+  });
+});
+
+describe('withDeadline', () => {
+  it('rejects a promise that never settles and passes through the rest', async () => {
+    await expect(withDeadline(new Promise(() => {}), 50)).rejects.toThrow(
+      'deadline exceeded'
+    );
+    await expect(withDeadline(Promise.resolve(7), 50)).resolves.toBe(7);
+  });
+});
+
+describe('createShutdown', () => {
+  const setup = () => {
+    const events: string[] = [];
+    const inFlight = new Set<Promise<void>>();
+    let closeCb: () => void = () => undefined;
+    const shutdown = createShutdown({
+      server: { close: (cb) => void (closeCb = cb) },
+      inFlight,
+      closeDb: async () => void events.push('closeDb'),
+      stopTimers: () => void events.push('stopTimers'),
+      drainMs: 200,
+      exit: (code) => void events.push(`exit ${code}`),
+      log: () => undefined,
+    });
+    return { events, inFlight, shutdown, closeServer: () => closeCb() };
+  };
+
+  it('waits for a handler that outlives its closed socket before closeDb', async () => {
+    const { events, inFlight, shutdown, closeServer } = setup();
+    let finish: () => void = () => undefined;
+    trackInFlight(
+      inFlight,
+      new Promise<void>((resolve) => (finish = resolve)).then(() => {
+        events.push('handler done');
+      })
+    );
+    shutdown();
+    closeServer(); // socket gone, handler still running
+    await new Promise((r) => setTimeout(r, 50));
+    expect(events).toEqual(['stopTimers']);
+    finish();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(events).toEqual(['stopTimers', 'handler done', 'closeDb', 'exit 0']);
+  });
+
+  it('exits 1 without closing the DB when a handler never finishes', async () => {
+    const { events, inFlight, shutdown, closeServer } = setup();
+    trackInFlight(inFlight, new Promise<void>(() => {}));
+    shutdown();
+    closeServer();
+    await new Promise((r) => setTimeout(r, 400));
+    expect(events).toEqual(['stopTimers', 'exit 1']);
   });
 });
 
@@ -106,7 +203,7 @@ describe('Node server process', () => {
     }
     throw new Error('server did not become ready');
   };
-  const migratedDb = () => {
+  const migratedDbFile = () => {
     const dir = makeTmpDir();
     const file = path.join(dir, 'app.db');
     const sqlite = new Sqlite(file);
@@ -117,13 +214,17 @@ describe('Node server process', () => {
 
   it('drains an in-flight request on SIGTERM, refuses new connections, exits 0', async () => {
     const port = await freePort();
-    const { child, exited, output } = start(baseEnv(migratedDb(), port));
+    const { child, exited, output } = start(baseEnv(migratedDbFile(), port));
     await waitReady(port);
 
     // Hold a request open: headers sent, body incomplete.
     const socket = net.connect(port, '127.0.0.1');
     let response = '';
-    socket.on('data', (d) => (response += d));
+    let outputAtResponse = '';
+    socket.on('data', (d) => {
+      if (!response) outputAtResponse = output();
+      response += d;
+    });
     await new Promise<void>((resolve) => socket.on('connect', resolve));
     socket.write(
       'POST /v2/auth/prelogin HTTP/1.1\r\nHost: x\r\n' +
@@ -147,7 +248,12 @@ describe('Node server process', () => {
 
     socket.write('}');
     await new Promise((r) => socket.on('close', r));
-    expect(response).toMatch(/^HTTP\/1\.1 \d{3}/);
+    // The handler entered before SIGTERM (headers parsed, body pending) and
+    // completes normally: a 503 here would mean the DB closed under it.
+    expect(response).toMatch(/^HTTP\/1\.1 400 /);
+    expect(response).toContain('{"error":"Invalid request"}');
+    // Cleanup ran only after the response was delivered.
+    expect(outputAtResponse).not.toContain('database closed');
     expect(await exited).toBe(0);
     expect(output()).toContain('shutdown: database closed');
   }, 120_000);
@@ -155,7 +261,7 @@ describe('Node server process', () => {
   it('force-exits 1 after the drain deadline when a request never finishes', async () => {
     const port = await freePort();
     const { child, exited, output } = start({
-      ...baseEnv(migratedDb(), port),
+      ...baseEnv(migratedDbFile(), port),
       SHUTDOWN_DRAIN_TIMEOUT_MS: '1500',
     });
     await waitReady(port);
@@ -171,7 +277,9 @@ describe('Node server process', () => {
     const started = Date.now();
     child.kill('SIGTERM');
     expect(await exited).toBe(1);
-    expect(Date.now() - started).toBeGreaterThanOrEqual(1000);
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(1200);
+    expect(elapsed).toBeLessThan(5000);
     expect(output()).toContain('drain deadline exceeded');
     expect(output()).not.toContain('database closed');
     socket.destroy();
@@ -179,7 +287,7 @@ describe('Node server process', () => {
 
   it('exits non-zero when required production config is missing', async () => {
     const port = await freePort();
-    const env = { ...baseEnv(migratedDb(), port) } as NodeJS.ProcessEnv;
+    const env = { ...baseEnv(migratedDbFile(), port) } as NodeJS.ProcessEnv;
     env.NODE_ENV = 'production';
     delete env.AUTH_SERVER_SECRET;
     delete env.HONO_PUBLIC_ORIGIN;

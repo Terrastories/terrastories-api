@@ -9,6 +9,8 @@ import { serve } from '@hono/node-server';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import { createLocalStorage } from './node-storage.js';
 import { closeDb, getDb } from './db/index.js';
+import { withDeadline } from './shared/deadline.js';
+import { createShutdown, trackInFlight } from './node-shutdown.js';
 import { createHonoApp } from './hono-app.js';
 import { HonoFoundationRepository } from './repositories/hono-foundation.repository.js';
 import { MediaCleanupCoordinator } from './services/media-cleanup.service.js';
@@ -47,10 +49,12 @@ const erasureStore = process.env.ERASURE_RECORDS_ROOT
   ? await createNodeErasureRecordStore(process.env.ERASURE_RECORDS_ROOT)
   : undefined;
 const repository = new HonoFoundationRepository(db);
+// Bound the startup probe and /ready so a stalled database cannot hang them.
+const readinessTimeoutMs = Number(process.env.READINESS_TIMEOUT_MS) || 3000;
 // Fail fast (non-zero, content-free) when the schema is missing or the
 // database is unreachable, instead of serving 503 from /ready forever.
 try {
-  await repository.readiness();
+  await withDeadline(repository.readiness(), readinessTimeoutMs);
 } catch {
   // eslint-disable-next-line no-console -- startup failure, content-free
   console.error(
@@ -61,6 +65,7 @@ try {
 const app = createHonoApp({
   erasureStore,
   repository,
+  readinessTimeoutMs,
   // Prelogin HMAC key (SPEC-V2 §7 step 1). Validated by the runtime gate in
   // production-like modes; prelogin fails closed when absent.
   serverSecret: runtimeConfig.serverSecret,
@@ -88,8 +93,12 @@ const app = createHonoApp({
     runtimeConfig.environment === 'field-kit' ||
     envFlagEnabled(process.env.OFFLINE_MODE),
 });
+// Request handlers and sweeps still running; awaited before the DB closes.
+const inFlight = new Set<Promise<void>>();
 const server = serve({
-  fetch: app.fetch,
+  // Track handlers so shutdown waits for work that outlives its socket.
+  fetch: (...args: Parameters<typeof app.fetch>) =>
+    trackInFlight(inFlight, Promise.resolve(app.fetch(...args))),
   // Loopback by default; container images set HONO_HOST=0.0.0.0 so a published
   // port or a reverse-proxy sidecar can reach the listener.
   hostname: process.env.HONO_HOST?.trim() || '127.0.0.1',
@@ -107,12 +116,7 @@ const cleanup = new MediaCleanupCoordinator(db, storage, {
   // Explicit restore hold; see ORPHAN_SWEEP_HOLD_KEY in hono-foundation.service.ts.
   sweepPaused: envFlagEnabled(process.env.ORPHAN_SWEEP_PAUSED),
 });
-// Sweeps still running when shutdown starts; awaited before the DB closes.
-const inFlightSweeps = new Set<Promise<unknown>>();
-const trackSweep = (run: Promise<unknown>) => {
-  const tracked = run.finally(() => inFlightSweeps.delete(tracked));
-  inFlightSweeps.add(tracked);
-};
+const trackSweep = (run: Promise<unknown>) => trackInFlight(inFlight, run);
 const sweepOrphanObjects = () => {
   trackSweep(
     cleanup.sweepOrphanObjects().catch(() => {
@@ -180,37 +184,24 @@ const exportExpiryTimer = setInterval(() => {
 }, EXPORT_EXPIRY_GRACE_MS);
 exportExpiryTimer.unref();
 
-let shuttingDown = false;
-const shutdown = () => {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  clearInterval(exportExpiryTimer);
-  clearTimeout(orphanSweepTimers.first);
-  clearInterval(orphanSweepTimers.interval);
-  clearTimeout(maintenanceSweepTimers.first);
-  clearInterval(maintenanceSweepTimers.interval);
+const shutdown = createShutdown({
+  server,
+  inFlight,
+  closeDb,
+  stopTimers: () => {
+    clearInterval(exportExpiryTimer);
+    clearTimeout(orphanSweepTimers.first);
+    clearInterval(orphanSweepTimers.interval);
+    clearTimeout(maintenanceSweepTimers.first);
+    clearInterval(maintenanceSweepTimers.interval);
+  },
   // Test-only override (SHUTDOWN_DRAIN_TIMEOUT_MS); default is 10 s.
-  const drainMs = Number(process.env.SHUTDOWN_DRAIN_TIMEOUT_MS) || 10_000;
-  const deadline = setTimeout(() => {
+  drainMs: Number(process.env.SHUTDOWN_DRAIN_TIMEOUT_MS) || 10_000,
+  exit: (code) => process.exit(code),
+  log: (message) =>
     // eslint-disable-next-line no-console -- operator channel; content-free
-    console.error('shutdown: drain deadline exceeded, forcing exit');
-    if ('closeAllConnections' in server) server.closeAllConnections();
-    process.exit(1);
-  }, drainMs);
-  server.close(() => {
-    // No new sweeps are scheduled (timers cleared above); let running ones
-    // finish, bounded by the same deadline, before the database closes.
-    void Promise.allSettled([...inFlightSweeps])
-      .then(() => closeDb())
-      .then(() => {
-        clearTimeout(deadline);
-        // eslint-disable-next-line no-console -- operator channel; content-free
-        console.info('shutdown: database closed');
-        process.exit(0);
-      })
-      .catch(() => process.exit(1));
-  });
-};
+    console.error(message),
+});
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, shutdown);
 }

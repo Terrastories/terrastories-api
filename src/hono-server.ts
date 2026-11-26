@@ -8,7 +8,7 @@ import { EXPORT_EXPIRY_GRACE_MS } from './shared/export-policy.js';
 import { serve } from '@hono/node-server';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import { createLocalStorage } from './node-storage.js';
-import { getDb } from './db/index.js';
+import { closeDb, getDb } from './db/index.js';
 import { createHonoApp } from './hono-app.js';
 import { HonoFoundationRepository } from './repositories/hono-foundation.repository.js';
 import { MediaCleanupCoordinator } from './services/media-cleanup.service.js';
@@ -46,9 +46,21 @@ const storage = await createLocalStorage(
 const erasureStore = process.env.ERASURE_RECORDS_ROOT
   ? await createNodeErasureRecordStore(process.env.ERASURE_RECORDS_ROOT)
   : undefined;
+const repository = new HonoFoundationRepository(db);
+// Fail fast (non-zero, content-free) when the schema is missing or the
+// database is unreachable, instead of serving 503 from /ready forever.
+try {
+  await repository.readiness();
+} catch {
+  // eslint-disable-next-line no-console -- startup failure, content-free
+  console.error(
+    'startup failed: database is unreachable or not migrated (run db:migrate)'
+  );
+  process.exit(1);
+}
 const app = createHonoApp({
   erasureStore,
-  repository: new HonoFoundationRepository(db),
+  repository,
   // Prelogin HMAC key (SPEC-V2 §7 step 1). Validated by the runtime gate in
   // production-like modes; prelogin fails closed when absent.
   serverSecret: runtimeConfig.serverSecret,
@@ -163,7 +175,18 @@ const shutdown = () => {
   clearInterval(orphanSweepTimers.interval);
   clearTimeout(maintenanceSweepTimers.first);
   clearInterval(maintenanceSweepTimers.interval);
-  server.close(() => process.exit(0));
+  const deadline = setTimeout(() => {
+    if ('closeAllConnections' in server) server.closeAllConnections();
+    process.exit(1);
+  }, 10_000);
+  server.close(() => {
+    void closeDb()
+      .then(() => {
+        clearTimeout(deadline);
+        process.exit(0);
+      })
+      .catch(() => process.exit(1));
+  });
 };
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, shutdown);

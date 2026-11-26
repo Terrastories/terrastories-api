@@ -12,7 +12,8 @@ import {
   makeServerSecret,
 } from './auth-test-utils.js';
 import { tablesFor } from '../../src/db/dialect.js';
-import { createHonoApp } from '../../src/hono-app.js';
+import { Hono } from 'hono';
+import { createHonoApp, v2SecurityHeaders } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
 import { MediaCleanupCoordinator } from '../../src/services/media-cleanup.service.js';
 import { assertPutSha256, rawUploadRequest } from '../helpers/raw-upload.js';
@@ -78,6 +79,8 @@ function expectBaseline(res: Response) {
   expect(res.headers.get('referrer-policy')).toBe('no-referrer');
   expect(res.headers.get('x-powered-by')).toBeNull();
 }
+
+const HSTS = 'max-age=31536000';
 
 describe('V2 security response headers (#138)', () => {
   beforeAll(async () => {
@@ -170,10 +173,43 @@ describe('V2 security response headers (#138)', () => {
   it('sets them on a refused cross-origin mutation', async () => {
     const res = await app.request(`${API_ORIGIN}/v2/auth/logout`, {
       method: 'POST',
-      headers: { origin: 'https://evil.invalid' },
+      headers: { origin: 'https://evil.invalid', cookie },
     });
     expect(res.status).toBe(403);
     expectBaseline(res);
+    // The refused request must not have revoked the session.
+    const me = await app.request(`${API_ORIGIN}/v2/auth/me`, {
+      headers: { cookie },
+    });
+    expect(me.status).toBe(200);
+  });
+
+  it('removes a handler-set X-Powered-By', async () => {
+    const probe = new Hono();
+    probe.use('*', v2SecurityHeaders());
+    probe.get('/probe-powered', (c) => {
+      c.header('X-Powered-By', 'something');
+      return c.json({ ok: true });
+    });
+    const res = await probe.request(`${API_ORIGIN}/probe-powered`);
+    expect(res.status).toBe(200);
+    expectBaseline(res);
+  });
+
+  it('keeps CORP same-site on media denials and mutations', async () => {
+    const denied = await app.request(`${API_ORIGIN}/v2/media/${mediaId}`);
+    expect(denied.status).toBe(401);
+    expect(denied.headers.get('cross-origin-resource-policy')).toBe(
+      'same-site'
+    );
+    const missingDelete = await app.request(`${API_ORIGIN}/v2/media/999999`, {
+      method: 'DELETE',
+      headers: { cookie, origin: CLIENT_ORIGIN },
+    });
+    expect(missingDelete.status).toBe(404);
+    expect(missingDelete.headers.get('cross-origin-resource-policy')).toBe(
+      'same-site'
+    );
   });
 
   it('keeps media embeddable by the frontend origin and sandboxed', async () => {
@@ -212,9 +248,7 @@ describe('V2 security response headers (#138)', () => {
 
   it('sends HSTS only over https', async () => {
     const https = await app.request(`${API_ORIGIN}/health`);
-    expect(https.headers.get('strict-transport-security')).toMatch(
-      /^max-age=\d+/
-    );
+    expect(https.headers.get('strict-transport-security')).toBe(HSTS);
     const http = await app.request('http://api.example.test/health');
     expect(http.headers.get('strict-transport-security')).toBeNull();
     // A forwarded proto is honoured only behind a configured trusted proxy.
@@ -237,9 +271,14 @@ describe('V2 security response headers (#138)', () => {
     const https = await proxied.request('http://api.example.test/health', {
       headers: { 'x-forwarded-proto': 'https' },
     });
-    expect(https.headers.get('strict-transport-security')).toMatch(
-      /^max-age=\d+/
-    );
+    expect(https.headers.get('strict-transport-security')).toBe(HSTS);
+    // Ambiguous (appended) multi-value input is not trusted.
+    for (const value of ['http, https', 'https, http', 'https,https']) {
+      const multi = await proxied.request('http://api.example.test/health', {
+        headers: { 'x-forwarded-proto': value },
+      });
+      expect(multi.headers.get('strict-transport-security'), value).toBeNull();
+    }
     const http = await proxied.request('http://api.example.test/health', {
       headers: { 'x-forwarded-proto': 'http' },
     });

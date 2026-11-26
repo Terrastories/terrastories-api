@@ -25,6 +25,12 @@ it('refuses to serve on placeholder production configuration and stays refused',
       const refused = await mf.dispatchFetch('https://worker.test/health');
       expect(refused.status).toBe(503);
       expect(refused.headers.get('cache-control')).toBe('no-store');
+      // The app never started, so the entrypoint applies the baseline itself.
+      expect(refused.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(refused.headers.get('x-frame-options')).toBe('DENY');
+      expect(refused.headers.get('content-security-policy')).toBe(
+        "default-src 'none'; frame-ancestors 'none'; sandbox"
+      );
       // The stable content-free code makes a refused deploy identifiable
       // from the response alone (PR #229 review).
       expect(await refused.json()).toEqual({

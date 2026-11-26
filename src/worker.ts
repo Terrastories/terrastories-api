@@ -13,7 +13,7 @@ import type {
   ScheduledController,
 } from '@cloudflare/workers-types';
 import { drizzle } from 'drizzle-orm/d1';
-import { createHonoApp } from './hono-app.js';
+import { createHonoApp, V2_BASELINE_SECURITY_HEADERS } from './hono-app.js';
 import { HonoFoundationRepository } from './repositories/hono-foundation.repository.js';
 import {
   validStorageKey,
@@ -555,7 +555,15 @@ export function createWorker() {
         }
         return Response.json(
           { error: 'Service unavailable', code: 'config-refused' },
-          { status: 503, headers: { 'Cache-Control': 'no-store' } }
+          {
+            status: 503,
+            // The app (and its header middleware) never started, so the
+            // baseline security headers are applied here.
+            headers: {
+              ...V2_BASELINE_SECURITY_HEADERS,
+              'Cache-Control': 'no-store',
+            },
+          }
         );
       }
     },

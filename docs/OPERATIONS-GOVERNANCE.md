@@ -138,6 +138,14 @@ Operator procedure for any restore (D1 Time Travel, retained D1 export, self-hos
 
 Neither hold touches the database; lifting the hold never deletes anything by itself — it only re-enables the normal sweep, which still honors the grace window, the reference check and the resume cursor.
 
+## 8. Browser security headers and rate limiting (#138)
+
+**Headers.** Every V2 response (JSON, errors, CORS preflights, refused cross-origin mutations, media) carries `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; sandbox`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` and `Cache-Control: no-store`; there is no `X-Powered-By`. `Cross-Origin-Resource-Policy` is `same-site` everywhere except the two media byte routes (`GET /v2/media/:id`, `GET /v2/public/communities/:slug/media/:fileId`), which send `cross-origin` so the allowed frontend origin can embed them. `Strict-Transport-Security` is sent only when the request URL is https, or `x-forwarded-proto: https` arrives with `TRUSTED_PROXY` configured (Node behind nginx); plain-HTTP field kits never get it. The middleware lives in `src/hono-app.ts` and uses only Hono's `c.header`, so it runs unchanged on Node and Workers. Test: `tests/hono/security-headers.test.ts`.
+
+**Credential endpoints are throttled in the application** with the durable `AuthThrottle` (per-IP and per-account counters, uniform 401 on a block): login, recovery-code redeem, recovery-code generation, step-up for sovereignty actions, bootstrap, claim, own password change and own identifier change. Admin-initiated password reset and login codes need an authenticated admin and guess no credential, so they carry no counter.
+
+**General rate limiting is not built into the application.** Abuse-sensitive but non-credential routes (uploads, search, spatial reads) are limited at the edge: on Workers use Cloudflare rate-limiting rules (WAF) on the zone, keyed by client IP; on Node run a reverse proxy (nginx `limit_req`/`limit_conn`) in front, with `TRUSTED_PROXY` set so the application sees the real client address. In-process counters would be per-replica and per-isolate and give false assurance. If the edge limiter is down, the application still serves (fail open) while credential endpoints keep their database-backed throttle, which fails closed when the throttle store is unreadable.
+
 ## 7. Change control
 
 Changes to this document follow the `docs/SOURCE-OF-TRUTH.md` change-control contract: retention numbers belong to `docs/SPEC-V2.md` and may only change there; validator rules change in the same commit as `src/config/v2-runtime.ts` and their tests.

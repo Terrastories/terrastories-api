@@ -66,6 +66,13 @@ import { HonoAuthService } from './services/hono-auth.service.js';
 import { CONFLICT_BODY } from './services/community-writes.service.js';
 import type { WorkersPlan } from './config/v2-runtime.js';
 
+/** JSON API: nothing loads, nothing frames it, downloads are sandboxed. */
+const V2_CONTENT_SECURITY_POLICY =
+  "default-src 'none'; frame-ancestors 'none'; sandbox";
+/** The two media byte routes a frontend embeds from another origin. */
+const MEDIA_EMBED_PATH =
+  /^\/v2\/(?:media\/[^/]+|public\/communities\/[^/]+\/media\/[^/]+)$/;
+
 export type RequestHandler = (request: Request) => Promise<Response>;
 export interface FoundationOptions {
   repository: HonoFoundationRepository;
@@ -248,6 +255,34 @@ export function createHonoApp(options: FoundationOptions) {
     )
       throw new Error('Invalid CORS origin');
   }
+  // Security response headers on every V2 response, preflights and early
+  // refusals included (issue #138). Registered before CORS so a preflight
+  // that CORS answers itself still carries them; set after `next()` so the
+  // handler's own value never weakens the policy. Plain `c.header` only, so
+  // it runs unchanged on Node and Workers.
+  app.use('*', async (c, next) => {
+    await next();
+    c.header('X-Content-Type-Options', 'nosniff');
+    c.header('Content-Security-Policy', V2_CONTENT_SECURITY_POLICY);
+    c.header('X-Frame-Options', 'DENY');
+    c.header('Referrer-Policy', 'no-referrer');
+    // Media bytes are embedded by the allowed frontend origin (img/video/audio
+    // src) and so must not be blocked by CORP; every other response is not an
+    // embeddable resource.
+    c.header(
+      'Cross-Origin-Resource-Policy',
+      MEDIA_EMBED_PATH.test(c.req.path) ? 'cross-origin' : 'same-site'
+    );
+    // HSTS only over https: the local field kit may serve plain http, and
+    // browsers ignore the header there anyway.
+    const proto = c.req.header('x-forwarded-proto')?.split(',')[0]?.trim();
+    if (
+      new URL(c.req.url).protocol === 'https:' ||
+      (options.trustProxy && proto === 'https')
+    )
+      c.header('Strict-Transport-Security', 'max-age=31536000');
+    c.res.headers.delete('X-Powered-By');
+  });
   app.use(
     '*',
     cors({
@@ -296,8 +331,6 @@ export function createHonoApp(options: FoundationOptions) {
   );
   app.use('*', async (c, next) => {
     c.header('Cache-Control', 'no-store');
-    c.header('X-Content-Type-Options', 'nosniff');
-    c.header('Content-Security-Policy', "default-src 'none'; sandbox");
     if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) {
       const origin = c.req.header('Origin');
       if (

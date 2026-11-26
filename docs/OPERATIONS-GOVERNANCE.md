@@ -58,6 +58,21 @@ Each runbook ends with a verification step. "Automated" cites the test that prov
 **R1 — V2 sessions (revocation).** The account logs out, or calls revoke-all; a community admin revokes a member's device sessions by metadata; user/community authority changes delete sessions via database triggers (SPEC-V2 §6.8).
 _Verify (automated):_ `tests/hono/foundation.test.ts` and `tests/hono/worker.test.ts` prove the presented cookie stops authenticating immediately after logout/revoke, that login rotation binds a fresh row while the old token fails, and that requests fail closed when authoritative session state is unreadable. _Operator spot check:_ replay the old cookie — expect `401`.
 
+**R1a — V2 sessions (emergency global revocation, #137).** Use when session tokens may have leaked or a database copy has left custody. It revokes every session of every account at once; all users must log in again. There is no HTTP route and no session signing secret to rotate (tokens are random, stored only as SHA-256 digests), so this is an operator action. It deletes the session rows — the same effect as per-account revocation, so a presented cookie can never authenticate again — and writes one content-free `security.sessions.revoke_all` audit entry.
+
+- Node (SQLite or PostgreSQL from `DATABASE_URL`): `npx tsx scripts/ops/revoke-all-sessions.ts` prints the session count (dry run); add `--confirm` to revoke.
+- Cloudflare D1: save the statements below as `revoke-all.sql` and run `wrangler d1 execute <DB_NAME> --remote --file revoke-all.sql` (the same SQL works on SQLite with `sqlite3`; on PostgreSQL use the script).
+
+```sql
+DELETE FROM sessions;
+INSERT INTO audit_entries (community_id, actor_id, action, resource_type, resource_ids, outcome, created_at)
+VALUES (NULL, NULL, 'security.sessions.revoke_all', NULL, '[]', 'success', CAST(strftime('%s','now') AS INTEGER) * 1000);
+```
+
+_Verify (automated):_ `tests/hono/revoke-all-sessions.test.ts` proves every existing cookie answers `401` afterwards, new logins work, accounts are unchanged, and the audit entry is written (script and the SQL above). _Operator spot check:_ replay an old cookie — expect `401`.
+
+**Media storage on Node.** Local-disk media storage (`HONO_STORAGE_ROOT`, `Dockerfile` line 95) is the intended production configuration on Node; the runtime gate deliberately does not refuse it, and no in-memory media storage exists in the Hono app.
+
 **R2 — `JWT_SECRET` / `SESSION_SECRET` (V1 runtime).** Generate a new value (`openssl rand -base64 48`), replace it in the deployment environment (never in a file or the repository), and restart the deployment. Compose files require both variables (`:?` guard).
 _Verify (automated):_ the production config gate rejects placeholders and values shorter than 32 characters — `tests/config.test.ts` ("rejects shipped production placeholder", "must be at least 32 characters in production"). _After rotation:_ previously issued tokens and sessions stop validating — replay an old session cookie/authorization, expect `401`.
 

@@ -21,6 +21,9 @@ import { and, count, isNull, sql } from 'drizzle-orm';
 import { dialectOf, tablesFor } from '../db/dialect.js';
 import { buildAuditEntryInsert } from '../repositories/audit-entry.repository.js';
 
+/** PostgreSQL attempts when a deadlock or serialization failure aborts a run. */
+export const REVOKE_MAX_ATTEMPTS = 5;
+
 export const REVOKE_ALL_AUDIT_ACTION = 'security.sessions.revoke_all';
 
 /** Opaque run id: lets an operator tell this run's audit entry from any other. */
@@ -106,30 +109,49 @@ export async function revokeAllSessions(
       { behavior: 'immediate' }
     );
   }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return db.transaction(async (tx: any): Promise<RevokeAllResult> => {
-    // PostgreSQL (READ COMMITTED): serialize with every session writer first.
-    // EXCLUSIVE conflicts with the ROW EXCLUSIVE/ROW SHARE locks that login,
-    // redemption and claim transactions hold, so we wait for in-flight ones to
-    // commit (their sessions are then visible to the DELETE below) and block
-    // new ones until we commit (their codes are superseded by then, so the
-    // conditional consume fails). Taking this lock BEFORE touching login_codes
-    // keeps the sessions -> login_codes order the redemption path uses, so the
-    // two cannot deadlock.
-    await tx.execute(sql`LOCK TABLE sessions IN EXCLUSIVE MODE`);
-    const codes = (await supersedeCodes(tx)) as unknown[];
-    const tokens = (await supersedeTokens(tx)) as unknown[];
-    const deleted = (await tx
-      .delete(sessions)
-      .returning({ id: sessions.id })) as unknown[];
-    await audit(tx);
-    return {
-      runId,
-      revoked: deleted.length,
-      loginCodesSuperseded: codes.length,
-      claimTokensSuperseded: tokens.length,
-    };
-  });
+  // PostgreSQL: retry the whole transaction on deadlock / serialization
+  // failure (see the lock-order note below), a few times with backoff.
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return await db.transaction(async (tx: any): Promise<RevokeAllResult> => {
+        // Never wait forever on a lock held by a stuck transaction.
+        await tx.execute(sql`SET LOCAL lock_timeout = '10s'`);
+        // PostgreSQL (READ COMMITTED). The paths that create sessions or
+        // consume codes do not share one lock order (claim: claim_tokens ->
+        // sessions; redemption: sessions -> login_codes), so no single order
+        // here is deadlock-free against both. We take the table locks
+        // claim_tokens -> sessions -> login_codes-rows, BEFORE any row update:
+        //  - an in-flight claim or redemption that already holds what we need
+        //    finishes first, so its session is visible to the DELETE below and
+        //    its new codes are caught by the supersede;
+        //  - a new one blocks until we commit, then fails its conditional
+        //    consume against the superseded row.
+        // A deadlock with a redemption that holds session rows while we hold
+        // claim_tokens is still possible; PostgreSQL aborts one side (40P01)
+        // and we retry the whole transaction. lock_timeout bounds each wait.
+        await tx.execute(sql`LOCK TABLE claim_tokens IN EXCLUSIVE MODE`);
+        await tx.execute(sql`LOCK TABLE sessions IN EXCLUSIVE MODE`);
+        const tokens = (await supersedeTokens(tx)) as unknown[];
+        const codes = (await supersedeCodes(tx)) as unknown[];
+        const deleted = (await tx
+          .delete(sessions)
+          .returning({ id: sessions.id })) as unknown[];
+        await audit(tx);
+        return {
+          runId,
+          revoked: deleted.length,
+          loginCodesSuperseded: codes.length,
+          claimTokensSuperseded: tokens.length,
+        };
+      });
+    } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code;
+      const retryable = code === '40P01' || code === '40001';
+      if (!retryable || attempt >= REVOKE_MAX_ATTEMPTS) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100 * attempt ** 2));
+    }
+  }
 }
 
 /** What a run would change. */

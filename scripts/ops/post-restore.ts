@@ -114,6 +114,8 @@ export interface ReplayResult {
   replayed: number[];
   /** Users changed or created after the backup with no restored row: re-create them. */
   missing: number[];
+  /** Users deleted after the backup (restored row, none in the frozen DB): deactivated, review. */
+  removed: number[];
 }
 
 /**
@@ -152,12 +154,36 @@ export function replayAccountChanges(
       ids.push(entry.actor_id);
     for (const id of ids) userIds.add(id);
   }
+  // The audit log is only an extra signal: password changes and user updates
+  // commit before their audit write, and audit failures are swallowed
+  // (hono-auth.service.ts auditAuthEvent, user-management.service.ts audit),
+  // so an unaudited change would never be replayed. Compare the frozen and
+  // restored account rows directly, on every security-relevant column.
+  const cols0 = ACCOUNT_AUTHORITY_COLUMNS.join(', ');
+  const frozenRows = frozen
+    .prepare(`SELECT id, ${cols0} FROM users`)
+    .all() as Array<Record<string, unknown>>;
+  const frozenIds = new Set(frozenRows.map((r) => Number(r.id)));
+  const restoredById = new Map(
+    (
+      restored.prepare(`SELECT id, ${cols0} FROM users`).all() as Array<
+        Record<string, unknown>
+      >
+    ).map((r) => [Number(r.id), r])
+  );
+  for (const fr of frozenRows) {
+    const rr = restoredById.get(Number(fr.id));
+    if (!rr)
+      userIds.add(Number(fr.id)); // created after the backup: reported missing
+    else if (ACCOUNT_AUTHORITY_COLUMNS.some((c) => !Object.is(fr[c], rr[c])))
+      userIds.add(Number(fr.id));
+  }
   const cols = ACCOUNT_AUTHORITY_COLUMNS.join(', ');
   const assign = ACCOUNT_AUTHORITY_COLUMNS.map((c) => `${c} = @${c}`).join(
     ', '
   );
   const update = restored.prepare(`UPDATE users SET ${assign} WHERE id = @id`);
-  const result: ReplayResult = { replayed: [], missing: [] };
+  const result: ReplayResult = { replayed: [], missing: [], removed: [] };
   // Unique identifiers (email/username and their normalized forms) can be
   // swapped between users after the backup; applying finals one user at a time
   // would hit a unique conflict mid-replay. Stage every affected user onto
@@ -215,6 +241,19 @@ export function replayAccountChanges(
       result.replayed.push(id);
     }
   })();
+  // Users deleted after the backup: the restore resurrected them; deactivate.
+  const deactivate = restored.prepare(
+    'UPDATE users SET is_active = 0 WHERE id = ?'
+  );
+  for (const id of restoredById.keys())
+    if (!frozenIds.has(id)) {
+      deactivate.run(id);
+      result.removed.push(id);
+    }
+  if (result.removed.length > 0)
+    console.warn(
+      `post-restore: users deleted after the backup were restored and deactivated: ${result.removed.join(', ')}`
+    );
   if (result.missing.length > 0)
     console.warn(
       `post-restore: users with no restored row (created after the backup): ${result.missing.join(', ')}`

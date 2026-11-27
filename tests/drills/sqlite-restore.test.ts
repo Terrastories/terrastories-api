@@ -112,14 +112,15 @@ async function buildApp(db: Sqlite.Database, uploadsRoot: string) {
 async function login(
   app: ReturnType<typeof createHonoApp>,
   email: string,
-  slug: string
+  slug: string,
+  key: string = DRILL_KEY
 ): Promise<string> {
   const res = await app.request(`${ORIGIN}/v2/auth/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       identifier: email,
-      derivedKey: DRILL_KEY,
+      derivedKey: key,
       communitySlug: slug,
     }),
   });
@@ -558,6 +559,23 @@ describe('SQLite field-kit restore drill (#136)', () => {
       `replay-tmp-${ids.editorAlpha}@replay.invalid`,
       ids.adminBeta
     );
+    // Mirror it in the frozen DB: the account is unchanged between the two, so
+    // the row comparison leaves it alone.
+    const origBeta = live
+      .prepare(
+        'SELECT username, username_normalized, email_normalized FROM users WHERE id = ?'
+      )
+      .get(ids.adminBeta) as Record<string, string>;
+    live
+      .prepare(
+        'UPDATE users SET username = ?, username_normalized = ?, email_normalized = ? WHERE id = ?'
+      )
+      .run(
+        `replay-tmp-${ids.editorAlpha}`,
+        `replay-tmp-${ids.editorAlpha}`,
+        `replay-tmp-${ids.editorAlpha}@replay.invalid`,
+        ids.adminBeta
+      );
     const adminBetaBefore = db
       .prepare('SELECT username FROM users WHERE id = ?')
       .get(ids.adminBeta);
@@ -572,6 +590,16 @@ describe('SQLite field-kit restore drill (#136)', () => {
     expect(
       db.prepare('SELECT username FROM users WHERE id = ?').get(ids.adminBeta)
     ).toEqual(adminBetaBefore);
+    live
+      .prepare(
+        'UPDATE users SET username = ?, username_normalized = ?, email_normalized = ? WHERE id = ?'
+      )
+      .run(
+        origBeta.username,
+        origBeta.username_normalized,
+        origBeta.email_normalized,
+        ids.adminBeta
+      );
   });
 
   it('regenerates a temporary identifier that collides with a stored row', () => {
@@ -585,11 +613,17 @@ describe('SQLite field-kit restore drill (#136)', () => {
         "INSERT INTO audit_entries (actor_id, action, resource_type, resource_ids, outcome, created_at) VALUES (?, 'user.update', 'user', ?, 'success', ?)"
       )
       .run(ids.adminAlpha, JSON.stringify([ids.viewerAlpha]), Date.now());
-    // A stored row already equals the first candidate the generator yields.
-    db.prepare('UPDATE users SET username = ? WHERE id = ?').run(
-      `replay tmp FORCED ${ids.viewerAlpha}`,
-      ids.adminBeta
-    );
+    // A stored row (same in the frozen DB, so it is not replayed) already
+    // equals the first candidate the generator yields.
+    const origName = (
+      live
+        .prepare('SELECT username FROM users WHERE id = ?')
+        .get(ids.adminBeta) as { username: string }
+    ).username;
+    for (const target of [db, live])
+      target
+        .prepare('UPDATE users SET username = ? WHERE id = ?')
+        .run(`replay tmp FORCED ${ids.viewerAlpha}`, ids.adminBeta);
     const tokens = ['FORCED', 'SECOND'];
     const { replayed } = replayAccountChanges(live, db, auditMarker, {
       tempSource: () => tokens.shift() ?? 'EXHAUSTED',
@@ -608,6 +642,9 @@ describe('SQLite field-kit restore drill (#136)', () => {
         }
       ).username
     ).toBe(`replay tmp FORCED ${ids.viewerAlpha}`);
+    live
+      .prepare('UPDATE users SET username = ? WHERE id = ?')
+      .run(origName, ids.adminBeta);
   });
 
   it('reports users created after the backup that have no restored row', () => {
@@ -670,5 +707,85 @@ describe('SQLite field-kit restore drill (#136)', () => {
     );
     for (const entry of manifest)
       expect(existsSync(path.join(base, entry))).toBe(true);
+  });
+
+  it('replays account changes whose audit write failed (selected by row comparison)', async () => {
+    const adminLogin = await login(
+      liveApp,
+      DRILL_ACCOUNTS.adminAlpha,
+      'drill-alpha',
+      newAdminKey
+    );
+    // The audit sink is down: writes fail, and both services swallow it.
+    live.exec(
+      "CREATE TRIGGER drill_audit_down BEFORE INSERT ON audit_entries BEGIN SELECT RAISE(ABORT, 'audit down'); END"
+    );
+    const key2 = makeDerivedKey();
+    let fresh = '';
+    try {
+      const change = await liveApp.request(`${ORIGIN}/v2/auth/password`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: adminLogin,
+          origin: ORIGIN,
+        },
+        body: JSON.stringify({
+          currentDerivedKey: newAdminKey,
+          algorithm: ARGON2ID_ALGORITHM,
+          salt: makeVerifierSalt(),
+          params: { ...ARGON2ID_PARAMS },
+          derivedKey: key2,
+        }),
+      });
+      expect(change.status).toBe(200);
+      fresh = (change.headers.get('set-cookie') ?? '').split(';')[0]!;
+      const revoke = await liveApp.request(
+        `${ORIGIN}/v2/users/${ids.editorAlpha}`,
+        {
+          method: 'PATCH',
+          headers: {
+            'content-type': 'application/json',
+            cookie: fresh,
+            origin: ORIGIN,
+          },
+          body: JSON.stringify({ role: 'viewer' }),
+        }
+      );
+      expect(revoke.status).toBe(200);
+    } finally {
+      live.exec('DROP TRIGGER drill_audit_down');
+    }
+    const auditMax = (
+      live
+        .prepare('SELECT coalesce(max(id), 0) AS m FROM audit_entries')
+        .get() as { m: number }
+    ).m;
+
+    const { db, uploads } = restore('unaudited', true);
+    const app = await buildApp(db, uploads);
+    const loginAdmin = (key: string) =>
+      app.request(`${ORIGIN}/v2/auth/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          identifier: DRILL_ACCOUNTS.adminAlpha,
+          derivedKey: key,
+          communitySlug: 'drill-alpha',
+        }),
+      });
+    // Restored state is older: the backup-time password still works.
+    expect((await loginAdmin(DRILL_KEY)).status).toBe(200);
+    // Nothing is audited after auditMax, yet the replay restores the newer state.
+    const { replayed } = replayAccountChanges(live, db, auditMax);
+    expect(replayed).toEqual(
+      expect.arrayContaining([ids.adminAlpha, ids.editorAlpha])
+    );
+    expect((await loginAdmin(DRILL_KEY)).status).toBe(401);
+    expect((await loginAdmin(newAdminKey)).status).toBe(401);
+    expect((await loginAdmin(key2)).status).toBe(200);
+    expect(
+      db.prepare('SELECT role FROM users WHERE id = ?').get(ids.editorAlpha)
+    ).toEqual({ role: 'viewer' });
   });
 });

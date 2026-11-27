@@ -85,6 +85,10 @@ const SUCCESS_STATUSES: Record<string, number[]> = {
   'POST /v2/users/:id/login-codes': [201],
   'POST /v2/media': [201],
   'POST /v2/media/uploads': [201],
+  // user-management.service.ts resetPassword answers 204 (not 200).
+  'POST /v2/users/:id/password-reset': [204],
+  // imports.service.ts discardImport returns the manifest with 200, not 204.
+  'DELETE /v2/imports/:id': [200],
   'POST /v2/media/uploads/:id/complete': [201],
   'POST /v2/attachments': [201],
   'POST /v2/imports/preview': [201],

@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
+import {
+  ARGON2ID_ALGORITHM,
+  ARGON2ID_PARAMS_JSON,
+} from '../../src/shared/auth-policy.js';
 import { createHash } from 'node:crypto';
 import { MediaCleanupCoordinator } from '../../src/services/media-cleanup.service.js';
 import {
@@ -23,6 +27,7 @@ import {
   argon2Seed,
   makeDerivedKey,
   makeServerSecret,
+  makeVerifierSalt,
 } from '../hono/auth-test-utils.js';
 
 /**
@@ -214,6 +219,15 @@ describe('V2 OpenAPI runtime contract', () => {
     // live body (success and error alike) and name the real content type.
     const emitted =
       op.responses[String(res.status)]?.content?.['application/json']?.schema;
+    if (res.status === 204) {
+      // Bodyless success: no content documented, none sent.
+      expect(
+        emitted,
+        `${method} ${template} 204 has no content`
+      ).toBeUndefined();
+      expect(await res.text()).toBe('');
+      return;
+    }
     expect(
       emitted,
       `${method} ${template} ${res.status} must document a JSON schema`
@@ -338,6 +352,50 @@ describe('V2 OpenAPI runtime contract', () => {
       );
     }
     expect(statuses).toContain(429);
+  });
+
+  it('password reset answers 204 and import discard 200, as documented', async () => {
+    const { app, call, login, addMember } = await setup();
+    const cookie = await login();
+    const member = await addMember();
+    const reset = '/v2/users/:id/password-reset';
+    await check(
+      await call('POST', `/v2/users/${member.id}/password-reset`, {
+        cookie,
+        body: {
+          algorithm: ARGON2ID_ALGORITHM,
+          salt: makeVerifierSalt(),
+          params: JSON.parse(ARGON2ID_PARAMS_JSON),
+          derivedKey: makeDerivedKey(),
+        },
+      }),
+      'POST',
+      reset,
+      204
+    );
+    const form = new FormData();
+    form.set('kind', 'places');
+    form.set(
+      'file',
+      new File(['name,region\nContract Place,North\n'], 'places.csv', {
+        type: 'text/csv',
+      })
+    );
+    const preview = await app.request(`${ORIGIN}/v2/imports/preview`, {
+      method: 'POST',
+      headers: { cookie, 'x-forwarded-for': '198.51.100.20' },
+      body: form,
+    });
+    await check(preview.clone(), 'POST', '/v2/imports/preview', 201);
+    const manifest = (await preview.json()) as {
+      data: { id: number | string };
+    };
+    await check(
+      await call('DELETE', `/v2/imports/${manifest.data.id}`, { cookie }),
+      'DELETE',
+      '/v2/imports/:id',
+      200
+    );
   });
 
   it('direct upload completion answers 201 as documented', async () => {

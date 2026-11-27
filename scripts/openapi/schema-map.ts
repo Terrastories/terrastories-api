@@ -203,6 +203,8 @@ export const SCHEMA_MAP: Record<string, RouteSchemas> = {
   },
   'GET /v2/imports': { response: ImportManifestListResponseSchema },
   'GET /v2/imports/:id': { response: ImportManifestDetailResponseSchema },
+  'DELETE /v2/imports/:id': { response: ImportManifestDetailResponseSchema },
+  'POST /v2/imports/preview': { response: ImportManifestDetailResponseSchema },
   'POST /v2/community/export': {
     request: CreateCommunityExportRequestSchema,
     response: CreateCommunityExportResponseSchema,

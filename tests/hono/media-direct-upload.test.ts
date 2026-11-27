@@ -850,16 +850,38 @@ describe('direct multipart media upload (#286)', () => {
       });
 
       // The loser reaches R2 complete (a second resume) while the winner is
-      // still uncommitted; that is the exact window the retry must cover.
+      // still uncommitted; the first lookup after that is the loser's re-read
+      // and must still miss the winner's row. Release the insert only then, so
+      // the test proves the bounded re-read, not a lucky pre-insert lookup.
       const originalResume = bucket.resumeMultipartUpload.bind(bucket);
       let resumes = 0;
       vi.spyOn(bucket, 'resumeMultipartUpload').mockImplementation(
         (key, uploadId) => {
           resumes += 1;
-          if (resumes === 2) releaseWinner();
           return originalResume(key, uploadId);
         }
       );
+      const originalResolve =
+        MediaWritesRepository.prototype.resolveUploaderMedia;
+      let lookups = 0;
+      let lookupsAfterSecondResume = 0;
+      let lookupsThatSawWinner = 0;
+      vi.spyOn(
+        MediaWritesRepository.prototype,
+        'resolveUploaderMedia'
+      ).mockImplementation(async function (
+        this: MediaWritesRepository,
+        ...args: Parameters<MediaWritesRepository['resolveUploaderMedia']>
+      ) {
+        const found = await originalResolve.call(this, ...args);
+        lookups += 1;
+        if (resumes >= 2) {
+          lookupsAfterSecondResume += 1;
+          if (found) lookupsThatSawWinner += 1;
+          else releaseWinner();
+        }
+        return found;
+      });
 
       const responses = await Promise.all([
         post(
@@ -887,12 +909,19 @@ describe('direct multipart media upload (#286)', () => {
       const winner = responses.find((response) => response.status === 201)!;
       const loser = responses.find((response) => response.status === 409)!;
       expect(await loser.json()).toEqual({ error: 'Conflict' });
+      // The loser's 409 is the winner's row: more than one lookup happened,
+      // the first after the R2 race missed the row, and a later one saw the
+      // winner whose id is the single persisted row.
+      expect(lookups).toBeGreaterThanOrEqual(4);
+      expect(lookupsAfterSecondResume).toBeGreaterThanOrEqual(2);
+      expect(lookupsThatSawWinner).toBe(1);
       const file = MediaUploadResponseSchema.parse(await winner.json()).data;
       const files = await db
         .select()
         .from(tables.files)
         .where(eq(tables.files.id, file.id));
       expect(files).toHaveLength(1);
+      expect(files[0]!.id).toBe(file.id);
       const stored = await bucket.get(files[0]!.storageKey!);
       expect(new Uint8Array(await stored!.arrayBuffer())).toEqual(bytes);
       expect(
@@ -1062,11 +1091,20 @@ describe('direct multipart media upload (#286)', () => {
         cookies.editor!,
         { parts: etags }
       );
-      // Already assembled in R2 with no committed row yet: a stable conflict,
-      // not a bad-parts 400, and the completed object is untouched.
-      expect(retried.status).toBe(409);
-      expect(await retried.json()).toEqual({ error: 'Conflict' });
+      // Already assembled in R2 with no committed row anywhere: the retry
+      // must not look like a successful replay. It is a distinct retryable
+      // state, never the 409 that means "the winner's row exists".
+      expect(retried.status).toBe(503);
+      expect(await retried.json()).toEqual({
+        error: 'upload_completion_pending',
+      });
+      expect(retried.headers.get('retry-after')).toBe('2');
       expect(bucket.objects.has(key)).toBe(true);
+      const files = await db
+        .select({ id: tables.files.id })
+        .from(tables.files)
+        .where(eq(tables.files.storageKey, key));
+      expect(files).toEqual([]);
       const aborted = await r2App.request(
         `${API}/v2/media/uploads/${session.id}`,
         { method: 'DELETE', headers: { cookie: cookies.editor! } }

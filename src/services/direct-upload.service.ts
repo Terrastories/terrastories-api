@@ -61,13 +61,22 @@ export const DIRECT_UPLOAD_TTL_SECONDS = 2 * 60 * 60;
 
 export type DirectUploadResult<T> =
   | MediaWriteResult<T>
-  | { status: 410 | 501; body: V2ErrorResponse };
+  | { status: 410 | 501; body: V2ErrorResponse }
+  | {
+      status: 503;
+      body: V2ErrorResponse;
+      headers: { 'Retry-After': string };
+    };
 
 const NOT_CONFIGURED_BODY: V2ErrorResponse = Object.freeze({
   error: 'Direct upload is not available on this deployment',
 });
 const EXPIRED_BODY: V2ErrorResponse = Object.freeze({
   error: 'Upload session expired',
+});
+/** R2 assembled the object but the winner's `files` row is not visible yet. */
+const COMPLETION_PENDING_BODY: V2ErrorResponse = Object.freeze({
+  error: 'upload_completion_pending',
 });
 
 /**
@@ -77,6 +86,12 @@ const EXPIRED_BODY: V2ErrorResponse = Object.freeze({
  */
 const COMPLETION_RACE_WAIT_MS = 2_000;
 const COMPLETION_RACE_POLL_MS = 25;
+/**
+ * Cap the re-reads as well as the elapsed time: Workers Free allows 50 D1
+ * queries per invocation, so a fast 2 s loop could exhaust the request budget.
+ */
+const COMPLETION_RACE_MAX_LOOKUPS = 20;
+const COMPLETION_RACE_RETRY_AFTER_SECONDS = 2;
 
 const DIRECT_UPLOAD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -487,13 +502,14 @@ export class DirectUploadService {
     session: DirectUploadSession
   ): Promise<{ status: 409; body: typeof CONFLICT_BODY } | null> {
     const deadline = Date.now() + COMPLETION_RACE_WAIT_MS;
-    while (true) {
+    for (let lookups = 0; lookups < COMPLETION_RACE_MAX_LOOKUPS; lookups++) {
       const conflict = await this.completedUploadConflict(actor, session);
       if (conflict || Date.now() >= deadline) return conflict;
       await new Promise((resolve) =>
         setTimeout(resolve, COMPLETION_RACE_POLL_MS)
       );
     }
+    return null;
   }
 
   async completeUpload(
@@ -564,9 +580,16 @@ export class DirectUploadService {
               session
             );
             if (existing) return existing;
-            // No row committed (an abandoned or crashed winner). The bytes
-            // are already assembled, so this is not a bad-parts request.
-            return { status: 409, body: CONFLICT_BODY };
+            // No row is visible yet (the winner may be slow, or it crashed
+            // after R2 assembled the object). Never answer 409 here: a 409
+            // would read as a successful replay although no File row exists.
+            return {
+              status: 503,
+              body: COMPLETION_PENDING_BODY,
+              headers: {
+                'Retry-After': String(COMPLETION_RACE_RETRY_AFTER_SECONDS),
+              },
+            };
           }
           if (error.kind === 'invalid_parts') {
             const existing = await this.completedUploadConflict(actor, session);

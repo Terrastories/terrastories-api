@@ -314,14 +314,19 @@ export function createHonoApp(options: FoundationOptions) {
     }
     // Resolve persisted notice deadlines before any public or authenticated read.
     // A bounded backlog fails closed until subsequent requests/ticks drain it.
+    // /ready bounds these calls too, so a stalled database cannot hang it.
+    const guard = <T>(work: Promise<T>) =>
+      c.req.path === '/ready'
+        ? withDeadline(work, options.readinessTimeoutMs ?? 3000)
+        : work;
     if (
       c.req.path !== '/health' &&
-      !(await sovereigntyRepository.applyDueWithdrawals(now()))
+      !(await guard(sovereigntyRepository.applyDueWithdrawals(now())))
     )
       return c.json({ error: 'Service unavailable' }, 503);
     if (
       c.req.path !== '/health' &&
-      !(await sovereigntyRepository.activateDueErasures(now()))
+      !(await guard(sovereigntyRepository.activateDueErasures(now())))
     )
       return c.json({ error: 'Service unavailable' }, 503);
     await next();

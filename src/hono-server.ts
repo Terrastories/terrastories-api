@@ -13,7 +13,11 @@ import { allMigrationsApplied } from './db/migration-status.js';
 import { getMigrationPlan } from './db/migrate.js';
 import { getConfig } from './shared/config/index.js';
 import { withDeadline } from './shared/deadline.js';
-import { createShutdown, trackInFlight } from './node-shutdown.js';
+import {
+  createShutdown,
+  trackedFetch,
+  trackInFlight,
+} from './node-shutdown.js';
 import { createHonoApp } from './hono-app.js';
 import { HonoFoundationRepository } from './repositories/hono-foundation.repository.js';
 import { MediaCleanupCoordinator } from './services/media-cleanup.service.js';
@@ -105,8 +109,7 @@ const app = createHonoApp({
 const inFlight = new Set<Promise<void>>();
 const server = serve({
   // Track handlers so shutdown waits for work that outlives its socket.
-  fetch: (...args: Parameters<typeof app.fetch>) =>
-    trackInFlight(inFlight, Promise.resolve(app.fetch(...args))),
+  fetch: trackedFetch(inFlight, app.fetch),
   // Loopback by default; container images set HONO_HOST=0.0.0.0 so a published
   // port or a reverse-proxy sidecar can reach the listener.
   hostname: process.env.HONO_HOST?.trim() || '127.0.0.1',

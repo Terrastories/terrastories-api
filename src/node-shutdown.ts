@@ -17,6 +17,14 @@ export function trackInFlight<T>(
   return work;
 }
 
+/** Wrap a fetch handler so shutdown can await requests that outlive their socket. */
+export function trackedFetch<A extends unknown[], R>(
+  inFlight: Set<Promise<void>>,
+  fetch: (...args: A) => R | Promise<R>
+): (...args: A) => Promise<R> {
+  return (...args) => trackInFlight(inFlight, Promise.resolve(fetch(...args)));
+}
+
 export interface ShutdownDeps {
   server: {
     close(callback: () => void): unknown;

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -8,7 +8,14 @@ import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { createHonoApp } from '../../src/hono-app.js';
-import { createShutdown, trackInFlight } from '../../src/node-shutdown.js';
+import { serve } from '@hono/node-server';
+import { CommunitySovereigntyRepository } from '../../src/repositories/community-sovereignty.repository.js';
+import { allMigrationsApplied } from '../../src/db/migration-status.js';
+import {
+  createShutdown,
+  trackedFetch,
+  trackInFlight,
+} from '../../src/node-shutdown.js';
 import { withDeadline } from '../../src/shared/deadline.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
 
@@ -88,6 +95,124 @@ describe('readiness', () => {
     expect(res.status).toBe(503);
     expect(Date.now() - started).toBeLessThan(2000);
     expect((await app.request('/health')).status).toBe(200);
+  });
+});
+
+describe('readiness: earlier middleware', () => {
+  it('returns 503 within the deadline when the sovereignty step stalls', async () => {
+    const spy = vi
+      .spyOn(CommunitySovereigntyRepository.prototype, 'applyDueWithdrawals')
+      .mockImplementation(() => new Promise(() => {}));
+    try {
+      const { app } = appWithProbe(async () => undefined, 100);
+      const started = Date.now();
+      const res = await app.request('/ready');
+      expect(spy).toHaveBeenCalled();
+      expect(res.status).toBe(503);
+      expect(Date.now() - started).toBeLessThan(2000);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe('allMigrationsApplied', () => {
+  const sqlitePlan = {
+    dialect: 'sqlite' as const,
+    migrationsFolder: 'src/db/migrations',
+  };
+  const journal = (
+    JSON.parse(
+      readFileSync('src/db/migrations/meta/_journal.json', 'utf8')
+    ) as { entries: { when: number }[] }
+  ).entries.map((e) => e.when);
+  const pgPlan = {
+    dialect: 'postgresql' as const,
+    migrationsFolder: 'src/db/migrations',
+  };
+  const pgWith = (rows: { created_at: string }[] | Error) =>
+    ({
+      execute: vi.fn(async () => {
+        if (rows instanceof Error) throw rows;
+        return rows;
+      }),
+    }) as never;
+
+  it('accepts a fully migrated SQLite database', async () => {
+    expect(await allMigrationsApplied(migratedDb().db, sqlitePlan)).toBe(true);
+  });
+
+  it('rejects SQLite when a middle entry is missing even if a newer row exists', async () => {
+    const { sqlite, db } = migratedDb();
+    sqlite
+      .prepare('DELETE FROM __drizzle_migrations WHERE created_at = ?')
+      .run(journal[5]);
+    sqlite
+      .prepare(
+        'INSERT INTO __drizzle_migrations (hash, created_at) VALUES (?, ?)'
+      )
+      .run('bogus', journal[journal.length - 1] + 1000);
+    expect(await allMigrationsApplied(db, sqlitePlan)).toBe(false);
+  });
+
+  it('PostgreSQL: accepts when every entry is recorded (bigint strings)', async () => {
+    const db = pgWith(journal.map((w) => ({ created_at: String(w) })));
+    expect(await allMigrationsApplied(db, pgPlan)).toBe(true);
+  });
+
+  it('PostgreSQL: rejects a missing entry and a missing journal table', async () => {
+    const partial = pgWith(
+      journal.slice(0, -1).map((w) => ({ created_at: String(w) }))
+    );
+    expect(await allMigrationsApplied(partial, pgPlan)).toBe(false);
+    await expect(
+      allMigrationsApplied(pgWith(new Error('relation does not exist')), pgPlan)
+    ).rejects.toThrow();
+  });
+});
+
+describe('tracked fetch on a real listener', () => {
+  it('keeps the DB open until a handler that outlived its socket settles', async () => {
+    const events: string[] = [];
+    const inFlight = new Set<Promise<void>>();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let entered: () => void = () => undefined;
+    const handlerEntered = new Promise<void>((resolve) => (entered = resolve));
+    const server = serve({
+      fetch: trackedFetch(inFlight, async () => {
+        entered();
+        await gate; // stands in for a DB or storage operation
+        events.push('handler done');
+        return new Response('ok');
+      }),
+      hostname: '127.0.0.1',
+      port: 0,
+    });
+    await new Promise((r) => server.once('listening', r));
+    const { port } = server.address() as net.AddressInfo;
+    const exitCodes: number[] = [];
+    const shutdown = createShutdown({
+      server,
+      inFlight,
+      closeDb: async () => void events.push('closeDb'),
+      stopTimers: () => undefined,
+      drainMs: 5000,
+      exit: (code) => void exitCodes.push(code),
+      log: () => undefined,
+    });
+    const client = net.connect(port, '127.0.0.1');
+    client.on('error', () => undefined);
+    await new Promise<void>((r) => client.on('connect', r));
+    client.write('GET / HTTP/1.1\r\nHost: x\r\n\r\n');
+    await handlerEntered; // handler provably running before shutdown
+    shutdown();
+    client.destroy(); // socket gone while the handler is still awaiting
+    await new Promise((r) => setTimeout(r, 100));
+    expect(events).toEqual([]);
+    release();
+    await vi.waitFor(() => expect(exitCodes).toEqual([0]));
+    expect(events).toEqual(['handler done', 'closeDb']);
   });
 });
 
@@ -310,6 +435,28 @@ describe('Node server process', () => {
     const { exited, output } = start(baseEnv(file, port));
     expect(await exited).toBe(1);
     expect(output()).toContain('not migrated');
+  }, 120_000);
+
+  it('exits 1 within the deadline when PostgreSQL accepts connections but never answers', async () => {
+    const port = await freePort();
+    const sockets: net.Socket[] = [];
+    const silent = net.createServer((sock) => sockets.push(sock));
+    await new Promise<void>((r) => silent.listen(0, '127.0.0.1', r));
+    const pgPort = (silent.address() as net.AddressInfo).port;
+    try {
+      const { exited, output } = start({
+        ...baseEnv(migratedDbFile(), port),
+        DATABASE_URL: `postgresql://u:p@127.0.0.1:${pgPort}/db`,
+        DATABASE_SSL: 'disable',
+        READINESS_TIMEOUT_MS: '500',
+      });
+      expect(await exited).toBe(1);
+      expect(output()).toContain('not migrated');
+      expect(sockets.length).toBeGreaterThan(0); // the probe was attempted
+    } finally {
+      for (const sock of sockets) sock.destroy();
+      silent.close();
+    }
   }, 120_000);
 
   it('exits non-zero with a clear message when the database is not migrated', async () => {

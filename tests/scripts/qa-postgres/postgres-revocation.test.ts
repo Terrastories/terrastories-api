@@ -6,7 +6,7 @@
  * (npm run qa:personas:postgres); skipped elsewhere.
  */
 import { join } from 'node:path';
-import { and, count, isNull } from 'drizzle-orm';
+import { and, count, eq, isNull } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { describe, expect, it } from 'vitest';
@@ -14,7 +14,10 @@ import { decidePostgresPersonaQa } from '../../../scripts/qa/qa-database.js';
 import { createPostgresClient } from '../../../src/db/index.js';
 import { createHonoApp } from '../../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../../src/repositories/hono-foundation.repository.js';
-import { revokeAllSessions } from '../../../src/ops/revoke-all-sessions.js';
+import {
+  revokeAllSessions,
+  sqlState,
+} from '../../../src/ops/revoke-all-sessions.js';
 import { communitiesPg } from '../../../src/db/schema/communities.js';
 import { sessionsPg } from '../../../src/db/schema/sessions.js';
 import { usersPg } from '../../../src/db/schema/users.js';
@@ -230,18 +233,21 @@ describe(
           `requires a PostgreSQL target: ${decision.target.reason}`
         );
       const url = decision.target.url;
-      // Deterministic deadlock victim: the connection whose deadlock_timeout
-      // is shorter runs the detector first and aborts itself. The revocation
-      // detects after 300 ms; the other side would only after 30 s. (These
-      // settings need a superuser, which the dedicated test database user is.)
+      // Deterministic deadlock victim: PostgreSQL runs the deadlock check once,
+      // deadlock_timeout after a backend starts waiting, and the checker aborts
+      // itself. The revocation is necessarily the first waiter, so its timeout
+      // (5 s) leaves ample room for the other side to issue its conflicting
+      // statement before the check, while the other side's (120 s) means it
+      // never checks first. (These settings need a superuser, which the
+      // dedicated test database user is.)
       const revokeClient = createPostgresClient(url, {
         max: 2,
-        connection: { deadlock_timeout: '300ms' },
+        connection: { deadlock_timeout: '5s' },
       });
       const claimClient = createPostgresClient(url, {
         max: 2,
         onnotice: () => undefined,
-        connection: { deadlock_timeout: '30s' },
+        connection: { deadlock_timeout: '120s' },
       });
       try {
         await revokeClient.unsafe('DROP SCHEMA IF EXISTS drizzle CASCADE');
@@ -431,51 +437,107 @@ describe(
             userId,
             now,
           }) => {
-            await revokeDb.insert(sessionsPg).values({
-              id: 'dl',
-              tokenHash: 'dl',
-              userId,
-              expiresAt: now + 3_600_000,
-            });
-            const proceed = gate();
-            let ready!: () => void;
-            const holding = new Promise<void>((resolve) => (ready = resolve));
-            const pending: Array<Promise<unknown>> = [];
-            try {
-              // A synthetic transaction that holds a session row lock and then
-              // needs a claim_tokens row: the inverse of the revocation's
-              // table-lock order, built only to force a real 40P01 (no
-              // production path does this).
-              const other = claimClient.begin(async (tx) => {
-                await tx`select id from sessions where id = 'dl' for update`;
-                ready();
-                await proceed.promise;
-                await tx`update claim_tokens set superseded_at = ${now} where id = ${tokenId}`;
+            const tries: Array<{
+              attempts: number;
+              otherAborted: boolean;
+            }> = [];
+            // The deadlock check runs once per wait, so a slow CI machine could
+            // let the synthetic side lose the race. Up to 3 tries; every try
+            // must still end clean, and at least one must show the retry.
+            for (let attempt = 1; attempt <= 3; attempt += 1) {
+              await revokeDb.insert(sessionsPg).values({
+                id: `dl-${attempt}`,
+                tokenHash: `dl-${attempt}`,
+                userId,
+                expiresAt: now + 3_600_000,
               });
-              pending.push(other);
-              await holding;
-              // Revocation holds claim_tokens and waits for the sessions lock.
-              const revocation = revokeAllSessions(revokeDb);
-              pending.push(revocation);
-              await waitForLockWait(revokeClient, /LOCK TABLE/i);
-              // Now the other side asks for claim_tokens and the cycle closes.
-              // The revocation connection's deadlock_timeout (300 ms) is far
-              // shorter than the other's (30 s), so the revocation is the
-              // victim every time; it then retries.
-              proceed.open();
-              const result = await revocation;
-              expect(result.attempts).toBeGreaterThanOrEqual(2);
-              // The synthetic side must have completed (it was not the victim).
-              await other; // rejects if the synthetic side was the victim
-              expect(await countSessions(revokeDb)).toBe(0);
-            } finally {
-              proceed.open();
-              await Promise.allSettled(pending);
+              await revokeDb
+                .update(claimTokensPg)
+                .set({ supersededAt: null })
+                .where(eq(claimTokensPg.id, tokenId));
+              const proceed = gate();
+              let ready!: () => void;
+              const holding = new Promise<void>((resolve) => (ready = resolve));
+              const pending: Array<Promise<unknown>> = [];
+              try {
+                // A synthetic transaction that holds a session row lock and
+                // then needs a claim_tokens row: the inverse of the
+                // revocation's table-lock order, built only to force a real
+                // 40P01 (no production path does this).
+                const other = claimClient.begin(async (tx) => {
+                  await tx`select id from sessions where id = ${`dl-${attempt}`} for update`;
+                  ready();
+                  await proceed.promise;
+                  await tx`update claim_tokens set superseded_at = ${now} where id = ${tokenId}`;
+                });
+                const otherSettled = other.then(
+                  () => ({ aborted: false }),
+                  (error: unknown) => ({
+                    aborted: true,
+                    state: sqlState(error),
+                  })
+                );
+                pending.push(otherSettled);
+                await holding;
+                // Revocation holds claim_tokens and waits for the sessions lock.
+                const revocation = revokeAllSessions(revokeDb);
+                pending.push(revocation);
+                await waitForLockWait(revokeClient, /LOCK TABLE/i);
+                // The revocation is observed waiting: issue the conflicting
+                // statement now, well inside its 5 s deadlock_timeout.
+                proceed.open();
+                const result = await revocation;
+                const outcome = await otherSettled;
+                if (outcome.aborted) expect(outcome.state).toBe('40P01');
+                tries.push({
+                  attempts: result.attempts,
+                  otherAborted: outcome.aborted,
+                });
+                // Every try ends clean, whoever was the victim.
+                expect(await countSessions(revokeDb)).toBe(0);
+                const live = async () => ({
+                  codes: Number(
+                    (
+                      await revokeDb
+                        .select({ n: count() })
+                        .from(loginCodesPg)
+                        .where(
+                          and(
+                            isNull(loginCodesPg.usedAt),
+                            isNull(loginCodesPg.supersededAt)
+                          )
+                        )
+                    )[0]?.n ?? 0
+                  ),
+                  tokens: Number(
+                    (
+                      await revokeDb
+                        .select({ n: count() })
+                        .from(claimTokensPg)
+                        .where(
+                          and(
+                            isNull(claimTokensPg.consumedAt),
+                            isNull(claimTokensPg.supersededAt)
+                          )
+                        )
+                    )[0]?.n ?? 0
+                  ),
+                });
+                expect(await live()).toEqual({ codes: 0, tokens: 0 });
+                if (result.attempts >= 2 && !outcome.aborted) break;
+              } finally {
+                proceed.open();
+                await Promise.allSettled(pending);
+              }
             }
+            expect(
+              tries.some((entry) => entry.attempts >= 2 && !entry.otherAborted),
+              `no try showed the retry: ${JSON.stringify(tries)}`
+            ).toBe(true);
           }
         );
       },
-      60_000
+      120_000
     );
   }
 );

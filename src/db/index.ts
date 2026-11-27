@@ -42,6 +42,7 @@ export function createPostgresClient(
 
 let db: Database | null = null;
 let connectionProbe: (() => Promise<void>) | null = null;
+let closeConnection: (() => Promise<void>) | null = null;
 
 export async function getDb(): Promise<Database> {
   if (db) return db;
@@ -58,6 +59,7 @@ export async function getDb(): Promise<Database> {
       ssl: resolvePostgresSsl(config.database),
     });
     db = drizzlePostgres(queryClient);
+    closeConnection = () => queryClient.end();
     connectionProbe = async () => {
       await queryClient`SELECT 1`;
     };
@@ -66,12 +68,22 @@ export async function getDb(): Promise<Database> {
       config.environment === 'test' ? ':memory:' : config.database.url;
     const sqliteClient = new Database(dbPath);
     db = drizzleSqlite(sqliteClient);
+    closeConnection = async () => {
+      sqliteClient.close();
+    };
     connectionProbe = async () => {
       sqliteClient.prepare('SELECT 1').get();
     };
   }
 
   return db;
+}
+
+export async function closeDb(): Promise<void> {
+  if (closeConnection) await closeConnection();
+  db = null;
+  connectionProbe = null;
+  closeConnection = null;
 }
 
 /**

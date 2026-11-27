@@ -8,7 +8,16 @@ import { EXPORT_EXPIRY_GRACE_MS } from './shared/export-policy.js';
 import { serve } from '@hono/node-server';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import { createLocalStorage } from './node-storage.js';
-import { getDb } from './db/index.js';
+import { closeDb, getDb } from './db/index.js';
+import { allMigrationsApplied } from './db/migration-status.js';
+import { getMigrationPlan } from './db/migrate.js';
+import { getConfig } from './shared/config/index.js';
+import { withDeadline } from './shared/deadline.js';
+import {
+  createShutdown,
+  trackedFetch,
+  trackInFlight,
+} from './node-shutdown.js';
 import { createHonoApp } from './hono-app.js';
 import { HonoFoundationRepository } from './repositories/hono-foundation.repository.js';
 import { MediaCleanupCoordinator } from './services/media-cleanup.service.js';
@@ -46,9 +55,30 @@ const storage = await createLocalStorage(
 const erasureStore = process.env.ERASURE_RECORDS_ROOT
   ? await createNodeErasureRecordStore(process.env.ERASURE_RECORDS_ROOT)
   : undefined;
+const repository = new HonoFoundationRepository(db);
+// Bound the startup probe and /ready so a stalled database cannot hang them.
+const readinessTimeoutMs = Number(process.env.READINESS_TIMEOUT_MS) || 3000;
+// Fail fast (non-zero, content-free) when the schema is missing or the
+// database is unreachable, instead of serving 503 from /ready forever.
+try {
+  await withDeadline(repository.readiness(), readinessTimeoutMs);
+  const migrationsOk = await withDeadline(
+    allMigrationsApplied(db, getMigrationPlan(getConfig().database.url)),
+    readinessTimeoutMs
+  );
+  if (!migrationsOk) throw new Error('migrations pending');
+} catch {
+  // eslint-disable-next-line no-console -- startup failure, content-free
+  console.error(
+    'startup failed: database is unreachable or not migrated (run db:migrate)'
+  );
+  process.exit(1);
+}
 const app = createHonoApp({
   erasureStore,
-  repository: new HonoFoundationRepository(db),
+  repository,
+  readinessTimeoutMs,
+  trackWork: (work) => void trackInFlight(inFlight, work),
   // Prelogin HMAC key (SPEC-V2 §7 step 1). Validated by the runtime gate in
   // production-like modes; prelogin fails closed when absent.
   serverSecret: runtimeConfig.serverSecret,
@@ -76,8 +106,11 @@ const app = createHonoApp({
     runtimeConfig.environment === 'field-kit' ||
     envFlagEnabled(process.env.OFFLINE_MODE),
 });
+// Request handlers and sweeps still running; awaited before the DB closes.
+const inFlight = new Set<Promise<void>>();
 const server = serve({
-  fetch: app.fetch,
+  // Track handlers so shutdown waits for work that outlives its socket.
+  fetch: trackedFetch(inFlight, app.fetch),
   // Loopback by default; container images set HONO_HOST=0.0.0.0 so a published
   // port or a reverse-proxy sidecar can reach the listener.
   hostname: process.env.HONO_HOST?.trim() || '127.0.0.1',
@@ -95,11 +128,14 @@ const cleanup = new MediaCleanupCoordinator(db, storage, {
   // Explicit restore hold; see ORPHAN_SWEEP_HOLD_KEY in hono-foundation.service.ts.
   sweepPaused: envFlagEnabled(process.env.ORPHAN_SWEEP_PAUSED),
 });
+const trackSweep = (run: Promise<unknown>) => trackInFlight(inFlight, run);
 const sweepOrphanObjects = () => {
-  void cleanup.sweepOrphanObjects().catch(() => {
-    // eslint-disable-next-line no-console -- operator channel; content-free
-    console.warn('media cleanup: orphan sweep failed');
-  });
+  trackSweep(
+    cleanup.sweepOrphanObjects().catch(() => {
+      // eslint-disable-next-line no-console -- operator channel; content-free
+      console.warn('media cleanup: orphan sweep failed');
+    })
+  );
 };
 const orphanSweepTimers = scheduleOrphanSweep(sweepOrphanObjects);
 
@@ -114,10 +150,12 @@ const maintenanceSweepTimers = scheduleMaintenanceSweeps(() => {
   // Each job already catches its own failure; this catch keeps any
   // unexpected throw from becoming an unhandled rejection that ends the
   // process.
-  runMaintenanceSweeps(db, { storage, erasureStore }).catch(() => {
-    // eslint-disable-next-line no-console -- operator channel; content-free
-    console.warn('maintenance sweeps: run failed');
-  });
+  trackSweep(
+    runMaintenanceSweeps(db, { storage, erasureStore }).catch(() => {
+      // eslint-disable-next-line no-console -- operator channel; content-free
+      console.warn('maintenance sweeps: run failed');
+    })
+  );
 });
 
 // Restart fallback: persisted exports are reclaimed within one minute of boot
@@ -137,34 +175,45 @@ let erasureSweepRunning = false;
 const exportExpiryTimer = setInterval(() => {
   if (erasureService && !erasureSweepRunning) {
     erasureSweepRunning = true;
-    void erasureService
-      .sweep(new Date())
-      .catch(() => {
-        // eslint-disable-next-line no-console -- content-free operator channel
-        console.warn('maintenance: community erasure sweep failed');
-      })
-      .finally(() => {
-        erasureSweepRunning = false;
-      });
+    trackSweep(
+      erasureService
+        .sweep(new Date())
+        .catch(() => {
+          // eslint-disable-next-line no-console -- content-free operator channel
+          console.warn('maintenance: community erasure sweep failed');
+        })
+        .finally(() => {
+          erasureSweepRunning = false;
+        })
+    );
   }
-  void exportExpiryService.cleanupExpiredExports().catch(() => {
-    // eslint-disable-next-line no-console -- content-free operator channel
-    console.warn('maintenance: expired export sweep failed');
-  });
+  trackSweep(
+    exportExpiryService.cleanupExpiredExports().catch(() => {
+      // eslint-disable-next-line no-console -- content-free operator channel
+      console.warn('maintenance: expired export sweep failed');
+    })
+  );
 }, EXPORT_EXPIRY_GRACE_MS);
 exportExpiryTimer.unref();
 
-let shuttingDown = false;
-const shutdown = () => {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  clearInterval(exportExpiryTimer);
-  clearTimeout(orphanSweepTimers.first);
-  clearInterval(orphanSweepTimers.interval);
-  clearTimeout(maintenanceSweepTimers.first);
-  clearInterval(maintenanceSweepTimers.interval);
-  server.close(() => process.exit(0));
-};
+const shutdown = createShutdown({
+  server,
+  inFlight,
+  closeDb,
+  stopTimers: () => {
+    clearInterval(exportExpiryTimer);
+    clearTimeout(orphanSweepTimers.first);
+    clearInterval(orphanSweepTimers.interval);
+    clearTimeout(maintenanceSweepTimers.first);
+    clearInterval(maintenanceSweepTimers.interval);
+  },
+  // Test-only override (SHUTDOWN_DRAIN_TIMEOUT_MS); default is 10 s.
+  drainMs: Number(process.env.SHUTDOWN_DRAIN_TIMEOUT_MS) || 10_000,
+  exit: (code) => process.exit(code),
+  log: (message) =>
+    // eslint-disable-next-line no-console -- operator channel; content-free
+    console.error(message),
+});
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, shutdown);
 }

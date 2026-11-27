@@ -1370,6 +1370,10 @@ it('serves the Rails place show shape and hides unassociated or restricted place
 
 it('serves public branding media and withholds every other file', async () => {
   const media = await get(`/explore/media/${fileIds.a}`);
+  // Explore images are embedded from another site (#138).
+  expect(media.headers.get('cross-origin-resource-policy')).toBe(
+    'cross-origin'
+  );
   expect(media.status).toBe(200);
   expect(new Uint8Array(await media.arrayBuffer())).toEqual(
     new Uint8Array([1, 2, 3])

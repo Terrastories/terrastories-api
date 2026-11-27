@@ -205,10 +205,14 @@ describe(
                 )
             )
           ).toBe(0);
-          // The races really interleaved: some claims won, some lost.
+          // Timing decides how many claims win; on a slow runner the revocation
+          // may win every race, which is correct. The gated deterministic tests
+          // below force both orders, so only the pair-by-pair assertions above
+          // are required here. Log the split for diagnosis.
           expect(statuses.length).toBe(ITERATIONS);
-          expect(statuses).toContain(201);
-          expect(statuses.some((status) => status !== 201)).toBe(true);
+          console.info(
+            `revocation race outcomes: ${statuses.filter((s) => s === 201).length} claims won, ${statuses.filter((s) => s !== 201).length} rejected`
+          );
         } finally {
           await Promise.allSettled([revokeClient.end(), claimClient.end()]);
         }

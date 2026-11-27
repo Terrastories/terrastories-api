@@ -19,7 +19,13 @@ import {
   type Role,
 } from './role-matrix-media-fixture.js';
 
-type P = { id?: string; sessionId?: string; ids?: number[]; storyId?: number };
+type P = {
+  id?: string;
+  sessionId?: string;
+  ids?: number[];
+  storyId?: number;
+  beforeKeys?: string[];
+};
 /** Approved denial payloads, by status. */
 const DENIED_BODY: Record<number, unknown> = {
   401: { error: 'Unauthorized' },
@@ -38,6 +44,7 @@ const json = async (res: Response) =>
   (await res.json()) as { data: Record<string, unknown> };
 const keysWith = (ctx: Ctx, part: string) =>
   [...ctx.mem.store.keys()].filter((k) => k.includes(part));
+const bodyOf = (ctx: Ctx, key: string) => ctx.mem.store.get(key);
 
 /** Part headers (checksum) from each session the owner created. */
 const partHeaders = new Map<string, Record<string, string>>();
@@ -96,7 +103,7 @@ type Route = {
   /** After a denied write: the session must still be alive (owner presign 200). */
   alive?: (ctx: Ctx, p: P) => Promise<void>;
   /** Read-back of stored effects after an allowed write. */
-  verify?: (ctx: Ctx, p: P, res: Response) => Promise<void>;
+  verify?: (ctx: Ctx, p: P, res: Response, role: Role) => Promise<void>;
 };
 const none = async () => ({}) as P;
 const sessionAlive = async (ctx: Ctx, p: P) => {
@@ -117,7 +124,7 @@ const ROUTES: Route[] = [
     prepare: none,
     send: (ctx, _r, cookie) =>
       ctx.call('POST', '/v2/media/uploads', cookie, sessionBody()),
-    verify: async (_ctx, _p, res) => {
+    verify: async (ctx, _p, res, role) => {
       const data = (await json(res)).data as {
         id: string;
         partCount: number;
@@ -125,6 +132,16 @@ const ROUTES: Route[] = [
       };
       expect(data.partCount).toBe(1);
       expect(data.parts[0]?.url).toEqual(expect.any(String));
+      // The returned session is retrievable: its presign answers for the owner.
+      expect(
+        (
+          await presign(
+            ctx,
+            await ctx.login(role as Exclude<Role, 'anon'>),
+            String(data.id)
+          )
+        ).status
+      ).toBe(200);
     },
   },
   {
@@ -163,14 +180,20 @@ const ROUTES: Route[] = [
       super_admin: 404,
       foreign_admin: 404,
     },
-    prepare: async (ctx) => ({
-      sessionId: await newSession(ctx, await owner(ctx)),
-    }),
+    prepare: async (ctx) => {
+      const sessionId = await newSession(ctx, await owner(ctx));
+      return { sessionId, beforeKeys: keysWith(ctx, sessionId) };
+    },
     send: (ctx, _r, cookie, p) => putPart(ctx, cookie!, p.sessionId!),
     alive: sessionAlive,
     verify: async (ctx, p, res) => {
       expect(res.headers.get('etag')).toBe(`"${sha(MP4)}"`);
-      expect(keysWith(ctx, p.sessionId!).length).toBeGreaterThan(0);
+      // The part is a new stored object whose bytes are the uploaded part.
+      const added = keysWith(ctx, p.sessionId!).filter(
+        (k) => !p.beforeKeys!.includes(k)
+      );
+      expect(added.length).toBeGreaterThan(0);
+      expect(added.some((k) => sha(bodyOf(ctx, k)!) === sha(MP4))).toBe(true);
     },
   },
   {
@@ -191,7 +214,7 @@ const ROUTES: Route[] = [
       const data = (await json(res)).data as {
         parts: Array<{ url: string; partNumber: number }>;
       };
-      expect(data.parts[0]?.partNumber).toBe(1);
+      expect(data.parts.map((x) => x.partNumber)).toEqual([1]);
       expect(data.parts[0]?.url).toEqual(expect.any(String));
     },
   },
@@ -219,8 +242,9 @@ const ROUTES: Route[] = [
     verify: async (ctx, p, res) => {
       const id = String((await json(res)).data.id);
       expect(await fileRow(ctx, id)).toHaveLength(1);
-      const stored = bytesFor(ctx, id).map((k) => ctx.mem.store.get(k)!);
-      expect(stored.some((b) => sha(b) === sha(MP4))).toBe(true);
+      expect(
+        bytesFor(ctx, id).some((k) => sha(bodyOf(ctx, k)!) === sha(MP4))
+      ).toBe(true);
       expect(keysWith(ctx, p.sessionId!)).toHaveLength(0);
     },
   },
@@ -246,8 +270,9 @@ const ROUTES: Route[] = [
     verify: async (ctx, _p, res) => {
       const id = String((await json(res)).data.id);
       expect(await fileRow(ctx, id)).toHaveLength(1);
-      const stored = bytesFor(ctx, id).map((k) => ctx.mem.store.get(k)!);
-      expect(stored.some((b) => sha(b) === sha(PNG))).toBe(true);
+      expect(
+        bytesFor(ctx, id).some((k) => sha(bodyOf(ctx, k)!) === sha(PNG))
+      ).toBe(true);
     },
   },
   {
@@ -462,7 +487,7 @@ describe('role matrix B: media, upload sessions and attachments', () => {
         expect(await ctx.snapshot()).toBe(before);
         await route.alive?.(ctx, p);
       } else {
-        await route.verify?.(ctx, p, res);
+        await route.verify?.(ctx, p, res, role);
       }
     }
   );
@@ -474,6 +499,40 @@ describe('role matrix B: public media visibility boundaries', () => {
   it('public media is 404 for a file that is not attached', async () => {
     const ctx = await setupMedia();
     const fileId = await ctx.upload(await owner(ctx));
+    const res = await ctx.call(
+      'GET',
+      `/v2/public/communities/own-media/media/${fileId}`
+    );
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual(DENIED_BODY[404]);
+  });
+
+  it('public media is 404 for a file attached only to a private story', async () => {
+    const ctx = await setupMedia();
+    const cookie = await owner(ctx);
+    const [story] = await ctx.db
+      .insert(ctx.tables.stories)
+      .values({
+        title: 'Private Story',
+        slug: 'private-story',
+        privacyLevel: 'private',
+        isRestricted: false,
+        communityId: ctx.ownId,
+        createdBy: ctx.users.editor.id,
+        createdAt: new Date('2026-06-01T12:00:00.000Z'),
+        updatedAt: new Date('2026-06-01T12:00:00.000Z'),
+      })
+      .returning({ id: ctx.tables.stories.id });
+    const fileId = await ctx.upload(cookie);
+    // The attach API refuses private stories, so the row is written directly.
+    await ctx.db.insert(ctx.tables.attachments).values({
+      communityId: ctx.ownId,
+      fileId,
+      ownerType: 'story',
+      ownerId: story!.id,
+      role: 'story_media',
+      ordinal: 0,
+    });
     const res = await ctx.call(
       'GET',
       `/v2/public/communities/own-media/media/${fileId}`

@@ -9,6 +9,7 @@ import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { createHonoApp } from '../../src/hono-app.js';
+import { tablesFor } from '../../src/db/dialect.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
 import { communitiesSqlite } from '../../src/db/schema/communities.js';
 import { usersSqlite } from '../../src/db/schema/users.js';
@@ -276,6 +277,16 @@ const seedThenSteward = async (ctx: Awaited<ReturnType<typeof setup>>) => {
     `communities/${ctx.foreign.id}/media/test-object`,
     new Uint8Array([2])
   );
+  await ctx.db.insert(tablesFor(ctx.db).stories).values({
+    title: 'Alpha Story',
+    slug: 'alpha-story',
+    privacyLevel: 'public',
+    isRestricted: false,
+    communityId: ctx.alpha.id,
+    createdBy: ctx.people.admin.user.id,
+    createdAt: new Date('2026-11-21T10:00:00.000Z'),
+    updatedAt: new Date('2026-11-21T10:00:00.000Z'),
+  });
   await ctx.designateSteward();
   return {};
 };
@@ -457,6 +468,12 @@ async function loginWith(
   return `ts_session=${/ts_session=([^;]+)/.exec(res.headers.get('set-cookie') ?? '')![1]}`;
 }
 
+/** Alpha's stories: the relational content an erasure must purge. */
+const alphaStories = async (ctx: Ctx) =>
+  (await ctx.db.select().from(tablesFor(ctx.db).stories)).filter(
+    (s) => s.communityId === ctx.alpha.id
+  );
+
 /** Read-back for each allowed cell: the stored effect of the write must be visible. */
 const VERIFY: Record<
   string,
@@ -492,7 +509,7 @@ const VERIFY: Record<
     expect(foreignObjects).toHaveLength(1);
     if (role === 'admin') {
       expect(ctx.records.has(ctx.alpha.id)).toBe(true);
-      expect(ctx.fenced).toContain(ctx.alpha.id);
+      expect(ctx.fenced).toEqual([ctx.alpha.id]);
       expect(alphaObjects).toHaveLength(0);
       return;
     }
@@ -508,6 +525,7 @@ const VERIFY: Record<
     expect(alpha?.isActive).toBe(true);
     expect(ctx.fenced).toHaveLength(0);
     expect(alphaObjects).toHaveLength(1);
+    expect(await alphaStories(ctx)).toHaveLength(1);
   },
   'POST /v2/community/sovereignty/cancel': async (ctx, extra) => {
     const rows = await ctx.db.select().from(communitySovereigntyRequestsSqlite);
@@ -636,6 +654,30 @@ describe('role matrix B: foreign admin acts only on own community', () => {
     expect(await res.json()).toEqual(DENIED_BODY[409]);
     expect(await alphaState(ctx)).toBe(before);
   });
+});
+
+describe('role matrix B: known erasure gap', () => {
+  // Open bug: the sweep deletes objects and fences the community but leaves
+  // relational content (stories) in place. src/services/community-erasure.service.ts:171.
+  // it.fails keeps the gap visible; it turns red when the purge is fixed.
+  it.fails(
+    'admin erasure purges alpha stories (open: stories survive the sweep)',
+    async () => {
+      const ctx = await setup();
+      await seedThenSteward(ctx);
+      const res = await ctx.call(
+        'POST',
+        '/v2/community/erasure',
+        await ctx.loginCookie('admin'),
+        {
+          confirmFinality: true,
+          currentDerivedKey: ctx.people.admin.creds.derivedKey,
+        }
+      );
+      expect(res.status).toBe(202);
+      expect(await alphaStories(ctx)).toHaveLength(0);
+    }
+  );
 });
 
 describe('role matrix B: super_admin erasure listing', () => {

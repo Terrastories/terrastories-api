@@ -32,6 +32,16 @@ const NO_INPUT = new Set([
   'GET /v2/bootstrap',
 ]);
 
+/**
+ * Explore error bodies (src/services/explore-adapter.service.ts): 404 is
+ * `{ error, message }` (the unknown-community 404 omits `message`), 400 is
+ * `{ error }`. They differ from the V2 envelope, which forbids `message`.
+ */
+const ExploreErrorSchema = z.object({
+  error: z.string(),
+  message: z.string().optional(),
+});
+
 /** Byte payloads of 200 and 206 (media and export downloads, not JSON). */
 const BINARY = { schema: { type: 'string', format: 'binary' } };
 const MEDIA_BYTES = { '*/*': BINARY };
@@ -264,9 +274,12 @@ export function buildOpenApiDocument(): Json {
           },
         };
       } else if (code >= 400 && !BODYLESS_STATUSES.has(code)) {
+        const errorSchema = row.path.startsWith('/explore/')
+          ? 'ExploreError'
+          : 'V2Error';
         response['content'] = {
           'application/json': {
-            schema: { $ref: '#/components/schemas/V2Error' },
+            schema: { $ref: `#/components/schemas/${errorSchema}` },
           },
         };
       }
@@ -313,6 +326,7 @@ export function buildOpenApiDocument(): Json {
         cookieAuth: { type: 'apiKey', in: 'cookie', name: 'ts_session' },
       },
       schemas: {
+        ExploreError: jsonSchemaOf(ExploreErrorSchema, 'output'),
         V2Error: jsonSchemaOf(V2ValidationErrorResponseSchema, 'output'),
       },
     },

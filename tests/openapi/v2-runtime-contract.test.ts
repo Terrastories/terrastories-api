@@ -398,6 +398,19 @@ describe('V2 OpenAPI runtime contract', () => {
     );
   });
 
+  it('Explore 404 carries message and validates against ExploreError', async () => {
+    const { call } = await setup();
+    const t = '/explore/media/:fileId';
+    const res = await call('GET', '/explore/media/1');
+    const body = (await res.clone().json()) as Record<string, unknown>;
+    expect(body).toHaveProperty('message');
+    await check(res, 'GET', t, 404);
+    const ref = operationFor('GET', t).responses['404']?.content?.[
+      'application/json'
+    ]?.schema;
+    expect(ref).toEqual({ $ref: '#/components/schemas/ExploreError' });
+  });
+
   it('direct upload completion answers 201 as documented', async () => {
     const { app, call, login } = await setup();
     const cookie = await login();

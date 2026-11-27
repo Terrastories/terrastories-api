@@ -23,7 +23,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/V2Error"
+                  "$ref": "#/components/schemas/ExploreError"
                 }
               }
             }
@@ -33,7 +33,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/V2Error"
+                  "$ref": "#/components/schemas/ExploreError"
                 }
               }
             }
@@ -43,7 +43,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/V2Error"
+                  "$ref": "#/components/schemas/ExploreError"
                 }
               }
             }
@@ -68,7 +68,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/V2Error"
+                  "$ref": "#/components/schemas/ExploreError"
                 }
               }
             }
@@ -78,7 +78,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/V2Error"
+                  "$ref": "#/components/schemas/ExploreError"
                 }
               }
             }
@@ -88,7 +88,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/V2Error"
+                  "$ref": "#/components/schemas/ExploreError"
                 }
               }
             }
@@ -123,7 +123,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/V2Error"
+                  "$ref": "#/components/schemas/ExploreError"
                 }
               }
             }
@@ -133,7 +133,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/V2Error"
+                  "$ref": "#/components/schemas/ExploreError"
                 }
               }
             }
@@ -143,7 +143,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/V2Error"
+                  "$ref": "#/components/schemas/ExploreError"
                 }
               }
             }
@@ -186,7 +186,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/V2Error"
+                  "$ref": "#/components/schemas/ExploreError"
                 }
               }
             }
@@ -196,7 +196,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/V2Error"
+                  "$ref": "#/components/schemas/ExploreError"
                 }
               }
             }
@@ -206,7 +206,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/V2Error"
+                  "$ref": "#/components/schemas/ExploreError"
                 }
               }
             }
@@ -241,7 +241,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/V2Error"
+                  "$ref": "#/components/schemas/ExploreError"
                 }
               }
             }
@@ -251,7 +251,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/V2Error"
+                  "$ref": "#/components/schemas/ExploreError"
                 }
               }
             }
@@ -261,7 +261,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/V2Error"
+                  "$ref": "#/components/schemas/ExploreError"
                 }
               }
             }
@@ -323,7 +323,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/V2Error"
+                  "$ref": "#/components/schemas/ExploreError"
                 }
               }
             }
@@ -333,7 +333,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/V2Error"
+                  "$ref": "#/components/schemas/ExploreError"
                 }
               }
             }
@@ -346,7 +346,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/V2Error"
+                  "$ref": "#/components/schemas/ExploreError"
                 }
               }
             }
@@ -22759,6 +22759,19 @@
       }
     },
     "schemas": {
+      "ExploreError": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": ["error"],
+        "additionalProperties": false
+      },
       "V2Error": {
         "type": "object",
         "properties": {

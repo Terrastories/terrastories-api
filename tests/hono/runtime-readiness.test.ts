@@ -219,6 +219,37 @@ describe('allMigrationsApplied', () => {
   });
 });
 
+describe('build output layout', () => {
+  it('postbuild copies migrations so the startup check finds the journal under dist', async () => {
+    const dist = mkdtempSync(path.join(tmpdir(), 'tsapi-dist-'));
+    try {
+      const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as {
+        scripts: Record<string, string>;
+      };
+      expect(pkg.scripts.postbuild).toBe('node scripts/copy-migrations.mjs');
+      await new Promise<void>((resolve, reject) =>
+        spawn('node', ['scripts/copy-migrations.mjs', dist]).on('exit', (c) =>
+          c === 0 ? resolve() : reject(new Error('copy failed'))
+        )
+      );
+      const migrationsFolder = path.join(dist, 'db', 'migrations');
+      expect(
+        await allMigrationsApplied(migratedDb().db, {
+          dialect: 'sqlite',
+          migrationsFolder,
+        })
+      ).toBe(true);
+      // The PostgreSQL history ships too.
+      readFileSync(
+        path.join(migrationsFolder, 'postgres', 'meta', '_journal.json'),
+        'utf8'
+      );
+    } finally {
+      rmSync(dist, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('tracked fetch on a real listener', () => {
   it('keeps the DB open until a handler that outlived its socket settles', async () => {
     const events: string[] = [];

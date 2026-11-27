@@ -43,6 +43,27 @@ it('refuses to serve on placeholder production configuration and stays refused',
   }
 });
 
+it('sends HSTS on the config refusal only over https', async () => {
+  const mf = startWorkerRuntime(
+    await bundleWorkerModule(
+      `import worker from './src/worker.js'; export default {fetch:(r,e)=>worker.fetch(r,e)};`
+    ),
+    { PUBLIC_ORIGIN: 'https://example.org' }
+  );
+  try {
+    const https = await mf.dispatchFetch('https://worker.test/health');
+    expect(https.status).toBe(503);
+    expect(https.headers.get('strict-transport-security')).toBe(
+      'max-age=31536000'
+    );
+    const http = await mf.dispatchFetch('http://worker.test/health');
+    expect(http.status).toBe(503);
+    expect(http.headers.get('strict-transport-security')).toBeNull();
+  } finally {
+    await mf.dispose();
+  }
+});
+
 it('refuses to serve when production PUBLIC_ORIGIN is missing entirely', async () => {
   const mf = startWorkerRuntime(
     await bundleWorkerModule(

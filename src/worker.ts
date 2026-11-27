@@ -13,7 +13,11 @@ import type {
   ScheduledController,
 } from '@cloudflare/workers-types';
 import { drizzle } from 'drizzle-orm/d1';
-import { createHonoApp, V2_BASELINE_SECURITY_HEADERS } from './hono-app.js';
+import {
+  createHonoApp,
+  V2_BASELINE_SECURITY_HEADERS,
+  v2HstsHeaders,
+} from './hono-app.js';
 import { HonoFoundationRepository } from './repositories/hono-foundation.repository.js';
 import {
   validStorageKey,
@@ -561,6 +565,7 @@ export function createWorker() {
             // baseline security headers are applied here.
             headers: {
               ...V2_BASELINE_SECURITY_HEADERS,
+              ...v2HstsHeaders(request),
               'Cache-Control': 'no-store',
             },
           }

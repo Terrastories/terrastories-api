@@ -86,6 +86,23 @@ const MEDIA_EMBED_PATH =
   /^\/(?:v2\/(?:media\/[^/]+|public\/communities\/[^/]+\/media\/[^/]+)|explore\/media\/[^/]+)$/;
 
 /**
+ * HSTS only over https: the local field kit may serve plain http, and
+ * browsers ignore the header there anyway. Behind a trusted proxy the
+ * forwarded proto must be exactly `https`: the proxy must overwrite it, so a
+ * multi-value (appended) list is ambiguous and ignored.
+ */
+export function v2HstsHeaders(
+  request: Request,
+  trustProxy?: boolean
+): Record<string, string> {
+  const secure =
+    new URL(request.url).protocol === 'https:' ||
+    (trustProxy === true &&
+      request.headers.get('x-forwarded-proto')?.trim() === 'https');
+  return secure ? { 'Strict-Transport-Security': 'max-age=31536000' } : {};
+}
+
+/**
  * Security response headers on every V2 response, preflights and early
  * refusals included (issue #138). Set after `next()` so a handler's own value
  * never weakens the policy. Plain `c.header` only, so it runs unchanged on
@@ -110,16 +127,10 @@ export function v2SecurityHeaders(trustProxy?: boolean): MiddlewareHandler {
       [200, 206].includes(c.res.status)
     )
       c.header('Cross-Origin-Resource-Policy', 'cross-origin');
-    // HSTS only over https: the local field kit may serve plain http, and
-    // browsers ignore the header there anyway.
-    // Behind a trusted proxy the header must be exactly `https`: the proxy
-    // must overwrite it, so a multi-value (appended) list is ambiguous and
-    // ignored.
-    if (
-      new URL(c.req.url).protocol === 'https:' ||
-      (trustProxy && c.req.header('x-forwarded-proto')?.trim() === 'https')
-    )
-      c.header('Strict-Transport-Security', 'max-age=31536000');
+    for (const [name, value] of Object.entries(
+      v2HstsHeaders(c.req.raw, trustProxy)
+    ))
+      c.header(name, value);
     c.res.headers.delete('X-Powered-By');
   };
 }

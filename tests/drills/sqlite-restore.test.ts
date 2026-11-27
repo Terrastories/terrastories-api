@@ -514,6 +514,50 @@ describe('SQLite field-kit restore drill (#136)', () => {
     );
   });
 
+  it('replays a username/email swap between two users without a unique conflict', () => {
+    const { db } = restore('swap', true);
+    const cols = 'username, username_normalized, email, email_normalized';
+    const row = (id: number) =>
+      live.prepare(`SELECT ${cols} FROM users WHERE id = ?`).get(id) as Record<
+        string,
+        string
+      >;
+    const a = row(ids.editorAlpha);
+    const b = row(ids.viewerAlpha);
+    // Live: the two users exchange identifiers after the backup (via a temp value).
+    const set = live.prepare(
+      `UPDATE users SET username = @username, username_normalized = @username_normalized, email = @email, email_normalized = @email_normalized WHERE id = @id`
+    );
+    live.transaction(() => {
+      set.run({
+        id: ids.editorAlpha,
+        username: 'tmp-x',
+        username_normalized: 'tmp-x',
+        email: 'tmp-x@t.test',
+        email_normalized: 'tmp-x@t.test',
+      });
+      set.run({ id: ids.viewerAlpha, ...a });
+      set.run({ id: ids.editorAlpha, ...b });
+    })();
+    live
+      .prepare(
+        "INSERT INTO audit_entries (actor_id, action, resource_type, resource_ids, outcome, created_at) VALUES (?, 'user.update', 'user', ?, 'success', ?)"
+      )
+      .run(
+        ids.adminAlpha,
+        JSON.stringify([ids.editorAlpha, ids.viewerAlpha]),
+        Date.now()
+      );
+    const { replayed } = replayAccountChanges(live, db, auditMarker);
+    expect(replayed).toEqual(
+      expect.arrayContaining([ids.editorAlpha, ids.viewerAlpha])
+    );
+    const restoredEditor = db
+      .prepare(`SELECT ${cols} FROM users WHERE id = ?`)
+      .get(ids.editorAlpha);
+    expect(restoredEditor).toEqual(b);
+  });
+
   it('reports users created after the backup that have no restored row', () => {
     const { db } = restore('missing', true);
     live

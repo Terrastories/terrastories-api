@@ -156,14 +156,26 @@ export function replayAccountChanges(
   );
   const update = restored.prepare(`UPDATE users SET ${assign} WHERE id = @id`);
   const result: ReplayResult = { replayed: [], missing: [] };
+  // Unique identifiers (email/username and their normalized forms) can be
+  // swapped between users after the backup; applying finals one user at a time
+  // would hit a unique conflict mid-replay. Stage every affected user onto
+  // unique temporary values first, in the same transaction, then apply finals.
+  const stage = restored.prepare(
+    "UPDATE users SET username = 'replay-tmp-' || id, username_normalized = 'replay-tmp-' || id, email = 'replay-tmp-' || id || '@replay.invalid', email_normalized = 'replay-tmp-' || id || '@replay.invalid' WHERE id = ?"
+  );
   restored.transaction(() => {
+    const rows: Array<{ id: number; row: Record<string, unknown> }> = [];
     for (const id of userIds) {
       const row = frozen
         .prepare(`SELECT ${cols} FROM users WHERE id = ?`)
         .get(id) as Record<string, unknown> | undefined;
       if (!row) continue;
-      if (update.run({ ...row, id }).changes > 0) result.replayed.push(id);
-      else result.missing.push(id);
+      if (stage.run(id).changes === 0) result.missing.push(id);
+      else rows.push({ id, row });
+    }
+    for (const { id, row } of rows) {
+      update.run({ ...row, id });
+      result.replayed.push(id);
     }
   })();
   if (result.missing.length > 0)

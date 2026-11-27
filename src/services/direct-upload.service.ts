@@ -70,6 +70,14 @@ const EXPIRED_BODY: V2ErrorResponse = Object.freeze({
   error: 'Upload session expired',
 });
 
+/**
+ * A racing R2 completion reports "already completed/not found" before the
+ * winner's `files` row commits. Re-read that row for a short bounded window
+ * instead of turning the loser's race into a bad-parts 400.
+ */
+const COMPLETION_RACE_WAIT_MS = 2_000;
+const COMPLETION_RACE_POLL_MS = 25;
+
 const DIRECT_UPLOAD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const isDirectUploadId = (value: string): boolean =>
@@ -464,15 +472,28 @@ export class DirectUploadService {
     actor: FoundationUser,
     session: DirectUploadSession
   ): Promise<{ status: 409; body: typeof CONFLICT_BODY } | null> {
-    if (
-      !(await this.repository.resolveAuthorizedMedia(session.fileId, actor))
-    ) {
+    if (!(await this.repository.resolveUploaderMedia(session.fileId, actor))) {
       return null;
     }
     // The winning row owns the final object. Only staged parts/journal may be
     // discarded, and cleanup failure must not turn an idempotent replay into 500.
     await this.adapter!.discard(session).catch(() => {});
     return { status: 409, body: CONFLICT_BODY };
+  }
+
+  /** Bounded re-read of a winner whose R2 completion landed before its row. */
+  private async waitForCompletedUploadConflict(
+    actor: FoundationUser,
+    session: DirectUploadSession
+  ): Promise<{ status: 409; body: typeof CONFLICT_BODY } | null> {
+    const deadline = Date.now() + COMPLETION_RACE_WAIT_MS;
+    while (true) {
+      const conflict = await this.completedUploadConflict(actor, session);
+      if (conflict || Date.now() >= deadline) return conflict;
+      await new Promise((resolve) =>
+        setTimeout(resolve, COMPLETION_RACE_POLL_MS)
+      );
+    }
   }
 
   async completeUpload(
@@ -487,7 +508,7 @@ export class DirectUploadService {
     if (!session) {
       if (isDirectUploadId(rawId)) {
         const fileId = await deriveDirectUploadFileId(rawId);
-        if (await this.repository.resolveAuthorizedMedia(fileId, actor)) {
+        if (await this.repository.resolveUploaderMedia(fileId, actor)) {
           return { status: 409, body: CONFLICT_BODY };
         }
       }
@@ -535,6 +556,18 @@ export class DirectUploadService {
         completed = true;
       } catch (error) {
         if (error instanceof DirectUploadError) {
+          if (error.kind === 'already_completed') {
+            // R2 says the object is already assembled: wait for the winner's
+            // row (it may still be committing) and replay the same 409.
+            const existing = await this.waitForCompletedUploadConflict(
+              actor,
+              session
+            );
+            if (existing) return existing;
+            // No row committed (an abandoned or crashed winner). The bytes
+            // are already assembled, so this is not a bad-parts request.
+            return { status: 409, body: CONFLICT_BODY };
+          }
           if (error.kind === 'invalid_parts') {
             const existing = await this.completedUploadConflict(actor, session);
             if (existing) return existing;

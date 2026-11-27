@@ -206,9 +206,18 @@ export function createR2DirectUploads(
               .sort((a, b) => a.partNumber - b.partNumber)
               .map((p) => ({ partNumber: p.partNumber, etag: p.etag }))
           );
-      } catch {
+      } catch (error) {
         // Aborted, already completed (a racing or repeated completion) or
         // bad parts: never touch the object; the completion that won owns it.
+        // A racing winner may have completed in R2 before its `files` row
+        // commits, so let the service distinguish that window from bad parts.
+        if (
+          ALREADY_GONE.test(
+            error instanceof Error ? error.message : String(error)
+          )
+        ) {
+          throw new DirectUploadError('already_completed');
+        }
         throw new DirectUploadError('invalid_parts');
       }
       const head = await bucket.head(session.key);

@@ -1041,6 +1041,31 @@ export class MediaWritesRepository {
     });
   }
 
+  /**
+   * Replay lookup for a completed direct upload: only the same tenant and the
+   * same uploader may see the winning row as a conflict. A same-community
+   * administrator, or any other actor, gets "not found" instead.
+   */
+  async resolveUploaderMedia(
+    fileId: string,
+    actor: FoundationUser
+  ): Promise<boolean> {
+    const [file] = await this.db
+      .select({
+        communityId: this.tables.files.communityId,
+        uploadedBy: this.tables.files.uploadedBy,
+        isActive: this.tables.files.isActive,
+      })
+      .from(this.tables.files)
+      .where(eq(this.tables.files.id, fileId))
+      .limit(1);
+    return (
+      file?.isActive === true &&
+      file.communityId === actor.communityId &&
+      file.uploadedBy === actor.id
+    );
+  }
+
   async resolveAuthorizedMedia(
     fileId: string,
     actor: FoundationUser

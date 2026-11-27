@@ -52,6 +52,8 @@ export class DirectUploadError extends Error {
   constructor(
     readonly kind:
       | 'invalid_parts'
+      /** Backend says the upload was already completed or no longer exists. */
+      | 'already_completed'
       | 'checksum'
       | 'size'
       | 'erasing'

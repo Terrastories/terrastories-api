@@ -336,9 +336,10 @@ describe('upload insert race backstops (#149)', () => {
           error instanceof Error &&
           error.message.includes('UNIQUE constraint failed')
         ) {
-          throw new Error('D1_ERROR: UNIQUE constraint failed: files.id', {
-            cause: error,
-          });
+          // D1 reports SQLite failures in the message, not as a caused code.
+          throw new Error(
+            'D1_ERROR: UNIQUE constraint failed: files.id: SQLITE_CONSTRAINT'
+          );
         }
         throw error;
       }
@@ -426,21 +427,36 @@ describe('upload completion retries (#149)', () => {
 
   it('returns 409 for the loser of racing Node completions without duplicating or deleting bytes', async () => {
     const memory = createResilienceStorage();
-    const barrier = barrierStorage(
-      memory.storage,
-      (key) => key.includes('/.multipart/') && key.endsWith('.json')
-    );
-    const fixture = await createResilienceFixture({
-      storage: barrier.decorate(),
-    });
+    const fixture = await createResilienceFixture({ storage: memory.storage });
     const session = await fixture.createDirectUpload();
 
-    barrier.arm();
+    // Hold both requests at the File insert: each has already passed the
+    // journal and winner-row checks, so exactly one reaches the unique insert
+    // after the other and must recover as the replay loser.
+    const originalCreate = MediaWritesRepository.prototype.createUploadedMedia;
+    let arrivals = 0;
+    let release!: () => void;
+    const bothAtInsert = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(
+      MediaWritesRepository.prototype,
+      'createUploadedMedia'
+    ).mockImplementation(async function (
+      this: MediaWritesRepository,
+      ...args: Parameters<MediaWritesRepository['createUploadedMedia']>
+    ) {
+      arrivals += 1;
+      if (arrivals === 2) release();
+      await bothAtInsert;
+      return originalCreate.call(this, ...args);
+    });
+
     const responses = await Promise.all([
       completeDirectUpload(fixture, session),
       completeDirectUpload(fixture, session),
     ]);
-    barrier.disarm();
+    expect(arrivals).toBe(2);
 
     expect(responses.map((response) => response.status).sort()).toEqual([
       201, 409,

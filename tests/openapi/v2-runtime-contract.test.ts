@@ -467,6 +467,19 @@ describe('V2 OpenAPI runtime contract', () => {
     expect(new Uint8Array(await media.arrayBuffer())).toEqual(bytes);
   });
 
+  it('documents 501 on every upload route that needs the S3 adapter', () => {
+    for (const [method, route] of [
+      ['POST', '/v2/media/uploads'],
+      ['POST', '/v2/media/uploads/:id/parts/presign'],
+      ['POST', '/v2/media/uploads/:id/complete'],
+      ['DELETE', '/v2/media/uploads/:id'],
+    ] as const)
+      expect(
+        Object.keys(operationFor(method, route).responses),
+        route
+      ).toContain('501');
+  });
+
   it('documents request body requirement and 206 ranges', () => {
     const body = (method: string, template: string) =>
       (

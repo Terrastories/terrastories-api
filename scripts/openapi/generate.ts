@@ -123,9 +123,9 @@ const EXTRA_STATUSES: Record<string, number[]> = {
   'POST /v2/media': [411, 413, 415, 422],
   'POST /v2/media/uploads': [410, 411, 413, 422, 501],
   'POST /v2/media/uploads/:id/parts/presign': [410, 411, 422, 501],
-  'PUT /v2/media/uploads/:id/parts/:partNumber': [410, 411, 413, 422, 501],
+  'PUT /v2/media/uploads/:id/parts/:partNumber': [410, 411, 413, 422],
   'POST /v2/media/uploads/:id/complete': [410, 422, 501],
-  'DELETE /v2/media/uploads/:id': [410],
+  'DELETE /v2/media/uploads/:id': [410, 501],
   // Range reads and expired download tokens.
   // (206 and 416: media-stream-response.ts and community-export.service.ts).
   'GET /v2/community/export/download/:token': [206, 416],

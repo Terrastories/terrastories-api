@@ -42,7 +42,10 @@ import {
   countAffected,
   main,
   revokeAllSessions,
+  REVOKE_MAX_ATTEMPTS,
   runCli,
+  sqlState,
+  withDeadlockRetry,
 } from '../../src/ops/revoke-all-sessions.js';
 
 const execFileAsync = promisify(execFile);
@@ -220,6 +223,7 @@ describe('emergency global session revocation (#137)', () => {
     });
     expect(await revokeAllSessions(db)).toEqual({
       runId: expect.stringMatching(RUN_ID_PATTERN),
+      attempts: 1,
       revoked: 3,
       loginCodesSuperseded: 2,
       claimTokensSuperseded: 1,
@@ -392,6 +396,50 @@ describe('emergency global session revocation (#137)', () => {
     const [after] = await s.db.select().from(loginCodesSqlite);
     expect(after?.usedAt).toBeNull();
     expect(after?.supersededAt).not.toBeNull();
+  });
+
+  it('retries on a deadlock whose SQLSTATE is only on the wrapped cause', async () => {
+    // Drizzle wraps driver failures: the PG error sits in `cause`.
+    const wrapped = (code: string) =>
+      Object.assign(new Error('Failed query'), { cause: { code } });
+    expect(sqlState(wrapped('40P01'))).toBe('40P01');
+    expect(sqlState(Object.assign(new Error('x'), { code: '40001' }))).toBe(
+      '40001'
+    );
+    expect(sqlState(new Error('plain'))).toBeUndefined();
+    const sleeps: number[] = [];
+    const sleepMs = async (ms: number) => void sleeps.push(ms);
+    for (const code of ['40P01', '40001']) {
+      sleeps.length = 0;
+      let calls = 0;
+      const seen: number[] = [];
+      const result = await withDeadlockRetry(async (attempt) => {
+        seen.push(attempt);
+        calls += 1;
+        if (calls < 3) throw wrapped(code);
+        return 'ok';
+      }, sleepMs);
+      expect(result).toBe('ok');
+      expect(seen).toEqual([1, 2, 3]);
+      expect(sleeps).toEqual([100, 400]);
+    }
+    // Other failures are not retried; retries are bounded.
+    let other = 0;
+    await expect(
+      withDeadlockRetry(async () => {
+        other += 1;
+        throw wrapped('23505');
+      }, sleepMs)
+    ).rejects.toBeDefined();
+    expect(other).toBe(1);
+    let always = 0;
+    await expect(
+      withDeadlockRetry(async () => {
+        always += 1;
+        throw wrapped('40P01');
+      }, sleepMs)
+    ).rejects.toBeDefined();
+    expect(always).toBe(REVOKE_MAX_ATTEMPTS);
   });
 
   const sqlBlocks = () => {

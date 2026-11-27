@@ -32,6 +32,8 @@ export const RUN_ID_PATTERN = /^[a-zA-Z0-9_-]{8,64}$/;
 export interface RevokeAllResult {
   /** Unique id of this run; stored in the audit entry's resource ids. */
   runId: string;
+  /** Transaction attempts used (PostgreSQL retries deadlocks; others always 1). */
+  attempts: number;
   /** Session rows deleted. */
   revoked: number;
   loginCodesSuperseded: number;
@@ -99,6 +101,7 @@ export async function revokeAllSessions(
         audit(tx).run();
         return {
           runId,
+          attempts: 1,
           revoked: deleted.length,
           loginCodesSuperseded: codes.length,
           claimTokensSuperseded: tokens.length,
@@ -109,47 +112,62 @@ export async function revokeAllSessions(
       { behavior: 'immediate' }
     );
   }
-  // PostgreSQL: retry the whole transaction on deadlock / serialization
-  // failure (see the lock-order note below), a few times with backoff.
+  // PostgreSQL: the whole transaction is retried on deadlock / serialization
+  // failure (defence in depth, see the lock-order note below).
+  return withDeadlockRetry((attempt) =>
+    db.transaction(async (tx: any): Promise<RevokeAllResult> => {
+      // Never wait forever on a lock held by a stuck transaction.
+      await tx.execute(sql`SET LOCAL lock_timeout = '10s'`);
+      // PostgreSQL (READ COMMITTED). Lock order: claim_tokens -> sessions ->
+      // login_codes rows, taken as table locks BEFORE any row update.
+      //  - The bootstrap claim locks its token row and then inserts its
+      //    session (claim_tokens -> sessions). Locking sessions first here
+      //    would invert that and deadlock; this order matches it.
+      //  - Code redemption locks sessions rows and then consumes a code; it
+      //    never touches claim_tokens, so it forms no cycle with this order.
+      //  - An in-flight claim, login or redemption finishes first, so its
+      //    session is visible to the DELETE below and its new codes are
+      //    caught by the supersede; a new one blocks until we commit and then
+      //    fails its conditional consume against the superseded row.
+      // No other deadlock is known; the retry and the lock_timeout are
+      // defence in depth for one introduced by a future code path.
+      await tx.execute(sql`LOCK TABLE claim_tokens IN EXCLUSIVE MODE`);
+      await tx.execute(sql`LOCK TABLE sessions IN EXCLUSIVE MODE`);
+      const tokens = (await supersedeTokens(tx)) as unknown[];
+      const codes = (await supersedeCodes(tx)) as unknown[];
+      const deleted = (await tx
+        .delete(sessions)
+        .returning({ id: sessions.id })) as unknown[];
+      await audit(tx);
+      return {
+        runId,
+        attempts: attempt,
+        revoked: deleted.length,
+        loginCodesSuperseded: codes.length,
+        claimTokensSuperseded: tokens.length,
+      };
+    })
+  );
+}
+
+/**
+ * Run `attempt` (1-based) and retry it after a deadlock (40P01) or
+ * serialization failure (40001), up to REVOKE_MAX_ATTEMPTS, with backoff.
+ * The SQLSTATE is read through Drizzle's error wrapper (see sqlState).
+ */
+export async function withDeadlockRetry<T>(
+  run: (attempt: number) => Promise<T>,
+  sleepMs: (ms: number) => Promise<void> = (ms) =>
+    new Promise((resolve) => setTimeout(resolve, ms))
+): Promise<T> {
   for (let attempt = 1; ; attempt += 1) {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return await db.transaction(async (tx: any): Promise<RevokeAllResult> => {
-        // Never wait forever on a lock held by a stuck transaction.
-        await tx.execute(sql`SET LOCAL lock_timeout = '10s'`);
-        // PostgreSQL (READ COMMITTED). The paths that create sessions or
-        // consume codes do not share one lock order (claim: claim_tokens ->
-        // sessions; redemption: sessions -> login_codes), so no single order
-        // here is deadlock-free against both. We take the table locks
-        // claim_tokens -> sessions -> login_codes-rows, BEFORE any row update:
-        //  - an in-flight claim or redemption that already holds what we need
-        //    finishes first, so its session is visible to the DELETE below and
-        //    its new codes are caught by the supersede;
-        //  - a new one blocks until we commit, then fails its conditional
-        //    consume against the superseded row.
-        // A deadlock with a redemption that holds session rows while we hold
-        // claim_tokens is still possible; PostgreSQL aborts one side (40P01)
-        // and we retry the whole transaction. lock_timeout bounds each wait.
-        await tx.execute(sql`LOCK TABLE claim_tokens IN EXCLUSIVE MODE`);
-        await tx.execute(sql`LOCK TABLE sessions IN EXCLUSIVE MODE`);
-        const tokens = (await supersedeTokens(tx)) as unknown[];
-        const codes = (await supersedeCodes(tx)) as unknown[];
-        const deleted = (await tx
-          .delete(sessions)
-          .returning({ id: sessions.id })) as unknown[];
-        await audit(tx);
-        return {
-          runId,
-          revoked: deleted.length,
-          loginCodesSuperseded: codes.length,
-          claimTokensSuperseded: tokens.length,
-        };
-      });
+      return await run(attempt);
     } catch (error) {
-      const code = (error as { code?: unknown } | null)?.code;
-      const retryable = code === '40P01' || code === '40001';
+      const state = sqlState(error);
+      const retryable = state === '40P01' || state === '40001';
       if (!retryable || attempt >= REVOKE_MAX_ATTEMPTS) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 100 * attempt ** 2));
+      await sleepMs(100 * attempt ** 2);
     }
   }
 }
@@ -158,7 +176,7 @@ export async function revokeAllSessions(
 export async function countAffected(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   db: any
-): Promise<Omit<RevokeAllResult, 'runId'>> {
+): Promise<Omit<RevokeAllResult, 'runId' | 'attempts'>> {
   const { sessions, loginCodes, claimTokens } = tablesFor(db);
   const n = async (
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -183,12 +201,26 @@ export async function countAffected(
   };
 }
 
-const summary = (r: Omit<RevokeAllResult, 'runId'>) =>
+const summary = (r: Omit<RevokeAllResult, 'runId' | 'attempts'>) =>
   `${r.revoked} session(s), ${r.loginCodesSuperseded} unconsumed login code(s), ${r.claimTokensSuperseded} unconsumed claim token(s)`;
+
+/**
+ * SQLSTATE of a failed statement. Drizzle wraps driver failures in a
+ * `DrizzleQueryError` and keeps the driver error in `cause`, so walk the chain.
+ */
+export function sqlState(error: unknown): string | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current; depth += 1) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code)) return code;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return undefined;
+}
 
 /** Only a short upper-case driver code is safe to print; never a message. */
 function safeCode(error: unknown): string {
-  const code = (error as { code?: unknown } | null)?.code;
+  const code = sqlState(error) ?? (error as { code?: unknown } | null)?.code;
   return typeof code === 'string' && /^[A-Z0-9_]{1,40}$/.test(code)
     ? ` (${code})`
     : '';

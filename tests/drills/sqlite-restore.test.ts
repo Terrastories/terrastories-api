@@ -788,4 +788,54 @@ describe('SQLite field-kit restore drill (#136)', () => {
       db.prepare('SELECT role FROM users WHERE id = ?').get(ids.editorAlpha)
     ).toEqual({ role: 'viewer' });
   });
+
+  it('releases identifiers held by accounts deleted after the backup, in the same transaction', () => {
+    const { db } = restore('deleted', true);
+    // Restored copy of an account that the live system deleted after the backup.
+    db.prepare(
+      "INSERT INTO users (id, email, username, username_normalized, email_normalized, first_name, last_name, role, community_id, is_active, password_hash, created_at, updated_at) VALUES (900, 'dead@alpha.drill.test', 'dead-name', 'dead-name', 'dead@alpha.drill.test', 'D', 'D', 'viewer', ?, 1, 'x', 1, 1)"
+    ).run(ids.alpha);
+    // A surviving account took the deleted account's username in the live DB.
+    const orig = live
+      .prepare('SELECT username, username_normalized FROM users WHERE id = ?')
+      .get(ids.viewerAlpha) as Record<string, string>;
+    live
+      .prepare(
+        "UPDATE users SET username = 'dead-name', username_normalized = 'dead-name' WHERE id = ?"
+      )
+      .run(ids.viewerAlpha);
+    try {
+      const { replayed, removed } = replayAccountChanges(live, db, auditMarker);
+      expect(removed).toContain(900);
+      expect(replayed).toContain(ids.viewerAlpha);
+      expect(
+        db
+          .prepare('SELECT username FROM users WHERE id = ?')
+          .get(ids.viewerAlpha)
+      ).toEqual({ username: 'dead-name' });
+      const dead = db
+        .prepare('SELECT username, is_active FROM users WHERE id = 900')
+        .get() as { username: string; is_active: number };
+      expect(dead.is_active).toBe(0);
+      expect(dead.username).toMatch(/^restore-removed /);
+    } finally {
+      live
+        .prepare(
+          'UPDATE users SET username = ?, username_normalized = ? WHERE id = ?'
+        )
+        .run(orig.username, orig.username_normalized, ids.viewerAlpha);
+    }
+  });
+
+  it('refuses a replay when an id names a different account, changing nothing', () => {
+    const { db } = restore('reused-id', true);
+    db.prepare(
+      'UPDATE users SET created_at = created_at + 12345 WHERE id = ?'
+    ).run(ids.viewerAlpha);
+    const before = snapshotSqlite(db);
+    expect(() => replayAccountChanges(live, db, auditMarker)).toThrow(
+      new RegExp(`user ids ${ids.viewerAlpha}\\b.*nothing was changed`)
+    );
+    expect(diffSnapshots(before, snapshotSqlite(db))).toEqual([]);
+  });
 });

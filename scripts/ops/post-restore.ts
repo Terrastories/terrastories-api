@@ -116,6 +116,8 @@ export interface ReplayResult {
   missing: number[];
   /** Users deleted after the backup (restored row, none in the frozen DB): deactivated, review. */
   removed: number[];
+  /** Identifiers a restored account holds that a missing (post-backup) account also holds. */
+  conflicts: Array<{ id: number; column: string; heldBy: number }>;
 }
 
 /**
@@ -160,17 +162,34 @@ export function replayAccountChanges(
   // so an unaudited change would never be replayed. Compare the frozen and
   // restored account rows directly, on every security-relevant column.
   const cols0 = ACCOUNT_AUTHORITY_COLUMNS.join(', ');
-  const frozenRows = frozen
-    .prepare(`SELECT id, ${cols0} FROM users`)
-    .all() as Array<Record<string, unknown>>;
+  const selectAll = `SELECT id, created_at, ${cols0} FROM users`;
+  const frozenRows = frozen.prepare(selectAll).all() as Array<
+    Record<string, unknown>
+  >;
   const frozenIds = new Set(frozenRows.map((r) => Number(r.id)));
   const restoredById = new Map(
-    (
-      restored.prepare(`SELECT id, ${cols0} FROM users`).all() as Array<
-        Record<string, unknown>
-      >
-    ).map((r) => [Number(r.id), r])
+    (restored.prepare(selectAll).all() as Array<Record<string, unknown>>).map(
+      (r) => [Number(r.id), r]
+    )
   );
+  // Fail closed on a reused id: an earlier restore can roll the sequence back,
+  // so the same id may name different people in the two databases. Match on id
+  // plus the immutable identity (created_at, community_id) and abort before
+  // changing anything.
+  const ambiguous = frozenRows
+    .filter((fr) => {
+      const rr = restoredById.get(Number(fr.id));
+      return (
+        rr !== undefined &&
+        (!Object.is(fr.created_at, rr.created_at) ||
+          !Object.is(fr.community_id, rr.community_id))
+      );
+    })
+    .map((fr) => Number(fr.id));
+  if (ambiguous.length > 0)
+    throw new Error(
+      `post-restore: user ids ${ambiguous.join(', ')} name different accounts in the frozen and restored databases (created_at/community_id differ); nothing was changed. Resolve by hand (a legitimate community move needs the restored row aligned first).`
+    );
   for (const fr of frozenRows) {
     const rr = restoredById.get(Number(fr.id));
     if (!rr)
@@ -178,35 +197,46 @@ export function replayAccountChanges(
     else if (ACCOUNT_AUTHORITY_COLUMNS.some((c) => !Object.is(fr[c], rr[c])))
       userIds.add(Number(fr.id));
   }
-  const cols = ACCOUNT_AUTHORITY_COLUMNS.join(', ');
   const assign = ACCOUNT_AUTHORITY_COLUMNS.map((c) => `${c} = @${c}`).join(
     ', '
   );
   const update = restored.prepare(`UPDATE users SET ${assign} WHERE id = @id`);
-  const result: ReplayResult = { replayed: [], missing: [], removed: [] };
+  const result: ReplayResult = {
+    replayed: [],
+    missing: [],
+    removed: [],
+    conflicts: [],
+  };
   // Unique identifiers (email/username and their normalized forms) can be
-  // swapped between users after the backup; applying finals one user at a time
-  // would hit a unique conflict mid-replay. Stage every affected user onto
-  // temporary values first, in the same transaction, then apply finals.
-  // Temporaries are protected by an explicit disjointness check, not by their
-  // shape (usernames may contain spaces): each candidate carries a random token
-  // and must equal no stored identifier, no final value to be applied and no
-  // other temporary; a collision regenerates it.
+  // swapped between users after the backup, or still held by an account that
+  // was deleted afterwards; applying finals one user at a time would hit a
+  // unique conflict mid-replay. In ONE transaction: reserve every final value,
+  // deactivate deleted-after-backup accounts and release their identifiers
+  // (tombstone values), stage every affected user onto temporaries, then apply
+  // finals. Tombstones and temporaries are protected by an explicit
+  // disjointness check, not by their shape (usernames may contain spaces):
+  // each candidate carries a random token and must equal no stored identifier,
+  // no final value to be applied and no other generated value; a collision
+  // regenerates it. Any remaining unique conflict aborts and rolls back all.
   const nextToken = options.tempSource ?? randomUUID;
   const stage = restored.prepare(
     'UPDATE users SET username = @t, username_normalized = @t, email = @e, email_normalized = @e WHERE id = @id'
+  );
+  const tombstone = restored.prepare(
+    'UPDATE users SET is_active = 0, username = @t, username_normalized = @t, email = @e, email_normalized = @e WHERE id = @id'
   );
   const exists = restored.prepare('SELECT 1 FROM users WHERE id = ?');
   const taken = restored.prepare(
     'SELECT 1 FROM users WHERE username = @t OR username_normalized = @t OR email = @e OR email_normalized = @e LIMIT 1'
   );
+  const holder = restored.prepare(
+    'SELECT id FROM users WHERE username = @v OR username_normalized = @v OR email = @v OR email_normalized = @v LIMIT 1'
+  );
   restored.transaction(() => {
     const rows: Array<{ id: number; row: Record<string, unknown> }> = [];
-    const reserved = new Set<string>(); // final values and temporaries in use
+    const reserved = new Set<string>(); // final values and generated values
     for (const id of userIds) {
-      const row = frozen
-        .prepare(`SELECT ${cols} FROM users WHERE id = ?`)
-        .get(id) as Record<string, unknown> | undefined;
+      const row = frozenRows.find((r) => Number(r.id) === id);
       if (!row) continue;
       if (!exists.get(id)) {
         result.missing.push(id);
@@ -221,35 +251,51 @@ export function replayAccountChanges(
       ])
         if (typeof row[c] === 'string') reserved.add(row[c] as string);
     }
-    for (const { id } of rows) {
-      let t = '';
-      let e = '';
-      for (let attempt = 0; ; attempt++) {
-        if (attempt >= 100)
-          throw new Error('post-restore: no collision-free temporary found');
-        t = `replay tmp ${nextToken()} ${id}`;
-        e = `${t}@replay.invalid`;
+    const generate = (prefix: string, id: number) => {
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const t = `${prefix} ${nextToken()} ${id}`;
+        const e = `${t}@replay.invalid`;
         if (reserved.has(t) || reserved.has(e) || taken.get({ t, e })) continue;
-        break;
+        reserved.add(t);
+        reserved.add(e);
+        return { t, e };
       }
-      reserved.add(t);
-      reserved.add(e);
-      stage.run({ id, t, e });
-    }
+      throw new Error('post-restore: no collision-free temporary found');
+    };
+    // Deleted after the backup: deactivate and release the identifiers.
+    for (const id of restoredById.keys())
+      if (!frozenIds.has(id)) {
+        tombstone.run({ id, ...generate('restore-removed', id) });
+        result.removed.push(id);
+      }
+    for (const { id } of rows) stage.run({ id, ...generate('replay tmp', id) });
     for (const { id, row } of rows) {
       update.run({ ...row, id });
       result.replayed.push(id);
     }
-  })();
-  // Users deleted after the backup: the restore resurrected them; deactivate.
-  const deactivate = restored.prepare(
-    'UPDATE users SET is_active = 0 WHERE id = ?'
-  );
-  for (const id of restoredById.keys())
-    if (!frozenIds.has(id)) {
-      deactivate.run(id);
-      result.removed.push(id);
+    // Accounts created after the backup cannot be re-created here; report any
+    // identifier a restored account still holds so the re-creation will not fail.
+    for (const id of result.missing) {
+      const row = frozenRows.find((r) => Number(r.id) === id)!;
+      for (const c of [
+        'username',
+        'username_normalized',
+        'email',
+        'email_normalized',
+      ]) {
+        const v = row[c];
+        const held =
+          typeof v === 'string'
+            ? (holder.get({ v }) as { id: number } | undefined)
+            : undefined;
+        if (held) result.conflicts.push({ id, column: c, heldBy: held.id });
+      }
     }
+  })();
+  if (result.conflicts.length > 0)
+    console.warn(
+      `post-restore: accounts created after the backup conflict with restored identifiers: ${JSON.stringify(result.conflicts)}`
+    );
   if (result.removed.length > 0)
     console.warn(
       `post-restore: users deleted after the backup were restored and deactivated: ${result.removed.join(', ')}`

@@ -25,7 +25,7 @@ function makeDb(file: string, active: number) {
     CREATE TABLE claim_tokens (consumed_at INTEGER, superseded_at INTEGER);
     CREATE TABLE export_tokens (id INTEGER);
     CREATE TABLE audit_entries (id INTEGER PRIMARY KEY, action TEXT, actor_id INTEGER, resource_type TEXT, resource_ids TEXT, outcome TEXT);
-    CREATE TABLE users (id INTEGER PRIMARY KEY, is_active INTEGER, role TEXT, community_id INTEGER, password_hash TEXT, password_algorithm TEXT, password_salt TEXT, password_params TEXT, password_verifier TEXT, email TEXT, email_normalized TEXT, username TEXT, username_normalized TEXT, display_name TEXT, first_name TEXT, last_name TEXT);
+    CREATE TABLE users (id INTEGER PRIMARY KEY, created_at INTEGER, is_active INTEGER, role TEXT, community_id INTEGER, password_hash TEXT, password_algorithm TEXT, password_salt TEXT, password_params TEXT, password_verifier TEXT, email TEXT, email_normalized TEXT, username TEXT, username_normalized TEXT, display_name TEXT, first_name TEXT, last_name TEXT);
     INSERT INTO sessions VALUES ('s');
     INSERT INTO users (id, is_active, role) VALUES (1, ${active}, 'viewer');
   `);

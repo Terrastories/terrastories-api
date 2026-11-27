@@ -10421,7 +10421,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/V2Error"
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/V2Error"
+                    },
+                    {
+                      "$ref": "#/components/schemas/D1BudgetExceededError"
+                    }
+                  ]
                 }
               }
             }
@@ -11483,7 +11490,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/V2Error"
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/V2Error"
+                    },
+                    {
+                      "$ref": "#/components/schemas/D1BudgetExceededError"
+                    }
+                  ]
                 }
               }
             }
@@ -22759,6 +22773,94 @@
       }
     },
     "schemas": {
+      "D1BudgetExceededError": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "const": "d1_budget_exceeded"
+          },
+          "details": {
+            "type": "object",
+            "properties": {
+              "commitPlan": {
+                "type": "object",
+                "properties": {
+                  "statementCount": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "maxBoundParams": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "maxStatementBytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "estimatedRowsWritten": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "withinD1Budget": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "statementCount",
+                  "maxBoundParams",
+                  "maxStatementBytes",
+                  "estimatedRowsWritten",
+                  "withinD1Budget"
+                ],
+                "additionalProperties": false
+              },
+              "violations": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "limit": {
+                      "type": "string",
+                      "enum": [
+                        "max_statements",
+                        "max_bound_params",
+                        "max_statement_bytes",
+                        "max_rows_written"
+                      ]
+                    },
+                    "actual": {
+                      "type": "number"
+                    },
+                    "max": {
+                      "type": "number"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": ["limit", "actual", "max", "message"],
+                  "additionalProperties": false
+                }
+              },
+              "alternatives": {
+                "type": "string"
+              }
+            },
+            "required": ["commitPlan", "violations", "alternatives"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["error", "code", "details"],
+        "additionalProperties": false
+      },
       "ExploreError": {
         "type": "object",
         "properties": {

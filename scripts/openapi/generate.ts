@@ -11,6 +11,7 @@ import {
 } from './registry.js';
 import { compareCodeUnits, mountedRoutes } from './route-table.js';
 import { SCHEMA_MAP } from './schema-map.js';
+import { ImportCommitPlanSummarySchema } from '../../src/shared/schemas/imports.js';
 import { V2ValidationErrorResponseSchema } from '../../src/shared/schemas/community-writes.js';
 
 /**
@@ -32,14 +33,63 @@ const NO_INPUT = new Set([
   'GET /v2/bootstrap',
 ]);
 
+/** Statuses a route answers with a shape beyond the plain V2 envelope. */
+const D1_BUDGET_ROUTES = new Set([
+  'POST /v2/imports/preview',
+  'POST /v2/imports/:id/commit',
+]);
+
+/**
+ * The error schema of a documented 4xx/5xx. Error shapes the app returns
+ * (see tests/openapi): V2Error \`{error, code?}\` and its validation form
+ * \`{error, details: {fields}}\` (one schema), ExploreError \`{error, message?}\`
+ * under /explore, and the imports 422 \`d1_budget_exceeded\` with
+ * \`details: {commitPlan, violations, alternatives}\` (a oneOf with V2Error).
+ */
+export function errorSchemaFor(key: string, path: string, code: number): Json {
+  if (path.startsWith('/explore/'))
+    return { $ref: '#/components/schemas/ExploreError' };
+  if (code === 422 && D1_BUDGET_ROUTES.has(key))
+    return {
+      oneOf: [
+        { $ref: '#/components/schemas/V2Error' },
+        { $ref: '#/components/schemas/D1BudgetExceededError' },
+      ],
+    };
+  return { $ref: '#/components/schemas/V2Error' };
+}
+
 /**
  * Explore error bodies (src/services/explore-adapter.service.ts): 404 is
  * `{ error, message }` (the unknown-community 404 omits `message`), 400 is
  * `{ error }`. They differ from the V2 envelope, which forbids `message`.
  */
-const ExploreErrorSchema = z.object({
+export const ExploreErrorSchema = z.object({
   error: z.string(),
   message: z.string().optional(),
+});
+
+/** imports.service.ts 422 for an import over the D1 statement budget. */
+export const D1BudgetExceededErrorSchema = z.object({
+  error: z.string(),
+  code: z.literal('d1_budget_exceeded'),
+  details: z.object({
+    commitPlan: ImportCommitPlanSummarySchema,
+    violations: z.array(
+      z.object({
+        limit: z.enum([
+          'max_statements',
+          'max_bound_params',
+          'max_statement_bytes',
+          'max_rows_written',
+        ]),
+        actual: z.number(),
+        max: z.number(),
+        message: z.string(),
+      })
+    ),
+    alternatives: z.string(),
+  }),
 });
 
 /** Byte payloads of 200 and 206 (media and export downloads, not JSON). */
@@ -274,13 +324,8 @@ export function buildOpenApiDocument(): Json {
           },
         };
       } else if (code >= 400 && !BODYLESS_STATUSES.has(code)) {
-        const errorSchema = row.path.startsWith('/explore/')
-          ? 'ExploreError'
-          : 'V2Error';
         response['content'] = {
-          'application/json': {
-            schema: { $ref: `#/components/schemas/${errorSchema}` },
-          },
+          'application/json': { schema: errorSchemaFor(key, row.path, code) },
         };
       }
       responses[String(code)] = response;
@@ -326,6 +371,10 @@ export function buildOpenApiDocument(): Json {
         cookieAuth: { type: 'apiKey', in: 'cookie', name: 'ts_session' },
       },
       schemas: {
+        D1BudgetExceededError: jsonSchemaOf(
+          D1BudgetExceededErrorSchema,
+          'output'
+        ),
         ExploreError: jsonSchemaOf(ExploreErrorSchema, 'output'),
         V2Error: jsonSchemaOf(V2ValidationErrorResponseSchema, 'output'),
       },

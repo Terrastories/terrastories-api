@@ -467,6 +467,157 @@ describe('V2 OpenAPI runtime contract', () => {
     expect(new Uint8Array(await media.arrayBuffer())).toEqual(bytes);
   });
 
+  it('every error body shape the app returns matches its documented schema', () => {
+    const plan = {
+      statementCount: 1200,
+      maxBoundParams: 8,
+      maxStatementBytes: 400,
+      estimatedRowsWritten: 1200,
+      withinD1Budget: false,
+    };
+    const d1 = {
+      error: 'Import exceeds the 1000 statement budget',
+      code: 'd1_budget_exceeded',
+      details: {
+        commitPlan: plan,
+        violations: [
+          {
+            limit: 'max_statements',
+            actual: 1200,
+            max: 1000,
+            message: 'Too many',
+          },
+        ],
+        alternatives: 'Use the field kit',
+      },
+    };
+    const validation = {
+      error: 'Invalid request',
+      details: { fields: [{ path: 'name', message: 'Required' }] },
+    };
+    const shapes: Array<{
+      shape: string;
+      method: string;
+      route: string;
+      status: number;
+      body: unknown;
+      valid: boolean;
+    }> = [
+      {
+        shape: '{error}',
+        method: 'GET',
+        route: '/v2/stories/:id',
+        status: 404,
+        body: { error: 'Not found' },
+        valid: true,
+      },
+      {
+        shape: '{error, code}',
+        method: 'POST',
+        route: '/v2/community/export',
+        status: 409,
+        body: {
+          error: 'Export already in progress',
+          code: 'export_in_progress',
+        },
+        valid: true,
+      },
+      {
+        shape: '{error} 501/410',
+        method: 'DELETE',
+        route: '/v2/media/uploads/:id',
+        status: 501,
+        body: { error: 'Direct upload is not available on this deployment' },
+        valid: true,
+      },
+      {
+        shape: 'validation {error, details.fields}',
+        method: 'POST',
+        route: '/v2/places',
+        status: 400,
+        body: validation,
+        valid: true,
+      },
+      {
+        shape: 'validation 422',
+        method: 'PUT',
+        route: '/v2/community/map-config',
+        status: 422,
+        body: validation,
+        valid: true,
+      },
+      {
+        shape: 'd1_budget_exceeded preview',
+        method: 'POST',
+        route: '/v2/imports/preview',
+        status: 422,
+        body: d1,
+        valid: true,
+      },
+      {
+        shape: 'd1_budget_exceeded commit',
+        method: 'POST',
+        route: '/v2/imports/:id/commit',
+        status: 422,
+        body: d1,
+        valid: true,
+      },
+      {
+        shape: 'validation on imports 422',
+        method: 'POST',
+        route: '/v2/imports/preview',
+        status: 422,
+        body: validation,
+        valid: true,
+      },
+      {
+        shape: 'Explore {error, message}',
+        method: 'GET',
+        route: '/explore/media/:fileId',
+        status: 404,
+        body: {
+          error: 'Not Found',
+          message: 'The requested resource could not be found.',
+        },
+        valid: true,
+      },
+      {
+        shape: 'Explore {error}',
+        method: 'GET',
+        route: '/explore/communities/:slug',
+        status: 404,
+        body: { error: 'Community Not Found' },
+        valid: true,
+      },
+      // The V2 envelope forbids Explore's message, and d1 is only for imports.
+      {
+        shape: 'message outside Explore',
+        method: 'GET',
+        route: '/v2/stories/:id',
+        status: 404,
+        body: { error: 'Not Found', message: 'x' },
+        valid: false,
+      },
+      {
+        shape: 'd1 outside imports',
+        method: 'POST',
+        route: '/v2/places',
+        status: 422,
+        body: d1,
+        valid: false,
+      },
+    ];
+    for (const { shape, method, route, status, body, valid } of shapes) {
+      const schema = operationFor(method, route).responses[String(status)]
+        ?.content?.['application/json']?.schema;
+      expect(schema, `${shape}: ${method} ${route} ${status}`).toBeDefined();
+      const parsed = z
+        .fromJSONSchema(inlineRefs(schema) as never)
+        .safeParse(body);
+      expect(parsed.success, shape).toBe(valid);
+    }
+  });
+
   it('documents 501 on every upload route that needs the S3 adapter', () => {
     for (const [method, route] of [
       ['POST', '/v2/media/uploads'],

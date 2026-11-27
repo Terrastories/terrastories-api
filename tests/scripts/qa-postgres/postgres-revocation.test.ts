@@ -230,10 +230,18 @@ describe(
           `requires a PostgreSQL target: ${decision.target.reason}`
         );
       const url = decision.target.url;
-      const revokeClient = createPostgresClient(url, { max: 2 });
+      // Deterministic deadlock victim: the connection whose deadlock_timeout
+      // is shorter runs the detector first and aborts itself. The revocation
+      // detects after 300 ms; the other side would only after 30 s. (These
+      // settings need a superuser, which the dedicated test database user is.)
+      const revokeClient = createPostgresClient(url, {
+        max: 2,
+        connection: { deadlock_timeout: '300ms' },
+      });
       const claimClient = createPostgresClient(url, {
         max: 2,
         onnotice: () => undefined,
+        connection: { deadlock_timeout: '30s' },
       });
       try {
         await revokeClient.unsafe('DROP SCHEMA IF EXISTS drizzle CASCADE');
@@ -305,6 +313,15 @@ describe(
       throw new Error('revocation never started waiting on a lock');
     };
 
+    /** A gate a parked transaction waits on; always released in `finally`. */
+    const gate = () => {
+      let open!: () => void;
+      const promise = new Promise<void>((resolve) => (open = resolve));
+      return { promise, open };
+    };
+    const countSessions = async (db: ReturnType<typeof drizzle>) =>
+      Number((await db.select({ n: count() }).from(sessionsPg))[0]?.n ?? 0);
+
     it.skipIf(!decision.run)(
       'deterministic claim interleaving: revocation starts while the claim holds the token lock, before its session insert — no deadlock, no retry, no survivor',
       async () => {
@@ -317,45 +334,47 @@ describe(
             userId,
             now,
           }) => {
-            let release!: () => void;
-            const proceed = new Promise<void>((resolve) => (release = resolve));
+            const proceed = gate();
             let locked!: () => void;
             const tokenLocked = new Promise<void>(
               (resolve) => (locked = resolve)
             );
-            // The claim's transaction shape up to the point the real one is
-            // at when revocation arrives: token row locked and consumed, the
-            // session NOT yet inserted.
-            const claimTx = claimClient.begin(async (tx) => {
-              await tx`select id from claim_tokens where id = ${tokenId} for update`;
-              await tx`update claim_tokens set consumed_at = ${now}, consumed_by = ${userId} where id = ${tokenId}`;
-              locked();
-              await proceed;
-              await tx`insert into sessions (id, token_hash, user_id, expires_at) values ('det-session', 'det-session', ${userId}, ${now + 3_600_000})`;
-            });
-            await tokenLocked;
-            let settled = false;
-            const revocation = revokeAllSessions(revokeDb).finally(() => {
-              settled = true;
-            });
-            // Wait until revocation is really blocked (it needs the
-            // claim_tokens lock the claim holds), then let the claim go on to
-            // insert its session.
-            await waitForLockWait(revokeClient, /LOCK TABLE|claim_tokens/i);
-            expect(settled).toBe(false);
-            release();
-            // With the old order (sessions locked first) the claim's insert
-            // and the revocation's claim_tokens lock deadlock here.
-            await claimTx;
-            const result = await revocation;
-            expect(result.attempts).toBe(1);
-            expect(result.revoked).toBe(1);
-            expect(
-              Number(
-                (await revokeDb.select({ n: count() }).from(sessionsPg))[0]
-                  ?.n ?? 0
-              )
-            ).toBe(0);
+            const pending: Array<Promise<unknown>> = [];
+            try {
+              // The claim's transaction shape up to the point the real one is
+              // at when revocation arrives: token row locked and consumed, the
+              // session NOT yet inserted.
+              const claimTx = claimClient.begin(async (tx) => {
+                await tx`select id from claim_tokens where id = ${tokenId} for update`;
+                await tx`update claim_tokens set consumed_at = ${now}, consumed_by = ${userId} where id = ${tokenId}`;
+                locked();
+                await proceed.promise;
+                await tx`insert into sessions (id, token_hash, user_id, expires_at) values ('det-session', 'det-session', ${userId}, ${now + 3_600_000})`;
+              });
+              pending.push(claimTx);
+              await tokenLocked;
+              let settled = false;
+              const revocation = revokeAllSessions(revokeDb).finally(() => {
+                settled = true;
+              });
+              pending.push(revocation);
+              // Wait until revocation is really blocked (it needs the
+              // claim_tokens lock the claim holds), then let the claim go on
+              // to insert its session.
+              await waitForLockWait(revokeClient, /LOCK TABLE|claim_tokens/i);
+              expect(settled).toBe(false);
+              proceed.open();
+              // With the old order (sessions locked first) the claim's insert
+              // and the revocation's claim_tokens lock deadlock here.
+              await claimTx;
+              const result = await revocation;
+              expect(result.attempts).toBe(1);
+              expect(result.revoked).toBe(1);
+              expect(await countSessions(revokeDb)).toBe(0);
+            } finally {
+              proceed.open();
+              await Promise.allSettled(pending);
+            }
           }
         );
       },
@@ -366,34 +385,35 @@ describe(
       'deterministic login interleaving: revocation waits for an in-flight session insert and then deletes it',
       async () => {
         await withFreshDb(async ({ revokeDb, claimClient, userId, now }) => {
-          let release!: () => void;
-          const hold = new Promise<void>((resolve) => (release = resolve));
+          const hold = gate();
           let inserted!: () => void;
           const insertedSession = new Promise<void>(
             (resolve) => (inserted = resolve)
           );
-          const loginTx = claimClient.begin(async (tx) => {
-            await tx`insert into sessions (id, token_hash, user_id, expires_at) values ('det-login', 'det-login', ${userId}, ${now + 3_600_000})`;
-            inserted();
-            await hold;
-          });
-          await insertedSession;
-          let settled = false;
-          const revocation = revokeAllSessions(revokeDb).finally(() => {
-            settled = true;
-          });
-          await sleep(500);
-          if (settled) release();
-          expect(settled).toBe(false);
-          release();
-          await loginTx;
-          expect((await revocation).revoked).toBe(1);
-          expect(
-            Number(
-              (await revokeDb.select({ n: count() }).from(sessionsPg))[0]?.n ??
-                0
-            )
-          ).toBe(0);
+          const pending: Array<Promise<unknown>> = [];
+          try {
+            const loginTx = claimClient.begin(async (tx) => {
+              await tx`insert into sessions (id, token_hash, user_id, expires_at) values ('det-login', 'det-login', ${userId}, ${now + 3_600_000})`;
+              inserted();
+              await hold.promise;
+            });
+            pending.push(loginTx);
+            await insertedSession;
+            let settled = false;
+            const revocation = revokeAllSessions(revokeDb).finally(() => {
+              settled = true;
+            });
+            pending.push(revocation);
+            await sleep(500);
+            expect(settled).toBe(false);
+            hold.open();
+            await loginTx;
+            expect((await revocation).revoked).toBe(1);
+            expect(await countSessions(revokeDb)).toBe(0);
+          } finally {
+            hold.open();
+            await Promise.allSettled(pending);
+          }
         });
       },
       60_000
@@ -417,36 +437,41 @@ describe(
               userId,
               expiresAt: now + 3_600_000,
             });
-            let release!: () => void;
-            const proceed = new Promise<void>((resolve) => (release = resolve));
+            const proceed = gate();
             let ready!: () => void;
             const holding = new Promise<void>((resolve) => (ready = resolve));
-            // A synthetic transaction that holds a session row lock and then needs
-            // a claim_tokens row: the inverse of the revocation's table-lock
-            // order, built only to force a real 40P01 (no production path does this).
-            const other = claimClient.begin(async (tx) => {
-              await tx`select id from sessions where id = 'dl' for update`;
-              ready();
-              await proceed;
-              await tx`update claim_tokens set superseded_at = ${now} where id = ${tokenId}`;
-            });
-            await holding;
-            // Revocation holds claim_tokens and waits for the sessions lock.
-            const revocation = revokeAllSessions(revokeDb);
-            await waitForLockWait(revokeClient, /LOCK TABLE/i);
-            // Now the other side asks for claim_tokens: the cycle closes and
-            // PostgreSQL aborts one transaction (the one that waited longest,
-            // the revocation) after deadlock_timeout.
-            release();
-            await Promise.allSettled([other]);
-            const result = await revocation;
-            expect(result.attempts).toBeGreaterThanOrEqual(2);
-            expect(
-              Number(
-                (await revokeDb.select({ n: count() }).from(sessionsPg))[0]
-                  ?.n ?? 0
-              )
-            ).toBe(0);
+            const pending: Array<Promise<unknown>> = [];
+            try {
+              // A synthetic transaction that holds a session row lock and then
+              // needs a claim_tokens row: the inverse of the revocation's
+              // table-lock order, built only to force a real 40P01 (no
+              // production path does this).
+              const other = claimClient.begin(async (tx) => {
+                await tx`select id from sessions where id = 'dl' for update`;
+                ready();
+                await proceed.promise;
+                await tx`update claim_tokens set superseded_at = ${now} where id = ${tokenId}`;
+              });
+              pending.push(other);
+              await holding;
+              // Revocation holds claim_tokens and waits for the sessions lock.
+              const revocation = revokeAllSessions(revokeDb);
+              pending.push(revocation);
+              await waitForLockWait(revokeClient, /LOCK TABLE/i);
+              // Now the other side asks for claim_tokens and the cycle closes.
+              // The revocation connection's deadlock_timeout (300 ms) is far
+              // shorter than the other's (30 s), so the revocation is the
+              // victim every time; it then retries.
+              proceed.open();
+              const result = await revocation;
+              expect(result.attempts).toBeGreaterThanOrEqual(2);
+              // The synthetic side must have completed (it was not the victim).
+              await other; // rejects if the synthetic side was the victim
+              expect(await countSessions(revokeDb)).toBe(0);
+            } finally {
+              proceed.open();
+              await Promise.allSettled(pending);
+            }
           }
         );
       },

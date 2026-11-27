@@ -731,7 +731,7 @@ describe('V2 public story, place, speaker, and media endpoints (#145 Slice 5)', 
     expect(newest.headers.get('Cache-Control')).toBe('no-store');
     expect(newest.headers.get('X-Content-Type-Options')).toBe('nosniff');
     expect(newest.headers.get('Content-Security-Policy')).toBe(
-      "default-src 'none'; sandbox"
+      "default-src 'none'; frame-ancestors 'none'; sandbox"
     );
 
     const parsed = PublicStoriesListResponseSchema.parse(newest.json);
@@ -1107,7 +1107,7 @@ describe('V2 public story, place, speaker, and media endpoints (#145 Slice 5)', 
       expect(res.headers.get('Cache-Control')).toBe('no-store');
       expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff');
       expect(res.headers.get('Content-Security-Policy')).toBe(
-        "default-src 'none'; sandbox"
+        "default-src 'none'; frame-ancestors 'none'; sandbox"
       );
       expect(await res.text()).toBe(expectedText);
     }

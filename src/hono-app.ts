@@ -430,7 +430,11 @@ export function createHonoApp(options: FoundationOptions) {
     offlineMode: options.offlineMode,
   });
   app.use('/v2/*', async (c, next) => {
-    const session = await service.actor(getCookie(c, 'ts_session'), now());
+    const session = await service.actor(
+      getCookie(c, 'ts_session'),
+      now(),
+      true
+    );
     if (!session) return c.json({ error: 'Unauthorized' }, 401);
     c.set('actor', session.user);
     c.set('sessionKind', session.kind);
@@ -440,7 +444,8 @@ export function createHonoApp(options: FoundationOptions) {
       !['/v2/community/sovereignty', '/v2/community/erasure'].includes(
         c.req.path
       ) &&
-      (await sovereigntyRepository.erasurePending(session.user.communityId))
+      // Fail closed: gates were requested, so a missing result denies.
+      (session.gates === undefined || session.gates.erasurePending)
     )
       return c.json({ error: 'Forbidden' }, 403);
     // SPEC-V2 §7: a community administrator must generate recovery codes
@@ -451,7 +456,7 @@ export function createHonoApp(options: FoundationOptions) {
       session.user.role === 'admin' &&
       session.user.communityId !== null &&
       !c.req.path.startsWith('/v2/auth/') &&
-      !(await options.repository.hasActiveRecoveryCodes(session.user.id))
+      !session.gates?.recoveryCodesActive
     )
       return c.json(
         { error: 'Recovery codes required', code: 'recovery_codes_required' },

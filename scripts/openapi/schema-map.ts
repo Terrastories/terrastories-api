@@ -1,4 +1,4 @@
-import type { z } from 'zod';
+import { z } from 'zod';
 import {
   AdminAuditEntryListResponseSchema,
   AdminCommunityListResponseSchema,
@@ -91,7 +91,17 @@ export interface RouteSchemas {
   response?: z.ZodType;
 }
 
+/** Login's inline response (`src/hono-app.ts`): the public user projection. */
+const LoginResponseSchema = z.object({
+  user: z.looseObject({
+    id: z.number(),
+    role: z.string(),
+    communityId: z.number().nullable(),
+  }),
+});
+
 export const SCHEMA_MAP: Record<string, RouteSchemas> = {
+  'POST /v2/auth/login': { response: LoginResponseSchema },
   'POST /v2/auth/recovery-codes': {
     request: RecoveryCodesRequestSchema,
     response: RecoveryCodesResponseSchema,

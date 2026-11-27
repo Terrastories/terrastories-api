@@ -1958,7 +1958,34 @@
         "x-registry-caller": "Unauthenticated",
         "responses": {
           "200": {
-            "description": "OK"
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "user": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "number"
+                        },
+                        "role": {
+                          "type": "string"
+                        },
+                        "communityId": {
+                          "type": ["number", "null"]
+                        }
+                      },
+                      "required": ["id", "role", "communityId"],
+                      "additionalProperties": {}
+                    }
+                  },
+                  "required": ["user"],
+                  "additionalProperties": false
+                }
+              }
+            }
           },
           "400": {
             "description": "Bad Request",

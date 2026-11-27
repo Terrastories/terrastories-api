@@ -10,7 +10,8 @@ import { communitiesSqlite } from '../../src/db/schema/communities.js';
 import { usersSqlite } from '../../src/db/schema/users.js';
 import { normalizeSearchText } from '../../src/shared/utils/search-normalize.js';
 import { SCHEMA_MAP } from '../../scripts/openapi/schema-map.js';
-import { OPENAPI_PATH } from '../../scripts/openapi/generate.js';
+import { OPENAPI_PATH, OPTIONAL_BODY } from '../../scripts/openapi/generate.js';
+import { mountedRouteKeys } from '../../scripts/openapi/route-table.js';
 import {
   argon2Seed,
   makeDerivedKey,
@@ -191,7 +192,11 @@ describe('V2 OpenAPI runtime contract', () => {
     // live body (success and error alike) and name the real content type.
     const emitted =
       op.responses[String(res.status)]?.content?.['application/json']?.schema;
-    if (emitted) {
+    expect(
+      emitted,
+      `${method} ${template} ${res.status} must document a JSON schema`
+    ).toBeDefined();
+    {
       expect(
         res.headers.get('content-type') ?? '',
         `${method} ${template}`
@@ -311,6 +316,23 @@ describe('V2 OpenAPI runtime contract', () => {
       );
     }
     expect(statuses).toContain(429);
+  });
+
+  it('documents request body requirement and 206 ranges', () => {
+    const body = (method: string, template: string) =>
+      (
+        operationFor(method, template) as unknown as {
+          requestBody?: { required: boolean };
+        }
+      ).requestBody;
+    expect(body('POST', '/v2/community/export')?.required).toBe(false);
+    expect(body('PUT', '/v2/community/map-config')?.required).toBe(true);
+    expect(
+      Object.keys(operationFor('GET', '/v2/media/:id').responses)
+    ).toContain('206');
+    const mounted = new Set(mountedRouteKeys());
+    for (const key of OPTIONAL_BODY)
+      expect(mounted.has(key), `${key} is not mounted`).toBe(true);
   });
 
   it('security flags and statuses hold for every operation anonymously', async () => {

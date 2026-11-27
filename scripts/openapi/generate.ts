@@ -33,7 +33,7 @@ const NO_INPUT = new Set([
 ]);
 
 /** Routes whose handler accepts an absent or empty JSON body. */
-const OPTIONAL_BODY = new Set([
+export const OPTIONAL_BODY = new Set([
   'POST /v2/admin/communities/:id/claim-tokens',
   'POST /v2/community/export',
   'POST /v2/auth/recovery-codes',

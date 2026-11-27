@@ -207,6 +207,27 @@ describe('V2 security response headers (#138)', () => {
       headers: { cookie, origin: CLIENT_ORIGIN },
     });
     expect(missingDelete.status).toBe(404);
+    // A successful delete is a mutation too: CORP stays same-site.
+    const raw = rawUploadRequest({
+      filename: 'b.png',
+      contentType: 'image/png',
+      bytes: PNG_BYTES,
+    });
+    const up = await app.request(`${API_ORIGIN}/v2/media${raw.search}`, {
+      method: 'POST',
+      headers: { ...raw.headers, origin: CLIENT_ORIGIN, cookie },
+      body: raw.body,
+    });
+    expect(up.status).toBe(201);
+    const deleteId = ((await up.json()) as { data: { id: number } }).data.id;
+    const deleted = await app.request(`${API_ORIGIN}/v2/media/${deleteId}`, {
+      method: 'DELETE',
+      headers: { cookie, origin: CLIENT_ORIGIN },
+    });
+    expect(deleted.status).toBeLessThan(300);
+    expect(deleted.headers.get('cross-origin-resource-policy')).toBe(
+      'same-site'
+    );
     expect(missingDelete.headers.get('cross-origin-resource-policy')).toBe(
       'same-site'
     );

@@ -196,6 +196,26 @@ describe('V2 security response headers (#138)', () => {
     expectBaseline(res);
   });
 
+  it('limits cross-origin CORP to GET/HEAD even when a mutation returns 200', async () => {
+    const probe = new Hono();
+    probe.use('*', v2SecurityHeaders());
+    probe.all('/v2/media/:id', (c) => c.text('ok', 200));
+    for (const method of ['GET', 'HEAD']) {
+      const res = await probe.request(`${API_ORIGIN}/v2/media/1`, { method });
+      expect(res.status).toBe(200);
+      expect(res.headers.get('cross-origin-resource-policy')).toBe(
+        'cross-origin'
+      );
+    }
+    for (const method of ['DELETE', 'PUT', 'PATCH', 'POST']) {
+      const res = await probe.request(`${API_ORIGIN}/v2/media/1`, { method });
+      expect(res.status, method).toBe(200);
+      expect(res.headers.get('cross-origin-resource-policy'), method).toBe(
+        'same-site'
+      );
+    }
+  });
+
   it('keeps CORP same-site on media denials and mutations', async () => {
     const denied = await app.request(`${API_ORIGIN}/v2/media/${mediaId}`);
     expect(denied.status).toBe(401);
@@ -224,7 +244,7 @@ describe('V2 security response headers (#138)', () => {
       method: 'DELETE',
       headers: { cookie, origin: CLIENT_ORIGIN },
     });
-    expect(deleted.status).toBeLessThan(300);
+    expect(deleted.status).toBe(204);
     expect(deleted.headers.get('cross-origin-resource-policy')).toBe(
       'same-site'
     );

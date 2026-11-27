@@ -11,7 +11,8 @@ import { readFileSync } from 'node:fs';
 interface Block {
   name: string;
   addHeaders: string[];
-  errorPages: string[];
+  errorPages: { codes: string[]; target: string }[];
+  returnCode?: string;
   children: Block[];
 }
 
@@ -45,7 +46,16 @@ function parse(source: string): Block {
       top.children.push(child);
       stack.push(child);
     } else if (trimmed.startsWith('error_page ')) {
-      top.errorPages.push(trimmed.split(/\s+/).pop()!);
+      {
+        const parts = trimmed.split(/\s+/).slice(1);
+        const target = parts.pop()!;
+        top.errorPages.push({
+          codes: parts.filter((x) => x !== '='),
+          target,
+        });
+      }
+    } else if (trimmed.startsWith('return ')) {
+      top.returnCode = trimmed.split(/\s+/)[1];
     } else if (trimmed.startsWith('add_header ')) {
       top.addHeaders.push(trimmed.split(/\s+/)[1]!.toLowerCase());
     }
@@ -87,25 +97,34 @@ describe.each(['nginx.conf', 'nginx.field-kit.conf'])('%s', (file) => {
     });
     expect(seen).toBeGreaterThanOrEqual(2);
   });
-  it('answers nginx-generated /v2 failures with the baseline headers', () => {
+  it('answers nginx-generated /v2 failures with the baseline headers and the same status', () => {
     const named = new Map<string, Block>();
     walk(root, (b) => {
       if (b.name.startsWith('location @')) named.set(b.name.slice(10), b);
     });
+    let checked = 0;
     walk(root, (b) => {
       if (!/^location \/v2/.test(b.name)) return;
-      const target = b.errorPages.find((p) => p.startsWith('@'));
-      expect(target, `error_page in ${b.name}`).toBeDefined();
-      const handler = named.get(target!.slice(1));
-      expect(handler, target).toBeDefined();
-      for (const h of [
-        'x-content-type-options',
-        'x-frame-options',
-        'content-security-policy',
-        'cache-control',
-      ])
-        expect(handler!.addHeaders, `${target} ${h}`).toContain(h);
+      checked++;
+      // Exact status list; each keeps its own code (502 stays 502, ...).
+      expect(
+        b.errorPages.map((p) => p.codes.join(',')),
+        b.name
+      ).toEqual(['400', '408', '413', '502', '503', '504']);
+      for (const page of b.errorPages) {
+        const handler = named.get(page.target.slice(1));
+        expect(handler, page.target).toBeDefined();
+        expect(handler!.returnCode, page.target).toBe(page.codes[0]);
+        for (const h of [
+          'x-content-type-options',
+          'x-frame-options',
+          'content-security-policy',
+          'cache-control',
+        ])
+          expect(handler!.addHeaders, `${page.target} ${h}`).toContain(h);
+      }
     });
+    expect(checked).toBe(2);
   });
 
   it('proxies /health with the forwarded scheme so the API owns HSTS', () => {

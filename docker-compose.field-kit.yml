@@ -213,6 +213,7 @@ services:
     volumes:
       - field_kit_data:/data:ro
       - uploads_data:/uploads:ro
+      - ./tiles:/tiles:ro # offline map tiles (script default TILES_DIR=/tiles)
       - field_kit_backups:/backups
       - ./scripts/field-kit-backup.sh:/backup.sh:ro
       - ./scripts/ops/sqlite-backup.mjs:/app/sqlite-backup.mjs:ro

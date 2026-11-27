@@ -18,6 +18,7 @@ import {
   readFileSync,
   statSync,
   utimesSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -74,6 +75,7 @@ const liveData = path.join(root, 'data');
 const liveUploads = path.join(root, 'uploads');
 const backups = path.join(root, 'backups');
 const restoreRoot = path.join(root, 'restore');
+const liveTiles = path.join(root, 'tiles');
 const livePath = path.join(liveData, 'field-kit.db');
 // Out-of-band erasure records: never mounted into the backup (SPEC-V2 section 7).
 const erasureRecords = path.join(root, 'erasure-records');
@@ -156,6 +158,18 @@ beforeAll(async () => {
   const orm = drizzle(live);
   migrate(orm, { migrationsFolder: 'src/db/migrations' });
   ids = await seedDrillDataset(orm);
+  // Bytes for the seeded files rows (the backup verifies every referenced key).
+  for (const communityId of [ids.alpha, ids.beta]) {
+    mkdirSync(path.join(liveUploads, `communities/${communityId}`), {
+      recursive: true,
+    });
+    writeFileSync(
+      path.join(liveUploads, `communities/${communityId}/story.png`),
+      PNG
+    );
+  }
+  mkdirSync(path.join(liveTiles, 'z0'), { recursive: true });
+  writeFileSync(path.join(liveTiles, 'z0/0.pbf'), 'tile-bytes');
   liveApp = await buildApp(live, liveUploads);
 
   cookies.editor = await login(
@@ -201,7 +215,7 @@ beforeAll(async () => {
       BACKUP_DIR: backups,
       DATA_DIR: liveData,
       UPLOADS_DIR: liveUploads,
-      TILES_DIR: path.join(root, 'no-tiles'),
+      TILES_DIR: liveTiles,
       BACKUP_COMPRESSION: 'true',
     },
     stdio: 'pipe',
@@ -524,6 +538,13 @@ describe('SQLite field-kit restore drill (#136)', () => {
     const text = readFileSync(report, 'utf8');
     for (const secret of [DRILL_KEY, DRILL_VIEWER_CODE])
       expect(text).not.toContain(secret);
+  });
+
+  it('backs up the tiles directory', () => {
+    const { base } = restore('tiles', true);
+    expect(readFileSync(path.join(base, 'tiles/z0/0.pbf'), 'utf8')).toBe(
+      'tile-bytes'
+    );
   });
 
   it('restores media older than 7 days byte-identical and every manifest entry exists', () => {

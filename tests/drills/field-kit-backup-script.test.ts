@@ -36,7 +36,9 @@ function tree() {
   for (const d of [dirs.data, dirs.uploads, dirs.backups])
     mkdirSync(d, { recursive: true });
   const db = new Sqlite(path.join(dirs.data, 'field-kit.db'));
-  db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY); INSERT INTO t VALUES (1);');
+  db.exec(
+    "CREATE TABLE t (id INTEGER PRIMARY KEY); INSERT INTO t VALUES (1); CREATE TABLE files (storage_key TEXT, is_active INTEGER); INSERT INTO files VALUES ('a.bin', 1);"
+  );
   db.close();
   writeFileSync(path.join(dirs.uploads, 'a.bin'), 'bytes');
   return dirs;
@@ -109,6 +111,18 @@ describe('field-kit-backup.sh is POSIX sh (#136)', () => {
       SQLITE_BACKUP_HELPER: path.join(dirs.root, 'missing-helper.mjs'),
     });
     expect(r.status).not.toBe(0);
+    expect(archives(dirs)).toHaveLength(0);
+    expect(leftovers(dirs)).toEqual([]);
+  });
+
+  it('fails when a database row references a storage key that is not in the backup', () => {
+    const dirs = tree();
+    const db = new Sqlite(path.join(dirs.data, 'field-kit.db'));
+    db.exec("INSERT INTO files VALUES ('deleted-after-snapshot.bin', 1)");
+    db.close();
+    const r = run(['sh'], dirs);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('deleted-after-snapshot.bin');
     expect(archives(dirs)).toHaveLength(0);
     expect(leftovers(dirs)).toEqual([]);
   });

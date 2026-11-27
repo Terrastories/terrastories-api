@@ -35,7 +35,9 @@ BACKUP_PATH="$BACKUP_DIR/$BACKUP_NAME"
 # killed run never leaves something that looks like a valid backup.
 WORK_PATH="$BACKUP_DIR/.partial-$BACKUP_NAME"
 LIST_FILE="$BACKUP_DIR/.${BACKUP_NAME}.list"
-trap 'rm -f "$LIST_FILE"; [ -d "$WORK_PATH" ] && rm -rf "$WORK_PATH"' EXIT
+KEYS_FILE="$BACKUP_DIR/.${BACKUP_NAME}.keys"
+PARTIAL_ARCHIVE="$BACKUP_DIR/.partial-${BACKUP_NAME}.tar.gz"
+trap 'rm -f "$LIST_FILE" "$KEYS_FILE" "$PARTIAL_ARCHIVE"; [ -d "$WORK_PATH" ] && rm -rf "$WORK_PATH"' EXIT
 
 echo "Starting field kit backup..."
 echo "Data directory: $DATA_DIR"
@@ -53,6 +55,18 @@ sqlite_copy() {
         sqlite3 "$1" ".backup '$2'"
     else
         echo "ERROR: no online SQLite backup tool (node helper or sqlite3)" >&2
+        return 1
+    fi
+}
+
+# Active storage keys a backed-up database references (empty without a files table).
+storage_keys() {
+    if [ -n "$SQLITE_BACKUP_HELPER" ] && command -v node >/dev/null 2>&1; then
+        node "$SQLITE_BACKUP_HELPER" --storage-keys "$1"
+    elif command -v sqlite3 >/dev/null 2>&1; then
+        sqlite3 "$1" "SELECT storage_key FROM files WHERE storage_key IS NOT NULL AND is_active = 1" 2>/dev/null || true
+    else
+        echo "ERROR: no SQLite tool to verify storage keys" >&2
         return 1
     fi
 }
@@ -90,6 +104,22 @@ if [ -d "$UPLOADS_DIR" ]; then
     done < "$WORK_PATH/uploads_manifest.txt"
 fi
 
+# Coherence check: the uploads were copied after the database snapshot, so a file
+# deleted in between would leave a database row without bytes. Every storage
+# key a backed-up database references must exist in the archive.
+if [ -d "$UPLOADS_DIR" ] && [ -d "$WORK_PATH/data" ]; then
+    find "$WORK_PATH/data" -type f \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) > "$LIST_FILE"
+    while IFS= read -r db; do
+        storage_keys "$db" > "$KEYS_FILE"
+        while IFS= read -r key; do
+            [ -f "$WORK_PATH$UPLOADS_DIR/$key" ] || {
+                echo "ERROR: database references $key but it is not in the backup" >&2
+                exit 1
+            }
+        done < "$KEYS_FILE"
+    done < "$LIST_FILE"
+fi
+
 # Backup offline map tiles (critical for field operations)
 if [ -d "$TILES_DIR" ]; then
     echo "Backing up offline map tiles..."
@@ -118,8 +148,11 @@ mv "$WORK_PATH" "$BACKUP_PATH"
 if [ "$COMPRESSION" = "true" ]; then
     echo "Compressing backup..."
     cd "$BACKUP_DIR"
-    tar -czf "${BACKUP_NAME}.tar.gz" "$BACKUP_NAME"
-    chmod 600 "${BACKUP_NAME}.tar.gz"
+    # Hidden .partial name until complete: a full disk or kill never leaves a
+    # truncated archive under its final name.
+    tar -czf "$PARTIAL_ARCHIVE" "$BACKUP_NAME"
+    chmod 600 "$PARTIAL_ARCHIVE"
+    mv "$PARTIAL_ARCHIVE" "${BACKUP_NAME}.tar.gz"
     rm -rf "$BACKUP_NAME"
     FINAL_SIZE=$(du -h "${BACKUP_NAME}.tar.gz" | cut -f1)
     echo "Compressed backup created: ${BACKUP_NAME}.tar.gz ($FINAL_SIZE)"

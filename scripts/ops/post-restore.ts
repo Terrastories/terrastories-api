@@ -14,7 +14,9 @@
  * backup time. Replay them from the audit log of the frozen pre-restore
  * database (replayAccountChanges).
  *
- * CLI: npx tsx scripts/ops/post-restore.ts <sqlite-file | postgresql-url>
+ * CLI (a PostgreSQL URL is never an argument; it is read from DATABASE_URL):
+ *   npx tsx scripts/ops/post-restore.ts sqlite <restored-file> [--replay-from <frozen-db> --after-audit-id <n>]
+ *   DATABASE_URL=postgresql://... npx tsx scripts/ops/post-restore.ts postgres
  */
 import Database from 'better-sqlite3';
 import postgres from 'postgres';
@@ -171,9 +173,44 @@ export function replayAccountChanges(
   return result;
 }
 
-async function main(target: string): Promise<void> {
-  if (/^postgres(ql)?:\/\//.test(target)) {
-    const client = postgres(target, { max: 1 });
+function parseArgs(argv: string[]): {
+  profile: 'sqlite' | 'postgres';
+  file?: string;
+  replayFrom?: string;
+  afterAuditId?: number;
+} {
+  const [profile, ...rest] = argv;
+  if (profile === 'postgres') {
+    // The credential must never ride in argv (process list, shell history).
+    if (rest.length > 0)
+      throw new Error(
+        'postgres takes no arguments: set DATABASE_URL in the environment'
+      );
+    return { profile };
+  }
+  if (profile !== 'sqlite' || !rest[0])
+    throw new Error(
+      'usage: post-restore.ts sqlite <restored-file> [--replay-from <frozen-db> --after-audit-id <n>] | postgres (DATABASE_URL env)'
+    );
+  const out: ReturnType<typeof parseArgs> = { profile, file: rest[0] };
+  for (let i = 1; i < rest.length; i += 2) {
+    if (rest[i] === '--replay-from') out.replayFrom = rest[i + 1];
+    else if (rest[i] === '--after-audit-id')
+      out.afterAuditId = Number(rest[i + 1]);
+    else throw new Error(`unknown argument ${rest[i]}`);
+  }
+  if ((out.replayFrom === undefined) !== (out.afterAuditId === undefined))
+    throw new Error('--replay-from and --after-audit-id go together');
+  return out;
+}
+
+async function main(argv: string[]): Promise<void> {
+  const args = parseArgs(argv);
+  if (args.profile === 'postgres') {
+    const url = process.env.DATABASE_URL;
+    if (!url || !/^postgres(ql)?:\/\//.test(url))
+      throw new Error('DATABASE_URL must be a postgresql:// URL');
+    const client = postgres(url, { max: 1 });
     try {
       console.log(JSON.stringify(await applyPostRestorePostgres(client)));
     } finally {
@@ -181,19 +218,34 @@ async function main(target: string): Promise<void> {
     }
     return;
   }
-  const db = new Database(target, { fileMustExist: true });
+  const db = new Database(args.file!, { fileMustExist: true });
   try {
-    console.log(JSON.stringify(applyPostRestoreSqlite(db)));
+    const purge = applyPostRestoreSqlite(db);
+    let replay: ReplayResult | undefined;
+    if (args.replayFrom !== undefined) {
+      const frozen = new Database(args.replayFrom, {
+        readonly: true,
+        fileMustExist: true,
+      });
+      try {
+        replay = replayAccountChanges(frozen, db, args.afterAuditId!);
+      } finally {
+        frozen.close();
+      }
+      // Replay may restore credential material: purge sessions again.
+      applyPostRestoreSqlite(db);
+    }
+    console.log(JSON.stringify({ purge, replay }));
   } finally {
     db.close();
   }
 }
 
 if (process.argv[1]?.endsWith('post-restore.ts')) {
-  const target = process.argv[2];
-  if (!target) {
-    console.error('usage: post-restore.ts <sqlite-file | postgresql-url>');
+  try {
+    await main(process.argv.slice(2));
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
     process.exit(2);
   }
-  await main(target);
 }

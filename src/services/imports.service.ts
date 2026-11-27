@@ -64,6 +64,7 @@ import type { FoundationStorage } from './hono-foundation.service.js';
 import type { MediaCleanupCoordinator } from './media-cleanup.service.js';
 import {
   ImportsRepository,
+  type AdoptableStagedFile,
   type CommunityImportContext,
   type CreatePreviewOutcome,
   type ImportManifestRowRecord,
@@ -284,6 +285,24 @@ function splitBoundedTokens(
     }
   }
   return { tokens, exceeded: false };
+}
+
+/**
+ * Every list token of `raw`, however many there are. Unlike
+ * `splitBoundedTokens` this never stops early or keeps the tokens, so a
+ * caller can match one cell against a small set of keys at the cost of the
+ * cell's own length.
+ */
+function* iterateListTokens(
+  raw: string,
+  tokenPattern: RegExp
+): Generator<string> {
+  const pattern = new RegExp(tokenPattern.source, 'g');
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(raw)) !== null) {
+    const trimmed = match[0].trim();
+    if (trimmed.length > 0) yield trimmed;
+  }
 }
 
 function parseFiniteCoordinate(raw: string): number | null {
@@ -710,14 +729,19 @@ export class ImportsService {
    * uniform not-found, so the answer never reveals whether an id exists in
    * another community, is attached, or is held by someone else's preview. Each
    * declared file must also be referenced by a CSV media column, and two
-   * declared files may not share a filename.
+   * declared files may not share a filename. A media cell that lists more
+   * files than its column allows makes its row an error, but it still
+   * references the files it names: each one is checked against that cell on
+   * its own, so one over-limit cell never vouches for the other declared
+   * files.
    */
   private async resolveDeclaredStagedMedia(input: {
     communityId: number;
     actorId: number;
     ids: string[];
     mediaTokens: ReadonlySet<string>;
-    mediaCellsOverflowed: boolean;
+    /** Raw cells that list more references than their column allows. */
+    overLimitCells: ReadonlyArray<string>;
     legacyNames: ReadonlySet<string>;
   }): Promise<
     | { ok: true; files: StagedMediaUpload[] }
@@ -732,6 +756,20 @@ export class ImportsService {
       { communityId: input.communityId, actorId: input.actorId },
       input.ids
     );
+    // Each over-limit cell is scanned once and only its tokens that name a
+    // declared file are kept.
+    const declaredKeys = new Set<string>(input.ids);
+    for (const file of adoptable.values()) declaredKeys.add(file.originalName);
+    const namedByOverLimitCells = new Set<string>();
+    for (const cell of input.overLimitCells) {
+      for (const token of iterateListTokens(cell, PIPE_LIST_TOKEN_PATTERN)) {
+        if (declaredKeys.has(token)) namedByOverLimitCells.add(token);
+      }
+    }
+    const isReferenced = (file: AdoptableStagedFile) =>
+      [file.id, file.originalName].some(
+        (key) => input.mediaTokens.has(key) || namedByOverLimitCells.has(key)
+      );
     const files: StagedMediaUpload[] = [];
     const names = new Set<string>();
     for (const [index, id] of input.ids.entries()) {
@@ -755,11 +793,7 @@ export class ImportsService {
           ]),
         };
       }
-      const referenced =
-        input.mediaCellsOverflowed ||
-        input.mediaTokens.has(file.id) ||
-        input.mediaTokens.has(file.originalName);
-      if (!referenced) {
+      if (!isReferenced(file)) {
         return {
           ok: false,
           status: 400,
@@ -1308,7 +1342,9 @@ export class ImportsService {
       // must be referenced here, by file id or by its original filename.
       const declaredStagedIdSet = new Set(declaredStagedMediaIds);
       const mediaTokens = new Set<string>();
-      let mediaCellsOverflowed = false;
+      // Cells that list more references than their column allows: their rows
+      // are errors, but they still reference the files they name.
+      const overLimitMediaCells: string[] = [];
       const candidateUuids: string[] = [];
       for (const row of csvUpload.parsed.rows) {
         for (const [field, cap] of [
@@ -1320,7 +1356,7 @@ export class ImportsService {
           if (!val) continue;
           const refs = splitBoundedTokens(val, PIPE_LIST_TOKEN_PATTERN, cap);
           if (refs.exceeded) {
-            mediaCellsOverflowed = true;
+            overLimitMediaCells.push(val);
             continue;
           }
           for (const ref of refs.tokens) {
@@ -1337,7 +1373,7 @@ export class ImportsService {
         actorId: caller.actorId,
         ids: declaredStagedMediaIds,
         mediaTokens,
-        mediaCellsOverflowed,
+        overLimitCells: overLimitMediaCells,
         legacyNames: seenMediaNames,
       });
       if (!stagedMedia.ok) {

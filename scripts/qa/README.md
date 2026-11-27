@@ -180,13 +180,18 @@ ALLOW_POSTGRES_TEST_RESET=true \
 npm run qa:personas:postgres
 ```
 
-The command runs only the two PostgreSQL wrappers
-(`tests/scripts/qa-postgres/postgres-fastify.test.ts` and
-`tests/scripts/qa-postgres/postgres-hono.test.ts`) serially (`--maxWorkers=1 --no-file-parallelism`; both reset the one shared database),
-because each wrapper resets and re-migrates the one shared test database
-through `scripts/qa/qa-database.ts`. Journeys and expectations are identical
-to SQLite; only the backend changes, so SQLite-only behaviour (collation,
-timestamps, booleans, JSON) cannot hide a sovereignty leak.
+The command runs only the three PostgreSQL wrappers
+(`tests/scripts/qa-postgres/postgres-fastify.test.ts`,
+`tests/scripts/qa-postgres/postgres-hono.test.ts` and the import staged-media
+hold race `tests/scripts/qa-postgres/postgres-import-hold.test.ts`) serially
+(`--maxWorkers=1 --no-file-parallelism`), because each wrapper resets and
+re-migrates the one shared test database through `scripts/qa/qa-database.ts`.
+The persona journeys and expectations are identical to SQLite; only the
+backend changes, so SQLite-only behaviour (collation, timestamps, booleans,
+JSON) cannot hide a sovereignty leak. The hold-race wrapper (#282) runs two
+concurrent import previews that declare the same staged upload: PostgreSQL is
+the only backend where a second preview transaction can reach the hold while
+the first one is open.
 
 The wrappers run only under the dedicated gate: `qa:personas:postgres` sets
 `QA_PERSONAS_POSTGRES=1`, and without that marker they skip with a reason —

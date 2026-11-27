@@ -451,7 +451,7 @@ async function directUpload(apiBase: string, file: File) {
 
 ### 10.5 Import media: stage before the preview (#282)
 
-`POST /v2/imports/preview` never takes media bytes. Workers Free has about 10 ms CPU per request, and parsing and hashing one CSV + media bundle exceeded it. Media is staged first and the preview receives only the CSV plus the staged file ids. Covered by `tests/hono/imports-staged-media.test.ts` (Node, D1 and workerd) and the persona import steps.
+`POST /v2/imports/preview` never takes media bytes. Workers Free has about 10 ms CPU per request, and parsing and hashing one CSV + media bundle exceeded it. Media is staged first and the preview receives only the CSV plus the staged file ids. Covered by `tests/hono/imports-staged-media.test.ts` (Node, D1 and workerd), the PostgreSQL hold race `tests/scripts/qa-postgres/postgres-import-hold.test.ts` and the persona import steps.
 
 Client flow:
 
@@ -464,10 +464,13 @@ Errors:
 
 - Never send media as multipart `media` parts. Workers answers `422` with `code: "import_media_must_be_staged"`; Node still accepts them, for compatibility only.
 - A listed id that is missing, belongs to another community, is already attached, or is held by another preview answers the same `404` `{ "error": "Not found" }`, and nothing changes. Upload again and start over.
-- A listed file that no media column references is `400` `validation_error`, with `details.fields[0].path` equal to `mediaFileIds[<index>]`. Two listed files with the same filename are also `400`.
+- A listed file that no media column references is `400` `validation_error`, with `details.fields[0].path` equal to `mediaFileIds[<index>]`. Two listed files with the same filename are also `400`. A media cell that lists more files than its column allows still counts as referencing the files it names.
 - An unattached upload is private to its uploader and a same-community admin: an editor cannot import another editor's staged file.
 
 Lifecycle:
+
+> [!WARNING]
+> Discarding or expiring a preview purges the staged uploads it held. `DELETE /v2/imports/:id`, a failed commit and the 7-day expiry delete each held file's row and its bytes. A held file never returns to staging: its id answers `404` from then on, in every screen, so the client must upload it again to use it anywhere. List a file in `mediaFileIds` only when this import may consume it, and drop its id from any local state once the preview is discarded or expired.
 
 - The preview _holds_ the listed files its valid rows reference. `/v2/media/:id` answers `404` for a held file until the manifest is committed (the file is activated and attached) or discarded or expired after 7 days (deleted with its bytes). A held file cannot be used by a second preview.
 - A listed file referenced only by rows with errors is not held; it stays the uploader's staging upload.

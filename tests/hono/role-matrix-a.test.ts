@@ -161,12 +161,10 @@ function collect(node: unknown, key: string, acc: unknown[] = []): unknown[] {
   return acc;
 }
 
-/** Every map point of a response must be a place of the foreign community. */
-async function expectPointsOwnedByForeign(points: Array<{ id: number }>) {
-  const foreignPlaces = (await db.select().from(tables.places))
-    .filter((r: any) => r.communityId === ids.foreign)
-    .map((r: any) => r.id);
-  for (const point of points) expect(foreignPlaces).toContain(point.id);
+/** The response points must be exactly the foreign story-linked place(s). */
+function expectPointsOwnedByForeign(points: Array<{ id: number }>) {
+  expect(points.length).toBeGreaterThan(0);
+  expect(points.map((p) => p.id).sort()).toEqual([ids.foreignPlace]);
 }
 
 /** Every content row of every community: a denied write must change none. */
@@ -270,7 +268,15 @@ beforeAll(async () => {
     ownLinkA: o.linkA,
     ownLinkB: o.linkB,
   });
-  await content(ids.foreign!, 'Foreignmark');
+  const f = await content(ids.foreign!, 'Foreignmark');
+  ids.foreignPlace = f.place;
+  await db.insert(tables.storyPlaces).values({
+    communityId: ids.foreign!,
+    storyId: f.story,
+    placeId: f.place,
+    createdAt: T0,
+    updatedAt: T0,
+  });
   // Own story with its own links: the admin success case mutates only these.
   const ok = await content(ids.own!, 'Okmark');
   Object.assign(ids, {
@@ -616,7 +622,7 @@ describe('rows 21-45: other-community admin is confined to its own community', (
       (r: any) => r.communityId === ids.foreign
     );
     expect(res.json.data.storiesCount).toBe(foreignStories.length);
-    await expectPointsOwnedByForeign(res.json.data.points);
+    expectPointsOwnedByForeign(res.json.data.points);
     expect(collect(res.json, 'id').filter((v) => v === ids.own)).toEqual([]);
     noOwn(res.text);
   });
@@ -657,8 +663,7 @@ describe('rows 21-45: other-community admin is confined to its own community', (
         .sort((l, r) => l - r);
       expect(returned).toEqual(expected);
       expect(res.json.meta.total).toBe(expected.length);
-      if (table === 'stories')
-        await expectPointsOwnedByForeign(res.json.data.points);
+      if (table === 'stories') expectPointsOwnedByForeign(res.json.data.points);
       expect(res.text).toContain(mark);
       noOwn(res.text);
     }

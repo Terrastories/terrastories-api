@@ -115,6 +115,7 @@ export async function revokeAllSessions(
   // PostgreSQL: the whole transaction is retried on deadlock / serialization
   // failure (defence in depth, see the lock-order note below).
   return withDeadlockRetry((attempt) =>
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     db.transaction(async (tx: any): Promise<RevokeAllResult> => {
       // Never wait forever on a lock held by a stuck transaction.
       await tx.execute(sql`SET LOCAL lock_timeout = '10s'`);

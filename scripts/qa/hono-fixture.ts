@@ -9932,7 +9932,7 @@ export async function createFixture(
             name: 'reject completing the same direct upload twice',
             method: 'POST',
             path: '/v2/media/uploads/{qaDirectUpload}/complete',
-            expected: 404,
+            expected: 409,
             body: qaDirectCompleteBody,
           },
           {

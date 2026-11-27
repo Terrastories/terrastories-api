@@ -35,14 +35,22 @@ const NO_INPUT = new Set([
 /** Byte payloads of 200 and 206 (media and export downloads, not JSON). */
 const BINARY = { schema: { type: 'string', format: 'binary' } };
 const MEDIA_BYTES = { '*/*': BINARY };
-const BYTE_ROUTES: Record<string, Json> = {
-  'GET /v2/media/:id': MEDIA_BYTES,
-  'GET /v2/public/communities/:slug/media/:fileId': MEDIA_BYTES,
-  'GET /explore/media/:fileId': MEDIA_BYTES,
-  // community-export.service.ts serves the zip or the manifest by token.
+const BYTE_ROUTES: Record<string, { full: Json; partial: Json }> = {
+  'GET /v2/media/:id': { full: MEDIA_BYTES, partial: MEDIA_BYTES },
+  'GET /v2/public/communities/:slug/media/:fileId': {
+    full: MEDIA_BYTES,
+    partial: MEDIA_BYTES,
+  },
+  'GET /explore/media/:fileId': { full: MEDIA_BYTES, partial: MEDIA_BYTES },
+  // community-export.service.ts serves the zip or the manifest by token and
+  // honours Range for both: a 206 is a byte fragment of either, never a whole
+  // JSON document.
   'GET /v2/community/export/download/:token': {
-    'application/zip': BINARY,
-    'application/json': { schema: { type: 'object' } },
+    full: {
+      'application/zip': BINARY,
+      'application/json': { schema: { type: 'object' } },
+    },
+    partial: { 'application/zip': BINARY, 'application/json': BINARY },
   },
 };
 
@@ -244,7 +252,7 @@ export function buildOpenApiDocument(): Json {
       };
       const bytes = BYTE_ROUTES[key];
       if (bytes && (code === 200 || code === 206)) {
-        response['content'] = bytes;
+        response['content'] = code === 206 ? bytes.partial : bytes.full;
       } else if (success.includes(code) && code !== 204 && mapped?.response) {
         response['content'] = {
           'application/json': {

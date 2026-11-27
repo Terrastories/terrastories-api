@@ -420,6 +420,27 @@ describe('V2 OpenAPI runtime contract', () => {
       expect(responses['206']?.content, route).toBeDefined();
       expect(responses['200']?.content, route).toBeDefined();
     }
+    const binary = { schema: { type: 'string', format: 'binary' } };
+    const exact = (route: string, status: string) =>
+      operationFor('GET', route).responses[status]?.content;
+    for (const route of [
+      '/v2/media/:id',
+      '/v2/public/communities/:slug/media/:fileId',
+      '/explore/media/:fileId',
+    ]) {
+      expect(exact(route, '200'), route).toEqual({ '*/*': binary });
+      expect(exact(route, '206'), route).toEqual({ '*/*': binary });
+    }
+    const download = '/v2/community/export/download/:token';
+    expect(exact(download, '200')).toEqual({
+      'application/zip': binary,
+      'application/json': { schema: { type: 'object' } },
+    });
+    // A range of the JSON manifest is a byte fragment, not a JSON document.
+    expect(exact(download, '206')).toEqual({
+      'application/zip': binary,
+      'application/json': binary,
+    });
     const mounted = new Set(mountedRouteKeys());
     for (const key of OPTIONAL_BODY)
       expect(mounted.has(key), `${key} is not mounted`).toBe(true);

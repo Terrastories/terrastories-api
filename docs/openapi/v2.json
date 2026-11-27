@@ -5746,7 +5746,8 @@
               },
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "type": "string",
+                  "format": "binary"
                 }
               }
             }

@@ -366,12 +366,40 @@ describe('emergency global session revocation (#137)', () => {
     expect((await s.me(fresh)).status).toBe(200);
   });
 
+  it('ordering: a redemption racing inside the revocation cannot leave a session behind', async () => {
+    const s = await setup();
+    const user = s.users[0]!;
+    await s.login(s.emails[0]!);
+    await s.insertCode(user.id, user.communityId!, 'recovery');
+    const [code] = await s.db.select().from(loginCodesSqlite);
+    // The racer fires when the revocation deletes the first session row. It
+    // consumes the code with the same conditional UPDATE the redemption path
+    // uses and only then creates a session. Codes are superseded BEFORE the
+    // delete, so the consume matches nothing and no session is created; with
+    // the opposite order the consume would succeed and a session would remain.
+    s.sqlite.exec(`
+      CREATE TRIGGER racing_redemption BEFORE DELETE ON sessions
+      BEGIN
+        UPDATE login_codes SET used_at = 1
+          WHERE id = ${code!.id} AND used_at IS NULL AND superseded_at IS NULL;
+        INSERT INTO sessions (id, token_hash, user_id, expires_at)
+          SELECT 'raced', 'raced', ${user.id}, 9999999999999
+          WHERE (SELECT used_at FROM login_codes WHERE id = ${code!.id}) IS NOT NULL;
+      END`);
+    const result = await revokeAllSessions(s.db);
+    expect(result.loginCodesSuperseded).toBe(1);
+    expect(await s.db.select().from(sessionsSqlite)).toHaveLength(0);
+    const [after] = await s.db.select().from(loginCodesSqlite);
+    expect(after?.usedAt).toBeNull();
+    expect(after?.supersededAt).not.toBeNull();
+  });
+
   const sqlBlocks = () => {
     const doc = readFileSync('docs/OPERATIONS-GOVERNANCE.md', 'utf8');
     const blocks = [...doc.matchAll(/```sql\n([\s\S]*?)```/g)].map(
       (m) => m[1]!
     );
-    const d1 = blocks.find((b) => b.startsWith('DELETE FROM sessions;'));
+    const d1 = blocks.find((b) => b.startsWith('UPDATE login_codes'));
     const sqlite = blocks.find((b) => b.startsWith('BEGIN IMMEDIATE;'));
     expect(d1, 'D1 SQL block present').toBeTruthy();
     expect(sqlite, 'SQLite transaction block present').toBeTruthy();

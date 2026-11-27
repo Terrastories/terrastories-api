@@ -17,7 +17,7 @@
 /* eslint-disable no-console -- operator CLI: stdout/stderr is its interface */
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { and, count, isNull } from 'drizzle-orm';
+import { and, count, isNull, sql } from 'drizzle-orm';
 import { dialectOf, tablesFor } from '../db/dialect.js';
 import { buildAuditEntryInsert } from '../repositories/audit-entry.repository.js';
 
@@ -82,30 +82,46 @@ export async function revokeAllSessions(
 
   if (dialectOf(db) === 'sqlite') {
     // better-sqlite3 transactions are synchronous and roll back on a throw.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return db.transaction((tx: any): RevokeAllResult => {
-      const deleted = tx
-        .delete(sessions)
-        .returning({ id: sessions.id })
-        .all() as unknown[];
-      const codes = supersedeCodes(tx).all() as unknown[];
-      const tokens = supersedeTokens(tx).all() as unknown[];
-      audit(tx).run();
-      return {
-        runId,
-        revoked: deleted.length,
-        loginCodesSuperseded: codes.length,
-        claimTokensSuperseded: tokens.length,
-      };
-    });
+    return db.transaction(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (tx: any): RevokeAllResult => {
+        // Supersede first: a redemption consumes with a conditional UPDATE
+        // (unused AND unsuperseded), so it cannot succeed after this point.
+        const codes = supersedeCodes(tx).all() as unknown[];
+        const tokens = supersedeTokens(tx).all() as unknown[];
+        const deleted = tx
+          .delete(sessions)
+          .returning({ id: sessions.id })
+          .all() as unknown[];
+        audit(tx).run();
+        return {
+          runId,
+          revoked: deleted.length,
+          loginCodesSuperseded: codes.length,
+          claimTokensSuperseded: tokens.length,
+        };
+      },
+      // BEGIN IMMEDIATE: take the write lock up front so no other writer can
+      // interleave between the supersede and the session delete.
+      { behavior: 'immediate' }
+    );
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return db.transaction(async (tx: any): Promise<RevokeAllResult> => {
+    // PostgreSQL (READ COMMITTED): serialize with every session writer first.
+    // EXCLUSIVE conflicts with the ROW EXCLUSIVE/ROW SHARE locks that login,
+    // redemption and claim transactions hold, so we wait for in-flight ones to
+    // commit (their sessions are then visible to the DELETE below) and block
+    // new ones until we commit (their codes are superseded by then, so the
+    // conditional consume fails). Taking this lock BEFORE touching login_codes
+    // keeps the sessions -> login_codes order the redemption path uses, so the
+    // two cannot deadlock.
+    await tx.execute(sql`LOCK TABLE sessions IN EXCLUSIVE MODE`);
+    const codes = (await supersedeCodes(tx)) as unknown[];
+    const tokens = (await supersedeTokens(tx)) as unknown[];
     const deleted = (await tx
       .delete(sessions)
       .returning({ id: sessions.id })) as unknown[];
-    const codes = (await supersedeCodes(tx)) as unknown[];
-    const tokens = (await supersedeTokens(tx)) as unknown[];
     await audit(tx);
     return {
       runId,

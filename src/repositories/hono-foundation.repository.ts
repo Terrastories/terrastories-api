@@ -809,7 +809,12 @@ export class HonoFoundationRepository {
     // The touch awaited a write after the gate read: an erasure fence (or a
     // recovery-code change) that committed in between must not be missed, so
     // re-read the gate state once the session is confirmed live.
-    if (withGates) result.gates = await this.readGates(user.id);
+    if (withGates) {
+      const gates = await this.readGates(user.id);
+      // The account vanished after the touch: never return stale authority.
+      if (gates === null) return null;
+      result.gates = gates;
+    }
     return result;
   }
 
@@ -825,18 +830,20 @@ export class HonoFoundationRepository {
     };
   }
 
-  private async readGates(
-    userId: number
-  ): Promise<{ erasurePending: boolean; recoveryCodesActive: boolean }> {
+  private async readGates(userId: number): Promise<{
+    erasurePending: boolean;
+    recoveryCodesActive: boolean;
+  } | null> {
     const { users } = this.tables;
     const [row] = await this.database
       .select(this.gateColumns())
       .from(users)
       .where(eq(users.id, userId))
       .limit(1);
+    if (!row) return null;
     return {
-      erasurePending: isTruthy(row?.erasurePending),
-      recoveryCodesActive: isTruthy(row?.recoveryCodesActive),
+      erasurePending: isTruthy(row.erasurePending),
+      recoveryCodesActive: isTruthy(row.recoveryCodesActive),
     };
   }
 

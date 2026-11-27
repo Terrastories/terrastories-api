@@ -204,6 +204,15 @@ describe('recovery-code gate (#254)', () => {
     expect((await get('/v2/stories')).status).toBe(403);
   });
 
+  it('answers 401 when the account is deleted during the session touch', async () => {
+    const { get, sqlite } = await setup('member', true, false, true);
+    sqlite.exec(`CREATE TRIGGER delete_during_touch AFTER UPDATE OF last_seen_at ON sessions
+      BEGIN
+        DELETE FROM users WHERE id = NEW.user_id;
+      END`);
+    expect((await get('/v2/stories')).status).toBe(401);
+  });
+
   it('is enabled by both production entrypoints', () => {
     for (const file of ['src/worker.ts', 'src/hono-server.ts'])
       expect(readFileSync(file, 'utf8')).toContain(

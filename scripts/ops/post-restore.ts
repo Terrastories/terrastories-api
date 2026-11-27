@@ -195,9 +195,12 @@ function parseArgs(argv: string[]): {
   const out: ReturnType<typeof parseArgs> = { profile, file: rest[0] };
   for (let i = 1; i < rest.length; i += 2) {
     if (rest[i] === '--replay-from') out.replayFrom = rest[i + 1];
-    else if (rest[i] === '--after-audit-id')
+    else if (rest[i] === '--after-audit-id') {
+      // NaN would bind as NULL and silently replay nothing.
+      if (!/^\d+$/.test(rest[i + 1] ?? ''))
+        throw new Error('--after-audit-id must be a non-negative integer');
       out.afterAuditId = Number(rest[i + 1]);
-    else throw new Error(`unknown argument ${rest[i]}`);
+    } else throw new Error(`unknown argument ${rest[i]}`);
   }
   if ((out.replayFrom === undefined) !== (out.afterAuditId === undefined))
     throw new Error('--replay-from and --after-audit-id go together');

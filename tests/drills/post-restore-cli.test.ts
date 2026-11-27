@@ -63,6 +63,25 @@ describe('post-restore CLI', () => {
     check.close();
   });
 
+  it.each(['abc', '-1', '1.5', ''])(
+    'sqlite: rejects --after-audit-id %j instead of replaying nothing',
+    (value) => {
+      const dir = mkdtempSync(path.join(tmpdir(), 'tsapi-drill-pr-'));
+      makeDb(path.join(dir, 'restored.db'), 1).close();
+      makeDb(path.join(dir, 'frozen.db'), 0).close();
+      const r = run([
+        'sqlite',
+        path.join(dir, 'restored.db'),
+        '--replay-from',
+        path.join(dir, 'frozen.db'),
+        '--after-audit-id',
+        value,
+      ]);
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain('non-negative integer');
+    }
+  );
+
   it('postgres: refuses a URL on the command line and requires DATABASE_URL', () => {
     const viaArgv = run(['postgres', 'postgresql://u:p@localhost/db']);
     expect(viaArgv.status).toBe(2);

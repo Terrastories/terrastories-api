@@ -64,7 +64,11 @@ storage_keys() {
     if [ -n "$SQLITE_BACKUP_HELPER" ] && command -v node >/dev/null 2>&1; then
         node "$SQLITE_BACKUP_HELPER" --storage-keys "$1"
     elif command -v sqlite3 >/dev/null 2>&1; then
-        sqlite3 "$1" "SELECT storage_key FROM files WHERE storage_key IS NOT NULL AND is_active = 1" 2>/dev/null || true
+        # Query errors fail the backup (no hiding); only a missing files table is empty.
+        has_files=$(sqlite3 "$1" "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'files'") || return 1
+        if [ -n "$has_files" ]; then
+            sqlite3 "$1" "SELECT storage_key FROM files WHERE storage_key IS NOT NULL AND is_active = 1" || return 1
+        fi
     else
         echo "ERROR: no SQLite tool to verify storage keys" >&2
         return 1
@@ -110,7 +114,9 @@ fi
 # Coherence check: the uploads were copied after the database snapshot, so a file
 # deleted in between would leave a database row without bytes. Every storage
 # key a backed-up database references must exist in the archive.
-if [ -d "$UPLOADS_DIR" ] && [ -d "$WORK_PATH/data" ]; then
+# Runs whenever a database was backed up, even if the uploads directory is
+# absent: then every referenced key is missing and the backup fails.
+if [ -d "$WORK_PATH/data" ]; then
     find "$WORK_PATH/data" -type f \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) > "$LIST_FILE"
     while IFS= read -r db; do
         storage_keys "$db" > "$KEYS_FILE"
@@ -173,6 +179,12 @@ while IFS= read -r old; do
     rm -f "$old"
 done < "$LIST_FILE"
 find "$BACKUP_DIR" -name "fieldkit_backup_*" -type d -mtime +"$RETENTION_DAYS" -exec rm -rf {} + 2>/dev/null || true
+# Leftovers of a killed run (hidden .partial- archives and directories).
+find "$BACKUP_DIR" -name ".partial-fieldkit_backup_*" -type f -mtime +"$RETENTION_DAYS" > "$LIST_FILE"
+while IFS= read -r old; do
+    rm -f "$old"
+done < "$LIST_FILE"
+find "$BACKUP_DIR" -name ".partial-fieldkit_backup_*" -type d -mtime +"$RETENTION_DAYS" -exec rm -rf {} + 2>/dev/null || true
 
 # Show remaining backups
 echo "Remaining backups:"

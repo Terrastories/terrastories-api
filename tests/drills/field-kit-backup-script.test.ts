@@ -12,6 +12,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -125,6 +126,29 @@ describe('field-kit-backup.sh is POSIX sh (#136)', () => {
     expect(r.stderr).toContain('deleted-after-snapshot.bin');
     expect(archives(dirs)).toHaveLength(0);
     expect(leftovers(dirs)).toEqual([]);
+  });
+
+  it('fails when the uploads directory is absent but the database references media', () => {
+    const dirs = tree();
+    const r = run(['sh'], dirs, {
+      UPLOADS_DIR: path.join(dirs.root, 'no-such-uploads'),
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('a.bin');
+  });
+
+  it('removes stale hidden .partial- leftovers on the retention pass', () => {
+    const dirs = tree();
+    const stale = path.join(
+      dirs.backups,
+      '.partial-fieldkit_backup_old.tar.gz'
+    );
+    writeFileSync(stale, 'x');
+    const old = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+    utimesSync(stale, old, old);
+    const r = run(['sh'], dirs);
+    expect(r.status, r.stderr).toBe(0);
+    expect(existsSync(stale)).toBe(false);
   });
 
   it.skipIf(process.getuid?.() === 0)(

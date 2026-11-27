@@ -66,6 +66,7 @@ export interface PostRestoreResult {
   loginCodesSuperseded: number;
   claimTokensSuperseded: number;
   exportTokensDeleted: number;
+  resetTokensCleared: number;
 }
 
 function statements(nowMs: number): Array<[keyof PostRestoreResult, string]> {
@@ -82,6 +83,10 @@ function statements(nowMs: number): Array<[keyof PostRestoreResult, string]> {
       `UPDATE claim_tokens SET superseded_at = ${now} WHERE consumed_at IS NULL AND superseded_at IS NULL`,
     ],
     ['exportTokensDeleted', 'DELETE FROM export_tokens'],
+    [
+      'resetTokensCleared',
+      'UPDATE users SET reset_password_token = NULL, reset_password_sent_at = NULL, remember_created_at = NULL WHERE reset_password_token IS NOT NULL OR reset_password_sent_at IS NOT NULL OR remember_created_at IS NOT NULL',
+    ],
   ];
 }
 
@@ -120,7 +125,47 @@ export interface ReplayResult {
   conflicts: Array<{ id: number; column: string; heldBy: number }>;
   /** 'verified': the restored backup is an ancestor of the frozen DB; 'skipped': --allow-unrelated-lineage. */
   lineage: 'verified' | 'skipped';
+  /** Authority tables replaced from the frozen database: rows copied / skipped (they reference users with no restored row). */
+  reconciled: Record<string, { copied: number; skipped: number }>;
+  /** Communities whose enable/withdrawal flags were copied from the frozen database. */
+  communitiesUpdated: number[];
 }
+
+/**
+ * Tables that grant authority and are replaced wholesale from the frozen
+ * database (the frozen state is the newer one), with the columns that
+ * reference users: a row naming a user that has no restored row is skipped
+ * and counted. Credential tables (sessions, login_codes, claim_tokens,
+ * export_tokens, users reset/remember tokens) are purged instead, never
+ * reconciled. See docs/OPERATIONS-GOVERNANCE.md 6.5 for the full rule list.
+ */
+export const RECONCILED_TABLES: Array<{ name: string; userColumns: string[] }> =
+  [
+    // A removed steward must not regain withdrawal/erasure authority.
+    { name: 'community_stewards', userColumns: ['user_id', 'designated_by'] },
+    // Withdrawal/erasure notices and their cancellation/completion state.
+    {
+      name: 'community_sovereignty_requests',
+      userColumns: ['initiated_by', 'cancelled_by'],
+    },
+    // Archive custody holder and destruction state.
+    {
+      name: 'community_archive_custody',
+      userColumns: ['custodian_user_id'],
+    },
+    // Installation bootstrap (setup done, first administrator).
+    { name: 'installation_bootstrap', userColumns: ['admin_user_id'] },
+    // Brute-force counters and blocks must not reset on restore.
+    { name: 'auth_throttle', userColumns: [] },
+  ];
+
+/** Community flags that enable, hide or withdraw a community. */
+export const COMMUNITY_AUTHORITY_COLUMNS = [
+  'is_active',
+  'deprovisioned_at',
+  'public_stories',
+  'beta',
+] as const;
 
 /** Audit columns the scheduled network-metadata scrub may null. */
 const AUDIT_SCRUBBED = ['ip_address', 'user_agent'];
@@ -296,6 +341,8 @@ export function replayAccountChanges(
     removed: [],
     conflicts: [],
     lineage,
+    reconciled: {},
+    communitiesUpdated: [],
   };
   // Unique identifiers (email/username and their normalized forms) can be
   // swapped between users after the backup, or still held by an account that
@@ -362,6 +409,76 @@ export function replayAccountChanges(
     for (const { id, row } of rows) {
       update.run({ ...row, id });
       result.replayed.push(id);
+    }
+    // Authority tables, replaced from the frozen database after the account
+    // replay (same transaction, lineage already proven).
+    const userIdsNow = new Set(
+      (
+        restored.prepare('SELECT id FROM users').all() as Array<{ id: number }>
+      ).map((r) => Number(r.id))
+    );
+    const hasTable = (db: Database.Database, name: string) =>
+      db
+        .prepare(
+          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?"
+        )
+        .get(name) !== undefined;
+    const columnsOf = (db: Database.Database, name: string) =>
+      (
+        db.prepare(`PRAGMA table_info("${name}")`).all() as Array<{
+          name: string;
+        }>
+      ).map((c) => c.name);
+    for (const spec of RECONCILED_TABLES) {
+      if (!hasTable(frozen, spec.name) || !hasTable(restored, spec.name))
+        continue;
+      const shared = columnsOf(frozen, spec.name).filter((c) =>
+        columnsOf(restored, spec.name).includes(c)
+      );
+      const rowsF = frozen
+        .prepare(`SELECT ${shared.join(', ')} FROM ${spec.name}`)
+        .all() as Array<Record<string, unknown>>;
+      restored.prepare(`DELETE FROM ${spec.name}`).run();
+      const insert = restored.prepare(
+        `INSERT INTO ${spec.name} (${shared.join(', ')}) VALUES (${shared.map((c) => '@' + c).join(', ')})`
+      );
+      const tally = { copied: 0, skipped: 0 };
+      for (const r of rowsF) {
+        const dangling = spec.userColumns.some(
+          (c) =>
+            r[c] !== null && r[c] !== undefined && !userIdsNow.has(Number(r[c]))
+        );
+        if (dangling) tally.skipped++;
+        else {
+          insert.run(r);
+          tally.copied++;
+        }
+      }
+      result.reconciled[spec.name] = tally;
+    }
+    // Community enable/withdrawal flags.
+    const cc = COMMUNITY_AUTHORITY_COLUMNS.join(', ');
+    const setC = restored.prepare(
+      `UPDATE communities SET ${COMMUNITY_AUTHORITY_COLUMNS.map((c) => `${c} = @${c}`).join(', ')} WHERE id = @id`
+    );
+    const restoredCommunities = new Map(
+      (
+        restored.prepare(`SELECT id, ${cc} FROM communities`).all() as Array<
+          Record<string, unknown>
+        >
+      ).map((r) => [Number(r.id), r])
+    );
+    for (const fc of frozen
+      .prepare(`SELECT id, ${cc} FROM communities`)
+      .all() as Array<Record<string, unknown>>) {
+      const rc = restoredCommunities.get(Number(fc.id));
+      if (
+        rc &&
+        COMMUNITY_AUTHORITY_COLUMNS.some((c) => !Object.is(fc[c], rc[c]))
+      ) {
+        setC.run(fc);
+        result.communitiesUpdated.push(Number(fc.id));
+      }
     }
     // Accounts created after the backup cannot be re-created here; report any
     // identifier a restored account still holds so the re-creation will not fail.

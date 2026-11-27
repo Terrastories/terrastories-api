@@ -26,6 +26,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
+import { CommunitySovereigntyRepository } from '../../src/repositories/community-sovereignty.repository.js';
 import { createHonoApp } from '../../src/hono-app.js';
 import { createLocalStorage } from '../../src/node-storage.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
@@ -197,6 +198,44 @@ beforeAll(async () => {
   const old = new Date(Date.now() - 30 * 24 * 3600 * 1000);
   utimesSync(agedKey, old, old);
 
+  // Authority/credential fixtures present at backup time (#136, 6.5).
+  const nowMs = Date.now();
+  live
+    .prepare(
+      'INSERT INTO community_stewards (community_id, user_id, designated_by, designated_at, updated_at) VALUES (?, ?, ?, ?, ?)'
+    )
+    .run(ids.alpha, ids.viewerAlpha, ids.adminAlpha, nowMs, nowMs);
+  live
+    .prepare(
+      'UPDATE users SET reset_password_token = ?, reset_password_sent_at = ?, remember_created_at = ? WHERE id = ?'
+    )
+    .run('reset-token-sentinel', nowMs, nowMs, ids.viewerAlpha);
+  live
+    .prepare(
+      "INSERT INTO export_jobs (id, community_id, requested_by, status, created_at, expires_at) VALUES ('job-1', ?, ?, 'ready', ?, ?)"
+    )
+    .run(ids.alpha, ids.adminAlpha, nowMs, nowMs + 3600_000);
+  live
+    .prepare(
+      "INSERT INTO export_tokens (job_id, community_id, requested_by, artifact, token_hash, created_at, expires_at) VALUES ('job-1', ?, ?, 'manifest', 'export-token-hash', ?, ?)"
+    )
+    .run(ids.alpha, ids.adminAlpha, nowMs, nowMs + 3600_000);
+  live
+    .prepare(
+      "INSERT INTO community_sovereignty_requests (id, community_id, kind, state, initiated_by, initiated_by_role, requested_at, notice_ends_at, updated_at) VALUES ('req-1', ?, 'withdrawal', 'notice', ?, 'admin', ?, ?, ?)"
+    )
+    .run(ids.alpha, ids.adminAlpha, nowMs, nowMs + 86_400_000, nowMs);
+  live
+    .prepare(
+      "INSERT INTO community_archive_custody (community_id, custodian_type, custodian_user_id, status, retention_until, created_at, updated_at) VALUES (?, 'steward', ?, 'held', ?, ?, ?)"
+    )
+    .run(ids.alpha, ids.viewerAlpha, nowMs + 86_400_000, nowMs, nowMs);
+  live
+    .prepare(
+      "INSERT INTO installation_bootstrap (id, setup_id, community_id, admin_user_id, completed_at) VALUES (1, 'setup-1', ?, ?, ?)"
+    )
+    .run(ids.alpha, ids.adminAlpha, nowMs);
+
   before = snapshotSqlite(live);
 
   // Real backup procedure (live, database open and idle).
@@ -304,6 +343,25 @@ beforeAll(async () => {
       })
     ).status
   ).toBe(401);
+  // Authority changes after the backup (not audited here on purpose).
+  const later = Date.now();
+  live.prepare('DELETE FROM community_stewards').run(); // steward removed
+  live
+    .prepare(
+      "UPDATE community_sovereignty_requests SET state = 'cancelled', cancelled_at = ?, cancelled_by = ?, updated_at = ?"
+    )
+    .run(later, ids.adminAlpha, later);
+  live
+    .prepare(
+      "UPDATE community_archive_custody SET status = 'destroyed', destroyed_at = ?, updated_at = ?"
+    )
+    .run(later, later);
+  live.prepare('UPDATE installation_bootstrap SET admin_user_id = NULL').run();
+  live
+    .prepare(
+      "INSERT INTO auth_throttle (key, kind, community_id, failures, window_started_at, blocked_until) VALUES ('drill-throttle', 'ip', NULL, 9, ?, ?)"
+    )
+    .run(later, later + 3600_000);
 }, 120_000);
 
 afterAll(() => {
@@ -925,5 +983,95 @@ describe('SQLite field-kit restore drill (#136)', () => {
       );
       for (const r of saved) put.run(r.ip_address, r.user_agent, r.id);
     }
+  });
+
+  it('a steward removed after the backup cannot request withdrawal/erasure after the replay', async () => {
+    const { db } = restore('steward', true);
+    const repo = new CommunitySovereigntyRepository(drizzle(db));
+    // Restored backup: the steward designation is still there (revival hazard).
+    expect(
+      await repo.findStewardDesignation(ids.viewerAlpha, {
+        communityId: ids.alpha,
+      })
+    ).not.toBeNull();
+    const result = replayAccountChanges(live, db, auditMarker);
+    expect(result.reconciled.community_stewards).toEqual({
+      copied: 0,
+      skipped: 0,
+    });
+    expect(
+      await repo.findStewardDesignation(ids.viewerAlpha, {
+        communityId: ids.alpha,
+      })
+    ).toBeNull();
+  });
+
+  it('reconciles sovereignty requests, archive custody, bootstrap and throttle from the frozen database', () => {
+    const { db } = restore('authority', true);
+    const result = replayAccountChanges(live, db, auditMarker);
+    expect(
+      db.prepare('SELECT state FROM community_sovereignty_requests').get()
+    ).toEqual({ state: 'cancelled' });
+    expect(result.reconciled.community_sovereignty_requests).toEqual({
+      copied: 1,
+      skipped: 0,
+    });
+    expect(
+      db.prepare('SELECT status FROM community_archive_custody').get()
+    ).toEqual({
+      status: 'destroyed',
+    });
+    expect(
+      db.prepare('SELECT admin_user_id FROM installation_bootstrap').get()
+    ).toEqual({
+      admin_user_id: null,
+    });
+    expect(
+      db
+        .prepare('SELECT blocked_until FROM auth_throttle WHERE key = ?')
+        .get('drill-throttle')
+    ).not.toBeUndefined();
+  });
+
+  it('reconciles community enable flags from the frozen database', () => {
+    const { db } = restore('community-flags', true);
+    live
+      .prepare('UPDATE communities SET is_active = 0 WHERE id = ?')
+      .run(ids.beta);
+    try {
+      const result = replayAccountChanges(live, db, auditMarker);
+      expect(result.communitiesUpdated).toEqual([ids.beta]);
+      expect(
+        db
+          .prepare('SELECT is_active FROM communities WHERE id = ?')
+          .get(ids.beta)
+      ).toEqual({ is_active: 0 });
+    } finally {
+      live
+        .prepare('UPDATE communities SET is_active = 1 WHERE id = ?')
+        .run(ids.beta);
+    }
+  });
+
+  it('purges password-reset/remember tokens and export tokens on restore', () => {
+    const { db } = restore('credentials-purge', false);
+    expect(
+      db
+        .prepare('SELECT reset_password_token AS t FROM users WHERE id = ?')
+        .get(ids.viewerAlpha)
+    ).toEqual({ t: 'reset-token-sentinel' });
+    expect(db.prepare('SELECT count(*) AS n FROM export_tokens').get()).toEqual(
+      { n: 1 }
+    );
+    const purge = applyPostRestoreSqlite(db);
+    expect(purge.resetTokensCleared).toBeGreaterThan(0);
+    expect(purge.exportTokensDeleted).toBe(1);
+    expect(
+      db
+        .prepare(
+          'SELECT reset_password_token AS t, remember_created_at AS r FROM users WHERE id = ?'
+        )
+        .get(ids.viewerAlpha)
+    ).toEqual({ t: null, r: null });
   });
 });

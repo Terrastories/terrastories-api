@@ -32,6 +32,20 @@ const NO_INPUT = new Set([
   'GET /v2/bootstrap',
 ]);
 
+/** Byte payloads of 200 and 206 (media and export downloads, not JSON). */
+const BINARY = { schema: { type: 'string', format: 'binary' } };
+const MEDIA_BYTES = { '*/*': BINARY };
+const BYTE_ROUTES: Record<string, Json> = {
+  'GET /v2/media/:id': MEDIA_BYTES,
+  'GET /v2/public/communities/:slug/media/:fileId': MEDIA_BYTES,
+  'GET /explore/media/:fileId': MEDIA_BYTES,
+  // community-export.service.ts serves the zip or the manifest by token.
+  'GET /v2/community/export/download/:token': {
+    'application/zip': BINARY,
+    'application/json': { schema: { type: 'object' } },
+  },
+};
+
 /** Error statuses answered without a body (range failures). */
 const BODYLESS_STATUSES = new Set([416]);
 
@@ -228,7 +242,10 @@ export function buildOpenApiDocument(): Json {
       const response: Json = {
         description: STATUS_TEXT[code] ?? `HTTP ${code}`,
       };
-      if (success.includes(code) && code !== 204 && mapped?.response) {
+      const bytes = BYTE_ROUTES[key];
+      if (bytes && (code === 200 || code === 206)) {
+        response['content'] = bytes;
+      } else if (success.includes(code) && code !== 204 && mapped?.response) {
         response['content'] = {
           'application/json': {
             schema: jsonSchemaOf(mapped.response, 'output'),

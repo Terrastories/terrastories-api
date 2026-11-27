@@ -297,10 +297,26 @@
         "x-registry-caller": "Anonymous (anonymous §6.4a column)",
         "responses": {
           "200": {
-            "description": "OK"
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
           },
           "206": {
-            "description": "Partial Content"
+            "description": "Partial Content",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
           },
           "400": {
             "description": "Bad Request",
@@ -5704,10 +5720,36 @@
         "x-registry-caller": "Requesting `own-admin` (active or disabled community, fixed at disable time)",
         "responses": {
           "200": {
-            "description": "OK"
+            "description": "OK",
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
           },
           "206": {
-            "description": "Partial Content"
+            "description": "Partial Content",
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
           },
           "400": {
             "description": "Bad Request",
@@ -9902,10 +9944,26 @@
         "x-registry-caller": "Per §6.4a/§6.7 owning resource (account owner or `own-admin` with `user-management` authority for `user_photo`; uploader/`own-admin` for unattached staging; same-community roles for story/place/speaker/branding per §6.4a; `super_admin` own photo only)",
         "responses": {
           "200": {
-            "description": "OK"
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
           },
           "206": {
-            "description": "Partial Content"
+            "description": "Partial Content",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
           },
           "400": {
             "description": "Bad Request",
@@ -12892,10 +12950,26 @@
         "x-registry-caller": "Anonymous, other-community, `super_admin`, any caller (anonymous §6.4a column)",
         "responses": {
           "200": {
-            "description": "OK"
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
           },
           "206": {
-            "description": "Partial Content"
+            "description": "Partial Content",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
           },
           "400": {
             "description": "Bad Request",

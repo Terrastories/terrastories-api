@@ -384,7 +384,16 @@ describe('V2 OpenAPI runtime contract', () => {
         body: { parts: [{ partNumber: 1, etag }] },
       }
     );
-    await check(done, 'POST', t, 201);
+    await check(done.clone(), 'POST', t, 201);
+    const mediaId = ((await done.json()) as { data: { id: string } }).data.id;
+    const media = await call('GET', `/v2/media/${mediaId}`, { cookie });
+    expect(media.status).toBe(200);
+    const mediaOp = operationFor('GET', '/v2/media/:id');
+    expect(Object.keys(mediaOp.responses['200']?.content ?? {})).toEqual([
+      '*/*',
+    ]);
+    expect(media.headers.get('content-type')).not.toContain('application/json');
+    expect(new Uint8Array(await media.arrayBuffer())).toEqual(bytes);
   });
 
   it('documents request body requirement and 206 ranges', () => {
@@ -408,7 +417,8 @@ describe('V2 OpenAPI runtime contract', () => {
       const responses = operationFor('GET', route).responses;
       expect(responses['416'], route).toBeDefined();
       expect(responses['416']?.content, route).toBeUndefined();
-      expect(responses['206']?.content, route).toBeUndefined();
+      expect(responses['206']?.content, route).toBeDefined();
+      expect(responses['200']?.content, route).toBeDefined();
     }
     const mounted = new Set(mountedRouteKeys());
     for (const key of OPTIONAL_BODY)

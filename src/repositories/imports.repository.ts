@@ -16,14 +16,18 @@ import {
   asc,
   desc,
   eq,
+  exists,
   getTableColumns,
   inArray,
+  isNotNull,
   isNull,
   gte,
   lt,
   ne,
   notExists,
+  or,
   sql,
+  type SQL,
 } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { Database } from '../db/index.js';
@@ -76,6 +80,7 @@ import {
 } from '../shared/utils/import-commit-plan.js';
 import {
   lockFileRowsForCleanup,
+  notStagedInPreviewedImportManifest,
   toFileByteCleanups,
   type FileByteCleanup,
 } from '../services/media-cleanup.service.js';
@@ -83,6 +88,8 @@ import { validateContentFreeAuditEntry } from '../shared/utils/audit-entry.js';
 
 const D1_FILE_LOOKUP_CHUNK = 80;
 const D1_ENTITY_LOOKUP_CHUNK = 80;
+/** Ids per staged-media adoption UPDATE: stays far below D1's 100 bound params. */
+const D1_STAGED_ADOPT_CHUNK = 70;
 const READABLE_PRIVACY_LEVELS = ['public', 'members_only', 'editors'] as const;
 
 function isUniqueConstraintError(
@@ -139,6 +146,17 @@ class RollbackReferenceError extends Error {
 }
 
 /**
+ * Thrown inside the Node transaction when a declared staged upload cannot be
+ * held; the throw is what rolls back every row the preview already wrote.
+ */
+class StagedMediaUnavailableError extends Error {
+  constructor() {
+    super('Import staged media could not be held');
+    this.name = 'StagedMediaUnavailableError';
+  }
+}
+
+/**
  * Map `INSERT ... RETURNING` rows to their caller-supplied records by a unique
  * natural key rather than positional array order, which SQL engines do not
  * guarantee across multi-row inserts.
@@ -190,6 +208,20 @@ export interface StagedFileInsertInput {
   checksum: string;
 }
 
+/**
+ * An upload staged ahead of the preview through `POST /v2/media` or the
+ * direct-upload flow (#282), eligible to be held by a preview manifest.
+ */
+export interface AdoptableStagedFile {
+  id: string;
+  storageKey: string;
+  originalName: string;
+  mimeType: string;
+  byteSize: number;
+  checksum: string;
+  uploadedBy: number | null;
+}
+
 export interface CreatePreviewManifestInput {
   communityId: number;
   actorId: number;
@@ -197,6 +229,13 @@ export interface CreatePreviewManifestInput {
   sourceFileName: string;
   sourceFile: StagedFileInsertInput;
   stagedMediaFiles: StagedFileInsertInput[];
+  /**
+   * Pre-staged uploads to hold with the manifest (#282): atomically deactivated
+   * and claimed in the same transaction/batch as the manifest row and recorded
+   * in `staged_file_ids`, so discard, expiry and commit treat them exactly like
+   * media staged by the legacy multipart path.
+   */
+  adoptedMediaFileIds?: string[];
   mappings: ImportStoredMappings;
   normalizedRows: StoredNormalizedImportData;
   rowCount: number;
@@ -229,7 +268,9 @@ export type CreatePreviewOutcome =
   | { status: 'created'; manifest: ImportManifestRowRecord }
   | { status: 'forbidden' }
   | { status: 'daily_limit' }
-  | { status: 'too_many_open_previews' };
+  | { status: 'too_many_open_previews' }
+  /** A declared staged upload could not be held (claimed, attached or gone). */
+  | { status: 'staged_media_unavailable' };
 
 export type DiscardManifestOutcome =
   | {
@@ -662,6 +703,215 @@ export class ImportsRepository {
     return map;
   }
 
+  /**
+   * Guard for holding a pre-staged upload in an import preview (#282). The row
+   * must be an active, unrestricted, checksummed upload of this community with
+   * no relation of any kind (no attachment, static map, branding or manifest
+   * source CSV), not already held by a `previewed` manifest, and private
+   * staging this actor may attach: its uploader or a same-community admin
+   * (SPEC-V2 §6.7, the staging branch of `authorizeAttachReuse`). The admin
+   * verdict is read from `users` inside the statement, never trusted from the
+   * caller's earlier authorization.
+   *
+   * Every clause is re-evaluated inside the hold itself, so a row that
+   * changed between the caller's read and that write is never claimed. On D1
+   * the same guard counted over all declared ids also gates the batch (see
+   * `adoptableStagedMediaGuard`), because a hold that skips a row there
+   * cannot be rolled back.
+   */
+  private adoptableStagedFileCondition(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    executor: any,
+    input: { communityId: number; actorId: number }
+  ) {
+    const files = this.tables.files;
+    const users = this.tables.users;
+    return and(
+      eq(files.communityId, input.communityId),
+      eq(files.isActive, true),
+      isNull(files.culturalRestrictions),
+      isNotNull(files.checksum),
+      or(
+        eq(files.uploadedBy, input.actorId),
+        exists(
+          executor
+            .select({ id: users.id })
+            .from(users)
+            .where(
+              and(
+                eq(users.id, input.actorId),
+                eq(users.communityId, input.communityId),
+                eq(users.isActive, true),
+                eq(users.role, 'admin')
+              )
+            )
+        )
+      ),
+      notStagedInPreviewedImportManifest(this.connection, this.tables),
+      notExists(
+        executor
+          .select({ id: this.tables.attachments.id })
+          .from(this.tables.attachments)
+          .where(eq(this.tables.attachments.fileId, files.id))
+      ),
+      notExists(
+        executor
+          .select({ communityId: this.tables.communityMapConfigs.communityId })
+          .from(this.tables.communityMapConfigs)
+          .where(eq(this.tables.communityMapConfigs.staticMapFileId, files.id))
+      ),
+      notExists(
+        executor
+          .select({ fileId: this.communityMedia.fileId })
+          .from(this.communityMedia)
+          .where(eq(this.communityMedia.fileId, files.id))
+      ),
+      notExists(
+        executor
+          .select({ id: this.tables.importManifests.id })
+          .from(this.tables.importManifests)
+          .where(eq(this.tables.importManifests.sourceFileId, files.id))
+      )
+    );
+  }
+
+  /**
+   * Resolve declared staged media ids (#282) to the uploads this actor may
+   * hold. An id that is missing, belongs to another community, is inactive,
+   * restricted, unchecksummed, attached, a manifest source CSV or already
+   * held by a preview is simply absent from the result, so the caller answers
+   * one uniform not-found and never becomes an existence oracle.
+   */
+  async findAdoptableStagedFiles(
+    input: { communityId: number; actorId: number },
+    fileIds: ReadonlyArray<string>
+  ): Promise<Map<string, AdoptableStagedFile>> {
+    const map = new Map<string, AdoptableStagedFile>();
+    const unique = Array.from(new Set(fileIds)).sort();
+    for (let i = 0; i < unique.length; i += D1_FILE_LOOKUP_CHUNK) {
+      const chunk = unique.slice(i, i + D1_FILE_LOOKUP_CHUNK);
+      const rows = (await this.db
+        .select({
+          id: this.tables.files.id,
+          storageKey: this.tables.files.storageKey,
+          path: this.tables.files.path,
+          originalName: this.tables.files.originalName,
+          mimeType: this.tables.files.mimeType,
+          byteSize: this.tables.files.byteSize,
+          size: this.tables.files.size,
+          checksum: this.tables.files.checksum,
+          uploadedBy: this.tables.files.uploadedBy,
+        })
+        .from(this.tables.files)
+        .where(
+          and(
+            inArray(this.tables.files.id, chunk),
+            this.adoptableStagedFileCondition(this.db, input)
+          )
+        )) as Array<{
+        id: string;
+        storageKey: string | null;
+        path: string;
+        originalName: string;
+        mimeType: string;
+        byteSize: number | null;
+        size: number | null;
+        checksum: string | null;
+        uploadedBy: number | null;
+      }>;
+      for (const row of rows) {
+        map.set(row.id, {
+          id: row.id,
+          storageKey: row.storageKey ?? row.path,
+          originalName: row.originalName,
+          mimeType: row.mimeType,
+          byteSize: Number(row.byteSize ?? row.size),
+          checksum: row.checksum ?? '',
+          uploadedBy: row.uploadedBy === null ? null : Number(row.uploadedBy),
+        });
+      }
+    }
+    return map;
+  }
+
+  /**
+   * "Every declared upload is adoptable right now" (#282): the adoption
+   * guard of the hold UPDATE, counted over the whole id list. It is part of
+   * the verdict that gates the batch's file inserts (see
+   * `createPreviewManifest`), so the source CSV row — and with it every hold
+   * and the manifest — is written only while every declared upload can still
+   * be claimed. Counting adoptable rows rather than inactive ones also keeps
+   * an upload that was already inactive before the batch from passing for
+   * one this batch holds. The id list is bound as one JSON parameter so the
+   * statement stays under D1's bound-parameter limit at any list length.
+   */
+  private adoptableStagedMediaGuard(
+    input: { communityId: number; actorId: number },
+    adoptedMediaFileIds: ReadonlyArray<string>
+  ): SQL {
+    const adoptable = this.adoptableStagedFileCondition(this.db, input)!;
+    return sql`(
+      SELECT COUNT(*) FROM ${this.tables.files}
+      WHERE ${this.tables.files.id} IN (
+        SELECT je.value
+        FROM json_each(${JSON.stringify(adoptedMediaFileIds)}) je
+      )
+        AND ${adoptable}
+    ) = ${adoptedMediaFileIds.length}`;
+  }
+
+  /**
+   * D1 batch post-condition for the manifest insert (#282): every adopted id
+   * is inactive and carries the `updated_at` the hold UPDATEs of this same
+   * batch wrote, so an upload that was already inactive before the batch is
+   * not counted as held. It confirms the holds. It is not what keeps the
+   * batch all-or-nothing: a manifest insert that matches no row is not an
+   * error in D1 and undoes nothing (see `createPreviewManifest`).
+   */
+  private heldStagedMediaGuard(
+    input: { communityId: number; heldAtMs: number },
+    adoptedMediaFileIds: ReadonlyArray<string>
+  ): SQL {
+    return sql`(
+      SELECT COUNT(*) FROM files sf
+      WHERE sf.id IN (SELECT je.value FROM json_each(${JSON.stringify(adoptedMediaFileIds)}) je)
+        AND sf.community_id = ${input.communityId}
+        AND sf.is_active = 0
+        AND sf.updated_at = ${input.heldAtMs}
+        AND sf.checksum IS NOT NULL
+        AND sf.cultural_restrictions IS NULL
+        AND NOT EXISTS (SELECT 1 FROM attachments a WHERE a.file_id = sf.id)
+        AND NOT EXISTS (SELECT 1 FROM import_manifests im WHERE im.source_file_id = sf.id)
+        AND NOT EXISTS (
+          SELECT 1 FROM import_manifests im, json_each(im.staged_file_ids) je
+          WHERE im.status = 'previewed' AND je.value = sf.id
+        )
+    ) = ${adoptedMediaFileIds.length}`;
+  }
+
+  /**
+   * Run the Node preview transaction on this connection's driver and map the
+   * staged-media rollback signal to an outcome (#282). Throwing inside `body`
+   * is what discards every row the transaction already wrote; any other error
+   * still propagates.
+   */
+  private async previewTransaction(
+    body: (tx: typeof this.db) => unknown
+  ): Promise<CreatePreviewOutcome> {
+    try {
+      const outcome =
+        dialectOf(this.connection) === 'postgresql'
+          ? await this.db.transaction(body)
+          : this.db.transaction(body);
+      return outcome as CreatePreviewOutcome;
+    } catch (error) {
+      if (error instanceof StagedMediaUnavailableError) {
+        return { status: 'staged_media_unavailable' };
+      }
+      throw error;
+    }
+  }
+
   private manifestSelectColumns() {
     return {
       id: this.tables.importManifests.id,
@@ -694,9 +944,28 @@ export class ImportsRepository {
       input.sourceFile,
       ...input.stagedMediaFiles,
     ];
+    const adoptedMediaFileIds = Array.from(
+      new Set(input.adoptedMediaFileIds ?? [])
+    ).sort();
+    const adoptionGuard = {
+      communityId: input.communityId,
+      actorId: input.actorId,
+    };
 
     if (this.hasD1Batch()) {
-      const guards = [
+      // One verdict gates every statement of the batch (#282). A D1 batch is
+      // a single transaction that no other writer interleaves with, but a
+      // statement that matches no row is not an error: the batch still
+      // commits whatever the statements before it wrote. Nothing here can
+      // therefore "roll back". Instead every statement carries the guards it
+      // depends on, so that either all of them apply or none does:
+      // - the file rows are inserted only while the caller may still preview
+      //   and every declared upload is still adoptable;
+      // - an upload is held under the same caller guards, only by a batch
+      //   that inserted its source CSV row (so only while every declared
+      //   upload was adoptable), and only while it passes the adoption guard;
+      // - the manifest, then the audit entry, exist only for that CSV row.
+      const callerGuards: SQL[] = [
         eq(this.tables.communities.id, input.communityId),
         eq(this.tables.communities.isActive, true),
         sql`EXISTS (
@@ -713,7 +982,7 @@ export class ImportsRepository {
         ) < ${maxOpenPreviews}`,
       ];
       if (input.dailyLimitWindow) {
-        guards.push(
+        callerGuards.push(
           sql`NOT EXISTS (
             SELECT 1 FROM import_manifests im
             WHERE im.status = 'committed'
@@ -722,6 +991,10 @@ export class ImportsRepository {
           )`
         );
       }
+      const everyUploadAdoptable =
+        adoptedMediaFileIds.length > 0
+          ? this.adoptableStagedMediaGuard(adoptionGuard, adoptedMediaFileIds)
+          : undefined;
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const statements: any[] = allFiles.map((file) => {
@@ -748,9 +1021,52 @@ export class ImportsRepository {
               updatedAt: sql`${nowMs}`.as('updated_at'),
             })
             .from(this.tables.communities)
-            .where(and(...guards))
+            .where(and(...callerGuards, everyUploadAdoptable))
         );
       });
+
+      if (adoptedMediaFileIds.length > 0) {
+        // Hold pre-staged uploads (#282): under the caller guards again, only
+        // once this same batch has inserted the source CSV row, and only rows
+        // that still pass the whole adoption guard.
+        const callerMayPreview = sql`EXISTS (
+          SELECT 1 FROM ${this.tables.communities}
+          WHERE ${sql.join(callerGuards, sql` and `)}
+        )`;
+        const sourceFileRowInserted = exists(
+          this.db
+            .select({ id: this.tables.files.id })
+            .from(this.tables.files)
+            .where(
+              and(
+                eq(this.tables.files.id, input.sourceFile.id),
+                eq(this.tables.files.communityId, input.communityId)
+              )
+            )
+        );
+        for (
+          let i = 0;
+          i < adoptedMediaFileIds.length;
+          i += D1_STAGED_ADOPT_CHUNK
+        ) {
+          statements.push(
+            this.db
+              .update(this.tables.files)
+              .set({ isActive: false, updatedAt: now })
+              .where(
+                and(
+                  inArray(
+                    this.tables.files.id,
+                    adoptedMediaFileIds.slice(i, i + D1_STAGED_ADOPT_CHUNK)
+                  ),
+                  callerMayPreview,
+                  sourceFileRowInserted,
+                  this.adoptableStagedFileCondition(this.db, adoptionGuard)
+                )
+              )
+          );
+        }
+      }
 
       const mappingsJson = JSON.stringify(input.mappings);
       const normalizedJson = JSON.stringify(input.normalizedRows);
@@ -786,7 +1102,15 @@ export class ImportsRepository {
               .where(
                 and(
                   eq(this.tables.files.id, input.sourceFile.id),
-                  eq(this.tables.files.communityId, input.communityId)
+                  eq(this.tables.files.communityId, input.communityId),
+                  // The manifest row exists only if every adopted upload is
+                  // held, stamped by the hold UPDATEs of this same batch.
+                  adoptedMediaFileIds.length > 0
+                    ? this.heldStagedMediaGuard(
+                        { communityId: input.communityId, heldAtMs: nowMs },
+                        adoptedMediaFileIds
+                      )
+                    : undefined
                 )
               )
           )
@@ -830,6 +1154,8 @@ export class ImportsRepository {
         ? insertedManifestRows[0]
         : undefined;
       if (!inserted) {
+        // Nothing was persisted: no statement applied unless every one did,
+        // so the database still shows which part of the verdict failed.
         const authorized = await this.isAuthorizedPreviewActor(
           input.communityId,
           input.actorId
@@ -849,6 +1175,18 @@ export class ImportsRepository {
         const openCount = await this.countOpenPreviews(input.communityId);
         if (openCount >= maxOpenPreviews) {
           return { status: 'too_many_open_previews' };
+        }
+        if (adoptedMediaFileIds.length > 0) {
+          // An adopted id that is no longer adoptable here was attached,
+          // removed or claimed by a concurrent preview after the caller's
+          // read; this batch held none of them.
+          const stillAdoptable = await this.findAdoptableStagedFiles(
+            adoptionGuard,
+            adoptedMediaFileIds
+          );
+          if (stillAdoptable.size !== adoptedMediaFileIds.length) {
+            return { status: 'staged_media_unavailable' };
+          }
         }
         return { status: 'too_many_open_previews' };
       }
@@ -879,7 +1217,7 @@ export class ImportsRepository {
     }));
 
     if (isPg) {
-      return this.db.transaction(async (tx: typeof this.db) => {
+      return this.previewTransaction(async (tx: typeof this.db) => {
         // Canonical PG lock order: communities -> advisory lock -> users -> files -> import_manifests -> audit_entries
         const [comm] = await tx
           .select({ id: this.tables.communities.id })
@@ -923,6 +1261,32 @@ export class ImportsRepository {
         const openCount = await this.countOpenPreviews(input.communityId, tx);
         if (openCount >= maxOpenPreviews) {
           return { status: 'too_many_open_previews' };
+        }
+
+        if (adoptedMediaFileIds.length > 0) {
+          // Lock the declared uploads in canonical id order, then deactivate
+          // exactly the rows that still satisfy the whole adoption guard.
+          const locked = await lockFileRowsForCleanup(
+            tx,
+            this.connection,
+            adoptedMediaFileIds
+          );
+          if (locked.length !== adoptedMediaFileIds.length) {
+            throw new StagedMediaUnavailableError();
+          }
+          const held = await tx
+            .update(this.tables.files)
+            .set({ isActive: false, updatedAt: now })
+            .where(
+              and(
+                inArray(this.tables.files.id, adoptedMediaFileIds),
+                this.adoptableStagedFileCondition(tx, adoptionGuard)
+              )
+            )
+            .returning({ id: this.tables.files.id });
+          if (held.length !== adoptedMediaFileIds.length) {
+            throw new StagedMediaUnavailableError();
+          }
         }
 
         if (insertFilesValues.length > 0) {
@@ -979,7 +1343,7 @@ export class ImportsRepository {
       });
     }
 
-    return this.db.transaction((tx: typeof this.db) => {
+    return this.previewTransaction((tx: typeof this.db) => {
       const comm = tx
         .select({ id: this.tables.communities.id })
         .from(this.tables.communities)
@@ -1042,6 +1406,24 @@ export class ImportsRepository {
         .all() as Array<{ count: number | string }>;
       if (Number(openRows[0]?.count ?? 0) >= maxOpenPreviews) {
         return { status: 'too_many_open_previews' };
+      }
+
+      if (adoptedMediaFileIds.length > 0) {
+        // SQLite serializes writers, so the guarded UPDATE is the whole check.
+        const held = tx
+          .update(this.tables.files)
+          .set({ isActive: false, updatedAt: now })
+          .where(
+            and(
+              inArray(this.tables.files.id, adoptedMediaFileIds),
+              this.adoptableStagedFileCondition(tx, adoptionGuard)
+            )
+          )
+          .returning({ id: this.tables.files.id })
+          .all();
+        if (held.length !== adoptedMediaFileIds.length) {
+          throw new StagedMediaUnavailableError();
+        }
       }
 
       if (insertFilesValues.length > 0) {

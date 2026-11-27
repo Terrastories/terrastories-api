@@ -757,6 +757,7 @@ export function createHonoApp(options: FoundationOptions) {
     now,
     enforceD1Budget: options.enforceD1Budget ?? options.isWorkers,
     workersPlan: options.workersPlan,
+    isWorkers: options.isWorkers,
   });
   registerUserManagementRoutes(app, {
     repository: new UserManagementRepository(options.repository.connection),

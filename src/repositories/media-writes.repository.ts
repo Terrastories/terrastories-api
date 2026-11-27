@@ -2155,6 +2155,25 @@ export class MediaWritesRepository {
     return rule !== undefined && allowed.includes(rule.category);
   }
 
+  /**
+   * `files` row of an upload that is still active staging in this community
+   * (#282). `createAttachment` resolves the upload before its write, and a
+   * preview may hold the upload in between: the hold deactivates the row, and
+   * a held upload must never be attached to. So every backend repeats this
+   * condition at the write itself — under the row lock on PostgreSQL, inside
+   * the transaction on SQLite, inside each statement of the batch on D1.
+   */
+  private stagingFileCondition(fileId: string, communityId: number | null) {
+    const files = this.tables.files;
+    return and(
+      eq(files.id, fileId),
+      eq(files.isActive, true),
+      communityId === null
+        ? isNull(files.communityId)
+        : eq(files.communityId, communityId)
+    );
+  }
+
   async createAttachment(input: {
     actor: FoundationUser;
     fileId: string;
@@ -2206,6 +2225,13 @@ export class MediaWritesRepository {
       // this batch makes the statement produce no row (mapped to 404) — a
       // missing owner can never leave an orphaned attachment behind. The
       // audit write carries the same guard.
+      //
+      // The upload, too, is read as active staging before this batch. A
+      // preview that held it meanwhile deactivated the row (#282), and a held
+      // upload must never be attached to: both statements carry that guard as
+      // well, because a statement that matches no row is no error in a D1
+      // batch, so neither the relation nor its success audit may be written
+      // on its own.
       const ownerSource = this.ownerSource(this.db, {
         ownerType: input.ownerType,
         ownerId: input.ownerId,
@@ -2213,6 +2239,17 @@ export class MediaWritesRepository {
         communityId: authority.communityId,
         viewer: ownCommunityViewerForRole(input.actor.role),
       });
+      const guarded = and(
+        ownerSource.where,
+        exists(
+          this.db
+            .select({ one: sql`1` })
+            .from(this.tables.files)
+            .where(
+              this.stagingFileCondition(input.fileId, authority.communityId)
+            )
+        )
+      );
       // The next ordinal is computed inside the statement (a scalar
       // subquery over the same owner/role in this transaction), so two
       // inserts reading the owner's current max in one batch — or two
@@ -2250,7 +2287,7 @@ export class MediaWritesRepository {
               createdAt: sql`${now.getTime()}`.as('created_at'),
             })
             .from(ownerSource.table)
-            .where(ownerSource.where)
+            .where(guarded)
         )
         .returning({
           id: this.tables.attachments.id,
@@ -2277,7 +2314,7 @@ export class MediaWritesRepository {
             createdAt: sql`${now.getTime()}`.as('created_at'),
           })
           .from(ownerSource.table)
-          .where(ownerSource.where)
+          .where(guarded)
       );
       try {
         const [attRows] = await this.db.batch([insertAttachment, insertAudit]);
@@ -2430,6 +2467,16 @@ export class MediaWritesRepository {
           .where(eq(this.tables.files.id, input.fileId))
           .for('update');
         if (lockedFiles.length === 0) return { status: 'not_found' };
+        // The upload was read as active staging before the lock, and the lock
+        // may have waited for a preview that now holds it (#282): the hold
+        // deactivates the row. Judge the upload again now that no other
+        // writer can change it, so a held upload is never attached to.
+        const [staging] = await tx
+          .select({ id: this.tables.files.id })
+          .from(this.tables.files)
+          .where(this.stagingFileCondition(input.fileId, authority.communityId))
+          .limit(1);
+        if (!staging) return { status: 'not_found' };
         // Re-run the reuse check under the files row lock: any relation whose
         // attach committed before this statement's snapshot is visible now, so
         // §6.7 authority is judged against the post-lock state rather than a
@@ -2527,6 +2574,16 @@ export class MediaWritesRepository {
     }
 
     return this.db.transaction((tx: typeof this.db) => {
+      // The reads above run outside this transaction, so a preview may have
+      // held the upload in between (#282): the hold deactivates the row, and
+      // a held upload must never be attached to.
+      const staging = tx
+        .select({ id: this.tables.files.id })
+        .from(this.tables.files)
+        .where(this.stagingFileCondition(input.fileId, authority.communityId))
+        .limit(1)
+        .all();
+      if (staging.length === 0) return { status: 'not_found' };
       const maxRows = tx
         .select({
           maxOrd: sql<number>`COALESCE(MAX(${this.tables.attachments.ordinal}), -1)`,

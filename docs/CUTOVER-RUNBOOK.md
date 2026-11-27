@@ -268,7 +268,7 @@ After DNS switch, within the retention window:
 ## 10. Known gaps
 
 - **V2 frontend not built.** The Rails UI cannot be retired and Heroku shutdown is blocked until the frontend ships and is accepted (section 0).
-- **#282: CSV import media on Workers.** The bounded CSV import is a multi-file multipart bundle; its media handling on Workers is open. Do not promise bulk import with media on Free until #282 closes.
+- **#282: CSV import media on Workers.** The import preview no longer parses or hashes media on Workers: media is staged first with `POST /v2/media` and listed by file id (`mediaFileIds`). Commit still re-hashes every held media file in TypeScript (`verifyStagedMediaChecksum`), which does not fit the Free CPU budget. Do not promise bulk import with media on Free until that is replaced.
 - **Per-community storage quota** is open (SPEC-V2 open question 15).
 - **R2 multipart integrity.** R2 verifies each part against the signed SHA-256 payload hash and length. The API checks the assembled size and sniffs the media type. `File.checksum` is null for multipart uploads on Workers.
 - **R2 Free 10 GB** versus 30 GB media (decision A).

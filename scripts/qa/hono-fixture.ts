@@ -6294,16 +6294,15 @@ export async function createFixture(
         },
       };
     });
+    // An import preview is multipart with the CSV and text fields only. Media
+    // is staged ahead of it with a raw upload and referenced by file id in
+    // `mediaFileIds` (#282): Workers refuses multipart media parts on the
+    // preview route, so no journey sends them on any profile.
     const qaMultipart = (options: {
       filename: string;
       contentType: string;
       bytes: Uint8Array;
       fields?: Record<string, string>;
-      mediaParts?: Array<{
-        filename: string;
-        contentType: string;
-        bytes: Uint8Array;
-      }>;
     }): { rawBody: Uint8Array; headers: Record<string, string> } => {
       const boundary = `qa-bound-${Math.random().toString(16).slice(2)}`;
       const enc = new TextEncoder();
@@ -6321,14 +6320,6 @@ export async function createFixture(
         )
       );
       chunks.push(options.bytes);
-      for (const media of options.mediaParts ?? []) {
-        chunks.push(
-          enc.encode(
-            `\r\n--${boundary}\r\nContent-Disposition: form-data; name="media"; filename="${media.filename}"\r\nContent-Type: ${media.contentType}\r\n\r\n`
-          )
-        );
-        chunks.push(media.bytes);
-      }
       chunks.push(enc.encode(`\r\n--${boundary}--\r\n`));
       const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
       const rawBody = new Uint8Array(total);
@@ -6352,6 +6343,94 @@ export async function createFixture(
         !('storageKey' in parsed.data.data)
       );
     };
+    // #282: one import media file, staged by an earlier journey step with a
+    // raw upload; `upload` is spread into the steps before the preview that
+    // references it, and `id()` resolves to the returned File id.
+    const qaStagedImportMedia = (options: {
+      filename: string;
+      contentType: string;
+      bytes: Uint8Array;
+    }) => {
+      let fileId = '';
+      const upload = {
+        name: `stage import media ${options.filename} with a raw upload (#282)`,
+        method: 'POST',
+        path: '/v2/media',
+        expected: 201,
+        ...qaRawUpload(options),
+        check: (body: unknown) => {
+          if (!mediaUploadStagingCheck(body)) return false;
+          fileId = MediaUploadResponseSchema.parse(body).data.id;
+          return true;
+        },
+      } satisfies Step;
+      return {
+        upload,
+        id: () => {
+          if (!fileId) {
+            throw new Error(`Missing staged import media: ${options.filename}`);
+          }
+          return fileId;
+        },
+      };
+    };
+    // The preview step is built when it runs, once the staged ids exist.
+    // `prepare` chains a step's own hook (e.g. the D1 daily-limit backdate).
+    const qaStagedImportPreview = (
+      options: Parameters<typeof qaMultipart>[0] & {
+        stagedMedia: Array<{ id: () => string }>;
+        prepare?: Step['prepare'];
+      }
+    ) => ({
+      rawBody: new Uint8Array(0),
+      headers: {} as Record<string, string>,
+      async prepare() {
+        const { stagedMedia, prepare, ...form } = options;
+        const prepared = await prepare?.();
+        const multipart = qaMultipart({
+          ...form,
+          fields: {
+            ...form.fields,
+            mediaFileIds: JSON.stringify(
+              stagedMedia.map((media) => media.id())
+            ),
+          },
+        });
+        this.rawBody = multipart.rawBody;
+        this.headers = multipart.headers;
+        return prepared;
+      },
+    });
+    const qaImportDiscardPic = qaStagedImportMedia({
+      filename: 'qa-discard-pic.png',
+      contentType: 'image/png',
+      bytes: mediaPngBytes,
+    });
+    const qaImportPlacePic = qaStagedImportMedia({
+      filename: 'qa-place-pic.png',
+      contentType: 'image/png',
+      bytes: mediaPngBytes,
+    });
+    const qaImportPlaceAudio = qaStagedImportMedia({
+      filename: 'qa-place-audio.wav',
+      contentType: 'audio/wav',
+      bytes: mediaWavBytes,
+    });
+    const qaImportSpeakerPic = qaStagedImportMedia({
+      filename: 'qa-speaker-pic.png',
+      contentType: 'image/png',
+      bytes: mediaPngBytes,
+    });
+    const qaImportStoryPic = qaStagedImportMedia({
+      filename: 'qa-story-pic.png',
+      contentType: 'image/png',
+      bytes: mediaPngBytes,
+    });
+    const qaFieldKitImportPic = qaStagedImportMedia({
+      filename: 'qa-field-kit-pic.png',
+      contentType: 'image/png',
+      bytes: mediaPngBytes,
+    });
     const mediaMetadataCheck = (body: unknown): boolean =>
       MediaMetadataResponseSchema.safeParse(body).success;
     const mediaBrandingIs =
@@ -9977,25 +10056,22 @@ export async function createFixture(
             expected: 404,
           },
           {
+            ...qaImportDiscardPic.upload,
+          },
+          {
             name: 'preview CSV places import with staged media for discard',
             method: 'POST',
             path: '/v2/imports/preview',
             expected: 201,
             captureId: 'qaImportDiscardManifest',
-            ...qaMultipart({
+            ...qaStagedImportPreview({
               filename: 'qa-places-discard.csv',
               contentType: 'text/csv',
               bytes: new TextEncoder().encode(
                 'name,region,photo\nQA Import Discard Place,North,qa-discard-pic.png\n'
               ),
               fields: { kind: 'places' },
-              mediaParts: [
-                {
-                  filename: 'qa-discard-pic.png',
-                  contentType: 'image/png',
-                  bytes: mediaPngBytes,
-                },
-              ],
+              stagedMedia: [qaImportDiscardPic],
             }),
             check: (body) => {
               const parsed = ImportManifestDetailResponseSchema.safeParse(body);
@@ -10331,30 +10407,25 @@ export async function createFixture(
                 },
               ]),
           {
+            ...qaImportPlacePic.upload,
+          },
+          {
+            ...qaImportPlaceAudio.upload,
+          },
+          {
             name: 'preview places CSV import with staged photo and name audio',
             method: 'POST',
             path: '/v2/imports/preview',
             expected: 201,
             captureId: 'qaImportPlacesManifest',
-            ...qaMultipart({
+            ...qaStagedImportPreview({
               filename: 'qa-places-commit.csv',
               contentType: 'text/csv',
               bytes: new TextEncoder().encode(
                 'name,region,latitude,longitude,photo,name_audio\nQA Imported Place,Highlands,-3.41,-60.41,qa-place-pic.png,qa-place-audio.wav\n'
               ),
               fields: { kind: 'places' },
-              mediaParts: [
-                {
-                  filename: 'qa-place-pic.png',
-                  contentType: 'image/png',
-                  bytes: mediaPngBytes,
-                },
-                {
-                  filename: 'qa-place-audio.wav',
-                  contentType: 'audio/wav',
-                  bytes: mediaWavBytes,
-                },
-              ],
+              stagedMedia: [qaImportPlacePic, qaImportPlaceAudio],
             }),
             check: (body) => {
               const parsed = ImportManifestDetailResponseSchema.safeParse(body);
@@ -10467,26 +10538,23 @@ export async function createFixture(
               ]
             : []),
           {
+            ...qaImportSpeakerPic.upload,
+          },
+          {
             name: 'preview speakers CSV import with related birthplace and staged photo',
             method: 'POST',
             path: '/v2/imports/preview',
             expected: 201,
             captureId: 'qaImportSpeakersManifest',
-            prepare: backdateCommittedImportsForD1,
-            ...qaMultipart({
+            ...qaStagedImportPreview({
+              prepare: backdateCommittedImportsForD1,
               filename: 'qa-speakers-commit.csv',
               contentType: 'text/csv',
               bytes: new TextEncoder().encode(
                 'name,birthplace_name,affiliation,photo\nQA Imported Speaker,QA Imported Birthplace,QA Guild,qa-speaker-pic.png\n'
               ),
               fields: { kind: 'speakers' },
-              mediaParts: [
-                {
-                  filename: 'qa-speaker-pic.png',
-                  contentType: 'image/png',
-                  bytes: mediaPngBytes,
-                },
-              ],
+              stagedMedia: [qaImportSpeakerPic],
             }),
             check: (body) => {
               const parsed = ImportManifestDetailResponseSchema.safeParse(body);
@@ -10535,13 +10603,16 @@ export async function createFixture(
             },
           },
           {
+            ...qaImportStoryPic.upload,
+          },
+          {
             name: 'preview stories CSV with audienceMapping, related edges, staged media, and external link',
             method: 'POST',
             path: '/v2/imports/preview',
             expected: 201,
             captureId: 'qaImportStoriesManifest',
-            prepare: backdateCommittedImportsForD1,
-            ...qaMultipart({
+            ...qaStagedImportPreview({
+              prepare: backdateCommittedImportsForD1,
               filename: 'qa-stories-commit.csv',
               contentType: 'text/csv',
               bytes: new TextEncoder().encode(
@@ -10553,13 +10624,7 @@ export async function createFixture(
                   'community-circle': 'community',
                 }),
               },
-              mediaParts: [
-                {
-                  filename: 'qa-story-pic.png',
-                  contentType: 'image/png',
-                  bytes: mediaPngBytes,
-                },
-              ],
+              stagedMedia: [qaImportStoryPic],
             }),
             check: (body) => {
               const parsed = ImportManifestDetailResponseSchema.safeParse(body);
@@ -14118,25 +14183,22 @@ export async function createFixture(
               check: mediaUploadStagingCheck,
             },
             {
+              ...qaFieldKitImportPic.upload,
+            },
+            {
               name: 'preview field-kit places CSV import with local photo',
               method: 'POST',
               path: '/v2/imports/preview',
               expected: 201,
               captureId: 'qaFieldKitImport',
-              ...qaMultipart({
+              ...qaStagedImportPreview({
                 filename: 'qa-field-kit-places.csv',
                 contentType: 'text/csv',
                 bytes: new TextEncoder().encode(
                   'name,region,latitude,longitude,photo\nQA Field Kit Place,Lowlands,-3.51,-60.51,qa-field-kit-pic.png\n'
                 ),
                 fields: { kind: 'places' },
-                mediaParts: [
-                  {
-                    filename: 'qa-field-kit-pic.png',
-                    contentType: 'image/png',
-                    bytes: mediaPngBytes,
-                  },
-                ],
+                stagedMedia: [qaFieldKitImportPic],
               }),
               check: (body) => {
                 const parsed =

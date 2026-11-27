@@ -1626,6 +1626,8 @@ export async function runHonoFoundationContract(
       kind?: 'places' | 'speakers' | 'stories';
       csvFilename?: string;
       csvText?: string;
+      /** Extra text fields (e.g. `mediaFileIds`, #282), sent after `kind`. */
+      fields?: Record<string, string>;
       mediaParts?: Array<{
         fieldName?: string;
         filename: string;
@@ -1639,6 +1641,13 @@ export async function runHonoFoundationContract(
         parts.push(
           Buffer.from(
             `--${boundary}\r\nContent-Disposition: form-data; name="kind"\r\n\r\n${opts.kind}\r\n`
+          )
+        );
+      }
+      for (const [name, value] of Object.entries(opts.fields ?? {})) {
+        parts.push(
+          Buffer.from(
+            `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`
           )
         );
       }
@@ -4614,6 +4623,155 @@ export async function runHonoFoundationContract(
         )
       );
     assert.equal(persistedBulkStories.length, 5_000);
+
+    // #282: media staged ahead of the preview with POST /v2/media and
+    // referenced by file id (`mediaFileIds`) on both backends. The preview
+    // holds the existing row in the same transaction as the manifest (it turns
+    // inactive and unreachable), a second preview cannot claim it, discard
+    // removes it with its bytes, and commit activates it instead.
+    const stagedPngBytes = Uint8Array.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+      0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+      0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89,
+    ]);
+    const stageImportMedia = async (filename: string) => {
+      const uploadRes = await send(
+        importApp,
+        `/v2/media?filename=${filename}`,
+        {
+          method: 'POST',
+          headers: {
+            cookie: importEditorCookie,
+            'content-type': 'image/png',
+            'content-length': String(stagedPngBytes.byteLength),
+            'x-content-sha256': createHash('sha256')
+              .update(stagedPngBytes)
+              .digest('hex'),
+          },
+          body: stagedPngBytes,
+        }
+      );
+      assert.equal(
+        uploadRes.status,
+        201,
+        `staged import media upload must succeed (${await uploadRes.clone().text()})`
+      );
+      return ((await uploadRes.json()) as { data: { id: string } }).data.id;
+    };
+    const stagedPreviewForm = (fileId: string) =>
+      buildImportMultipart({
+        kind: 'places',
+        csvFilename: 'contract-staged.csv',
+        csvText: `name,photo\nContract Staged Place,${fileId}\n`,
+        fields: { mediaFileIds: JSON.stringify([fileId]) },
+      });
+    const stagedMediaRow = (fileId: string) =>
+      db
+        .select({
+          isActive: tables.files.isActive,
+          storageKey: tables.files.storageKey,
+        })
+        .from(tables.files)
+        .where(eq(tables.files.id, fileId));
+
+    const discardedStagedId = await stageImportMedia('contract-staged.png');
+    const discardedStagedForm = stagedPreviewForm(discardedStagedId);
+    const discardedStagedRes = await send(importApp, '/v2/imports/preview', {
+      method: 'POST',
+      headers: {
+        cookie: importEditorCookie,
+        'content-type': discardedStagedForm.contentType,
+      },
+      body: discardedStagedForm.body,
+    });
+    assert.equal(
+      discardedStagedRes.status,
+      201,
+      `preview with staged media must succeed (${await discardedStagedRes.clone().text()})`
+    );
+    const discardedStaged = (await discardedStagedRes.json()) as {
+      data: { id: number; stagedMediaCount: number };
+    };
+    assert.equal(discardedStaged.data.stagedMediaCount, 1);
+    const [heldRow] = await stagedMediaRow(discardedStagedId);
+    assert.equal(Boolean(heldRow!.isActive), false);
+    assert.equal(
+      (
+        await send(importApp, `/v2/media/${discardedStagedId}`, {
+          headers: { cookie: importEditorCookie },
+        })
+      ).status,
+      404
+    );
+    // Held media belongs to that manifest: a second preview gets the same
+    // not-found as a missing id.
+    const claimedForm = stagedPreviewForm(discardedStagedId);
+    const claimedRes = await send(importApp, '/v2/imports/preview', {
+      method: 'POST',
+      headers: {
+        cookie: importEditorCookie,
+        'content-type': claimedForm.contentType,
+      },
+      body: claimedForm.body,
+    });
+    assert.equal(claimedRes.status, 404);
+    assert.deepEqual(await claimedRes.json(), { error: 'Not found' });
+    const discardedHeldKey = String(heldRow!.storageKey);
+    assert.equal(importStorageMap.has(discardedHeldKey), true);
+    const stagedDiscardRes = await send(
+      importApp,
+      `/v2/imports/${discardedStaged.data.id}`,
+      { method: 'DELETE', headers: { cookie: importEditorCookie } }
+    );
+    assert.equal(
+      stagedDiscardRes.status,
+      200,
+      `discarding a preview with staged media must succeed (${await stagedDiscardRes.clone().text()})`
+    );
+    assert.equal((await stagedMediaRow(discardedStagedId)).length, 0);
+    assert.equal(importStorageMap.has(discardedHeldKey), false);
+
+    const committedStagedId = await stageImportMedia(
+      'contract-staged-commit.png'
+    );
+    const committedStagedForm = stagedPreviewForm(committedStagedId);
+    const committedStagedRes = await send(importApp, '/v2/imports/preview', {
+      method: 'POST',
+      headers: {
+        cookie: importEditorCookie,
+        'content-type': committedStagedForm.contentType,
+      },
+      body: committedStagedForm.body,
+    });
+    assert.equal(
+      committedStagedRes.status,
+      201,
+      `second preview with staged media must succeed (${await committedStagedRes.clone().text()})`
+    );
+    const committedStagedManifest = (
+      (await committedStagedRes.json()) as { data: { id: number } }
+    ).data.id;
+    const stagedCommitRes = await send(
+      importApp,
+      `/v2/imports/${committedStagedManifest}/commit`,
+      { method: 'POST', headers: { cookie: importEditorCookie } }
+    );
+    assert.equal(
+      stagedCommitRes.status,
+      200,
+      `committing staged media must succeed (${await stagedCommitRes.clone().text()})`
+    );
+    const [activatedRow] = await stagedMediaRow(committedStagedId);
+    assert.equal(Boolean(activatedRow!.isActive), true);
+    assert.equal(
+      (
+        await db
+          .select({ id: tables.attachments.id })
+          .from(tables.attachments)
+          .where(eq(tables.attachments.fileId, committedStagedId))
+      ).length,
+      1
+    );
 
     // Slice 13a PostgreSQL concurrency race (PR #258 Greptile P1):
     // A cleanup sweep that deleted objects and paused before markJobCleanedUp

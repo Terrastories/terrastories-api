@@ -40,6 +40,21 @@ export const ALLOWED_CSV_MIME_TYPES: ReadonlySet<string> = new Set([
   'text/plain',
 ]);
 
+/**
+ * Preview form field listing media already staged through `POST /v2/media`
+ * (or the direct-upload flow) by file id (#282). The CSV's media columns
+ * reference a declared file by that id or by its original filename. Workers
+ * never parses or hashes multipart media on the preview route.
+ */
+export const IMPORT_STAGED_MEDIA_FIELD = 'mediaFileIds';
+export const ImportStagedMediaIdsSchema = z
+  .array(z.string().uuid())
+  .max(MAX_IMPORT_MEDIA_FILES)
+  .refine((ids) => new Set(ids).size === ids.length, {
+    message: 'Duplicate staged media file id',
+  });
+export type ImportStagedMediaIds = z.infer<typeof ImportStagedMediaIdsSchema>;
+
 export const ImportKindSchema = z.enum(IMPORT_MANIFEST_KINDS);
 export const ImportStatusSchema = z.enum(IMPORT_MANIFEST_STATUSES);
 export const DuplicateStrategySchema = z.enum(['error', 'skip']);

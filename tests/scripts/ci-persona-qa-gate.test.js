@@ -324,12 +324,13 @@ describe('PostgreSQL persona QA CI release gate', () => {
   });
 
   it('installs dependencies and runs the qa:personas:postgres wrapper', () => {
-    // The gate must invoke the dedicated wrapper script, which runs the two
-    // PostgreSQL persona wrappers serially (they reset one shared database)
-    // and fails closed when the PostgreSQL target is not selected.
+    // The gate must invoke the dedicated wrapper script, which runs the three
+    // PostgreSQL wrappers serially (they reset one shared database: the two
+    // persona wrappers and the import staged-media hold race) and fails
+    // closed when the PostgreSQL target is not selected.
     const packageJson = JSON.parse(readRepo('package.json'));
     expect(packageJson.scripts['qa:personas:postgres']).toBe(
-      'QA_PERSONAS_POSTGRES=1 vitest run tests/scripts/qa-postgres/postgres-fastify.test.ts tests/scripts/qa-postgres/postgres-hono.test.ts tests/scripts/qa-postgres/postgres-revocation.test.ts --maxWorkers=1 --no-file-parallelism'
+      'QA_PERSONAS_POSTGRES=1 vitest run tests/scripts/qa-postgres/postgres-fastify.test.ts tests/scripts/qa-postgres/postgres-hono.test.ts tests/scripts/qa-postgres/postgres-revocation.test.ts tests/scripts/qa-postgres/postgres-import-hold.test.ts --maxWorkers=1 --no-file-parallelism'
     );
 
     expect(job.steps).toHaveLength(5);

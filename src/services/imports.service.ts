@@ -10,6 +10,10 @@
  * - Staged media and source CSV rows remain `is_active = false` until commit.
  * - CSV row content, descriptions, titles, filenames, and storage keys are
  *   never logged or leaked in error envelopes or audit entries.
+ * - Media for a preview is staged ahead of the request through `POST /v2/media`
+ *   or the direct-upload flow (#282) and referenced by file id: the preview
+ *   only holds those rows (deactivates and claims them), so no TypeScript code
+ *   parses or hashes media bytes on Workers.
  */
 import { z } from 'zod';
 import {
@@ -20,6 +24,7 @@ import {
   IMPORT_ALLOWED_FIELDS,
   IMPORT_HEADER_ALIASES,
   IMPORT_REQUIRED_FIELDS,
+  IMPORT_STAGED_MEDIA_FIELD,
   ImportKindSchema,
   ImportManifestDetailResponseSchema,
   ImportManifestListResponseSchema,
@@ -34,6 +39,7 @@ import {
   MAX_IMPORT_ROW_ERRORS,
   MAX_IMPORT_STORY_EDGES_PER_ROW,
   MAX_OPEN_IMPORT_PREVIEWS_PER_COMMUNITY,
+  ImportStagedMediaIdsSchema,
   type AudienceMapping,
   type DuplicateStrategy,
   type ImportManifestDetail,
@@ -58,6 +64,7 @@ import type { FoundationStorage } from './hono-foundation.service.js';
 import type { MediaCleanupCoordinator } from './media-cleanup.service.js';
 import {
   ImportsRepository,
+  type AdoptableStagedFile,
   type CommunityImportContext,
   type CreatePreviewOutcome,
   type ImportManifestRowRecord,
@@ -128,10 +135,22 @@ const ALLOWED_IMPORT_FORM_FIELDS = new Set([
   'mappings',
   'audienceMapping',
   'duplicateStrategy',
+  IMPORT_STAGED_MEDIA_FIELD,
 ]);
 
 const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Workers Free allows about 10 ms CPU per invocation, which multipart parsing
+ * and TypeScript hashing of media cannot fit (#282). On Workers a preview
+ * carries its media as staged file ids instead of multipart media parts.
+ */
+const IMPORT_MEDIA_MUST_BE_STAGED_BODY: V2ErrorResponse = Object.freeze({
+  error:
+    'Import preview does not accept multipart media on this deployment; stage each media file with POST /v2/media and list its id in mediaFileIds',
+  code: 'import_media_must_be_staged',
+});
 
 const TOO_MANY_OPEN_PREVIEWS_BODY: V2ErrorResponse = {
   error: `Too many open import previews (maximum ${MAX_OPEN_IMPORT_PREVIEWS_PER_COMMUNITY} per community). Commit or discard an existing preview before starting another.`,
@@ -185,7 +204,7 @@ export type ImportServiceResult<T> =
 
 class EarlyImportRejectionError extends Error {
   constructor(
-    public readonly status: 400 | 403 | 413 | 415,
+    public readonly status: 400 | 403 | 413 | 415 | 422,
     public readonly body: V2ErrorResponse | V2ValidationErrorResponse
   ) {
     super('Import rejected');
@@ -266,6 +285,37 @@ function splitBoundedTokens(
     }
   }
   return { tokens, exceeded: false };
+}
+
+/**
+ * Every list token of `raw`, however many there are. Unlike
+ * `splitBoundedTokens` this never stops early or keeps the tokens, so a
+ * caller can match one cell against a small set of keys at the cost of the
+ * cell's own length.
+ */
+function* iterateListTokens(
+  raw: string,
+  tokenPattern: RegExp
+): Generator<string> {
+  const pattern = new RegExp(tokenPattern.source, 'g');
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(raw)) !== null) {
+    const trimmed = match[0].trim();
+    if (trimmed.length > 0) yield trimmed;
+  }
+}
+
+/**
+ * The filename a CSV media cell uses for a staged upload (#282). `POST /v2/media`
+ * stores `originalName` already sanitized (`café.png` is stored as
+ * `caf-.png`), so a cell that spells the name as the uploader did only equals
+ * the stored name after the same cleaning. Both sides of the comparison go
+ * through it: cleaning is idempotent, so a stored name passes through
+ * unchanged, and one stored before the sanitizer existed is still found. A
+ * file id is never cleaned; it is matched exactly as written.
+ */
+function csvMediaName(name: string): string {
+  return sanitizeUploadOriginalName(name);
 }
 
 function parseFiniteCoordinate(raw: string): number | null {
@@ -511,6 +561,12 @@ export interface ImportsServiceOptions {
   now?: () => Date;
   enforceD1Budget?: boolean;
   workersPlan?: WorkersPlan;
+  /**
+   * Cloudflare Workers runtime (#282): multipart media parts are rejected
+   * before any byte is read, because the Free CPU budget cannot cover
+   * TypeScript multipart parsing and hashing. Node keeps the legacy path.
+   */
+  isWorkers?: boolean;
 }
 
 export class ImportsService {
@@ -518,6 +574,7 @@ export class ImportsService {
   private readonly now: () => Date;
   private readonly enforceD1Budget: boolean;
   private readonly workersPlan: WorkersPlan;
+  private readonly isWorkers: boolean;
 
   constructor(
     private readonly repository: ImportsRepository,
@@ -529,6 +586,7 @@ export class ImportsService {
     this.now = options.now ?? (() => new Date());
     this.enforceD1Budget = options.enforceD1Budget ?? false;
     this.workersPlan = options.workersPlan ?? 'free';
+    this.isWorkers = options.isWorkers ?? false;
   }
 
   private isD1Enforced(): boolean {
@@ -674,6 +732,133 @@ export class ImportsService {
       }
     }
     return authorized;
+  }
+
+  /**
+   * Resolve the preview's `mediaFileIds` (#282) to the uploads it may hold.
+   * Every id must be an active, checksummed, unattached upload of the caller's
+   * community that the caller may attach (its uploader, or a same-community
+   * admin, SPEC-V2 §6.7) and that no other preview holds. Anything else is one
+   * uniform not-found, so the answer never reveals whether an id exists in
+   * another community, is attached, or is held by someone else's preview. Each
+   * declared file must also be referenced by a CSV media column, and two
+   * declared files may not share a filename. A media cell that lists more
+   * files than its column allows makes its row an error, but it still
+   * references the files it names: each one is checked against that cell on
+   * its own, so one over-limit cell never vouches for the other declared
+   * files.
+   *
+   * Every id is judged available first, for the whole list, so the not-found
+   * answer never depends on where the id sits: a filename or reference error
+   * is only ever about a list of available uploads.
+   *
+   * A file id is referenced exactly as declared. A filename is referenced
+   * through the upload sanitizer on both sides (`csvMediaName`), because a
+   * staged upload's stored name is already sanitized (`café.png` is stored as
+   * `caf-.png`): a CSV that spells the name as the uploader did only matches
+   * after the same cleaning.
+   */
+  private async resolveDeclaredStagedMedia(input: {
+    communityId: number;
+    actorId: number;
+    ids: string[];
+    mediaTokens: ReadonlySet<string>;
+    /** Raw cells that list more references than their column allows. */
+    overLimitCells: ReadonlyArray<string>;
+    legacyNames: ReadonlySet<string>;
+  }): Promise<
+    | { ok: true; files: StagedMediaUpload[] }
+    | {
+        ok: false;
+        status: 400 | 404;
+        body: V2ErrorResponse | V2ValidationErrorResponse;
+      }
+  > {
+    if (input.ids.length === 0) return { ok: true, files: [] };
+    const adoptable = await this.repository.findAdoptableStagedFiles(
+      { communityId: input.communityId, actorId: input.actorId },
+      input.ids
+    );
+    // Availability comes first and covers the whole list: an id that is
+    // missing, foreign, attached or held is the same 404 wherever it sits.
+    const resolved: Array<{
+      file: AdoptableStagedFile;
+      category: MediaCategory;
+    }> = [];
+    for (const id of input.ids) {
+      const file = adoptable.get(id);
+      const rule = file ? MEDIA_MIME_RULES[file.mimeType] : undefined;
+      if (!file || !rule) {
+        return { ok: false, status: 404, body: NOT_FOUND_BODY };
+      }
+      resolved.push({ file, category: rule.category });
+    }
+    const referencedIds = new Set<string>();
+    const referencedNames = new Set<string>();
+    const addReference = (token: string) => {
+      referencedIds.add(token);
+      referencedNames.add(csvMediaName(token));
+    };
+    for (const token of input.mediaTokens) addReference(token);
+    // Each over-limit cell is scanned once and only its tokens that name a
+    // declared file are kept.
+    const declaredNames = new Set(
+      resolved.map(({ file }) => csvMediaName(file.originalName))
+    );
+    for (const cell of input.overLimitCells) {
+      for (const token of iterateListTokens(cell, PIPE_LIST_TOKEN_PATTERN)) {
+        if (adoptable.has(token) || declaredNames.has(csvMediaName(token))) {
+          addReference(token);
+        }
+      }
+    }
+    const isReferenced = (file: AdoptableStagedFile) =>
+      referencedIds.has(file.id) ||
+      referencedNames.has(csvMediaName(file.originalName));
+    const files: StagedMediaUpload[] = [];
+    const names = new Set<string>();
+    for (const [index, { file, category }] of resolved.entries()) {
+      if (
+        input.legacyNames.has(file.originalName) ||
+        names.has(file.originalName)
+      ) {
+        return {
+          ok: false,
+          status: 400,
+          body: makeValidationErrorBody([
+            {
+              path: `${IMPORT_STAGED_MEDIA_FIELD}[${index}]`,
+              message: 'Duplicate staged media filename',
+            },
+          ]),
+        };
+      }
+      if (!isReferenced(file)) {
+        return {
+          ok: false,
+          status: 400,
+          body: makeValidationErrorBody([
+            {
+              path: `${IMPORT_STAGED_MEDIA_FIELD}[${index}]`,
+              message:
+                'Staged media file is not referenced by any CSV media column',
+            },
+          ]),
+        };
+      }
+      names.add(file.originalName);
+      files.push({
+        fileId: file.id,
+        storageKey: file.storageKey,
+        rawFilename: file.originalName,
+        originalName: file.originalName,
+        mimeType: file.mimeType,
+        category,
+        byteSize: file.byteSize,
+        checksum: file.checksum,
+      });
+    }
+    return { ok: true, files };
   }
 
   async previewImport(input: {
@@ -852,6 +1037,14 @@ export class ImportsService {
           });
         },
         onMediaPart: async (part) => {
+          if (this.isWorkers) {
+            // #282: stop before the first media byte is read. The parser's
+            // own error path then cancels the request body.
+            throw new EarlyImportRejectionError(
+              422,
+              IMPORT_MEDIA_MUST_BE_STAGED_BODY
+            );
+          }
           for (const key of part.fieldsSoFar.keys()) {
             if (!ALLOWED_IMPORT_FORM_FIELDS.has(key)) {
               throw new EarlyImportRejectionError(
@@ -1113,6 +1306,34 @@ export class ImportsService {
         }
       }
 
+      // #282: media staged ahead of the request, referenced by file id.
+      let declaredStagedMediaIds: string[] = [];
+      const stagedMediaIdsRaw = parsedMultipart.fields.get(
+        IMPORT_STAGED_MEDIA_FIELD
+      );
+      if (stagedMediaIdsRaw !== undefined && stagedMediaIdsRaw.trim() !== '') {
+        let parsedIds: unknown;
+        try {
+          parsedIds = JSON.parse(stagedMediaIdsRaw);
+        } catch {
+          fieldErrors.push({
+            path: IMPORT_STAGED_MEDIA_FIELD,
+            message: `${IMPORT_STAGED_MEDIA_FIELD} must be valid JSON`,
+          });
+        }
+        if (parsedIds !== undefined) {
+          const validatedIds = ImportStagedMediaIdsSchema.safeParse(parsedIds);
+          if (!validatedIds.success) {
+            fieldErrors.push({
+              path: IMPORT_STAGED_MEDIA_FIELD,
+              message: `${IMPORT_STAGED_MEDIA_FIELD} must be a JSON array of at most ${MAX_IMPORT_MEDIA_FILES} unique media file ids`,
+            });
+          } else {
+            declaredStagedMediaIds = validatedIds.data;
+          }
+        }
+      }
+
       if (fieldErrors.length > 0 || !parsedKind.success) {
         await this.cleanupUploadedStorageKeys(
           [...activeUploadedKeys],
@@ -1144,11 +1365,6 @@ export class ImportsService {
       const context = await this.repository.loadCommunityImportContext(
         caller.communityId
       );
-      const stagedByName = new Map<string, StagedMediaUpload>();
-      for (const upload of stagedMediaUploads) {
-        stagedByName.set(upload.rawFilename, upload);
-        stagedByName.set(upload.originalName, upload);
-      }
 
       const headerIndex = new Map<string, number>();
       csvUpload.parsed.headers.forEach((h, i) => headerIndex.set(h, i));
@@ -1162,6 +1378,13 @@ export class ImportsService {
         return idx === undefined ? undefined : cells[idx];
       };
 
+      // Media tokens across every row, valid or not: a declared staged file
+      // must be referenced here, by file id or by its original filename.
+      const declaredStagedIdSet = new Set(declaredStagedMediaIds);
+      const mediaTokens = new Set<string>();
+      // Cells that list more references than their column allows: their rows
+      // are errors, but they still reference the files they name.
+      const overLimitMediaCells: string[] = [];
       const candidateUuids: string[] = [];
       for (const row of csvUpload.parsed.rows) {
         for (const [field, cap] of [
@@ -1172,12 +1395,54 @@ export class ImportsService {
           const val = readCell(row.cells, field);
           if (!val) continue;
           const refs = splitBoundedTokens(val, PIPE_LIST_TOKEN_PATTERN, cap);
-          if (refs.exceeded) continue;
+          if (refs.exceeded) {
+            overLimitMediaCells.push(val);
+            continue;
+          }
           for (const ref of refs.tokens) {
-            if (UUID_REGEX.test(ref)) candidateUuids.push(ref);
+            mediaTokens.add(ref);
+            if (UUID_REGEX.test(ref) && !declaredStagedIdSet.has(ref)) {
+              candidateUuids.push(ref);
+            }
           }
         }
       }
+
+      const stagedMedia = await this.resolveDeclaredStagedMedia({
+        communityId: caller.communityId,
+        actorId: caller.actorId,
+        ids: declaredStagedMediaIds,
+        mediaTokens,
+        overLimitCells: overLimitMediaCells,
+        legacyNames: seenMediaNames,
+      });
+      if (!stagedMedia.ok) {
+        await this.cleanupUploadedStorageKeys(
+          [...activeUploadedKeys],
+          'upload_rollback',
+          activeUploadedKeys
+        );
+        return { status: stagedMedia.status, body: stagedMedia.body };
+      }
+
+      // A media column names a staged upload by its file id, exactly as
+      // written, or by filename (`csvMediaName`): the name as the multipart
+      // part was named, or as it is stored.
+      const stagedById = new Map<string, StagedMediaUpload>();
+      const stagedByName = new Map<string, StagedMediaUpload>();
+      const stagedUnderName = (name: string, upload: StagedMediaUpload) => {
+        stagedByName.set(name, upload);
+        stagedByName.set(csvMediaName(name), upload);
+      };
+      for (const upload of stagedMediaUploads) {
+        stagedUnderName(upload.rawFilename, upload);
+        stagedUnderName(upload.originalName, upload);
+      }
+      for (const staged of stagedMedia.files) {
+        stagedById.set(staged.fileId, staged);
+        stagedUnderName(staged.originalName, staged);
+      }
+
       const authorizedExistingFiles = await this.resolveAttachableExistingFiles(
         caller.communityId,
         input.actor,
@@ -1192,6 +1457,7 @@ export class ImportsService {
           duplicateStrategy,
           audienceMapping,
           context,
+          stagedById,
           stagedByName,
           authorizedExistingFiles,
         });
@@ -1199,10 +1465,15 @@ export class ImportsService {
       // Immediately clean up any uploaded media part not referenced by accepted rows.
       const keptMediaFiles: StagedFileInsertInput[] = [];
       const keptStagedIds: string[] = [];
+      // Legacy multipart media: their rows are inserted with the manifest.
+      const insertedStagedIds: string[] = [];
+      // Pre-staged uploads (#282): their existing rows are held, never inserted.
+      const heldStagedMediaIds: string[] = [];
       const unusedMediaKeys: string[] = [];
       for (const upload of stagedMediaUploads) {
         if (referencedStagedIds.has(upload.fileId)) {
           keptStagedIds.push(upload.fileId);
+          insertedStagedIds.push(upload.fileId);
           keptMediaFiles.push({
             id: upload.fileId,
             storageKey: upload.storageKey,
@@ -1213,6 +1484,12 @@ export class ImportsService {
           });
         } else {
           unusedMediaKeys.push(upload.storageKey);
+        }
+      }
+      for (const staged of stagedMedia.files) {
+        if (referencedStagedIds.has(staged.fileId)) {
+          keptStagedIds.push(staged.fileId);
+          heldStagedMediaIds.push(staged.fileId);
         }
       }
       if (unusedMediaKeys.length > 0) {
@@ -1295,6 +1572,7 @@ export class ImportsService {
             checksum: csvUpload.checksum,
           },
           stagedMediaFiles: keptMediaFiles,
+          adoptedMediaFileIds: heldStagedMediaIds,
           mappings: storedMappings,
           normalizedRows: normalizedData,
           rowCount: csvUpload.parsed.rows.length,
@@ -1323,11 +1601,13 @@ export class ImportsService {
           activeUploadedKeys.clear();
           outcome = { status: 'created', manifest: persistedManifest };
         } else {
+          // Only rows this request inserts are in doubt here; held pre-staged
+          // uploads keep their own rows whether or not the manifest landed.
           let existingFiles: Map<string, StagedFileVerificationRecord>;
           try {
             existingFiles = await this.repository.findStagedFilesByIds(
               caller.communityId,
-              [sourceFileId, ...keptStagedIds]
+              [sourceFileId, ...insertedStagedIds]
             );
           } catch {
             activeUploadedKeys.clear();
@@ -1386,6 +1666,16 @@ export class ImportsService {
           activeUploadedKeys
         );
         return { status: 429, body: TOO_MANY_OPEN_PREVIEWS_BODY };
+      }
+      if (outcome.status === 'staged_media_unavailable') {
+        // A declared upload was claimed, attached or removed after it was
+        // resolved; nothing was persisted, and the answer stays not-found.
+        await this.cleanupUploadedStorageKeys(
+          [...activeUploadedKeys],
+          'upload_rollback',
+          activeUploadedKeys
+        );
+        return { status: 404, body: NOT_FOUND_BODY };
       }
 
       activeUploadedKeys.clear();
@@ -2020,6 +2310,9 @@ export class ImportsService {
     duplicateStrategy: DuplicateStrategy;
     audienceMapping: AudienceMapping | undefined;
     context: CommunityImportContext;
+    /** Pre-staged uploads (#282) by file id. */
+    stagedById: ReadonlyMap<string, StagedMediaUpload>;
+    /** Staged uploads by filename: as sent, as stored, and as sanitized. */
     stagedByName: ReadonlyMap<string, StagedMediaUpload>;
     authorizedExistingFiles: ReadonlyMap<
       string,
@@ -2101,7 +2394,14 @@ export class ImportsService {
       stagedByManifest: boolean;
     } | null => {
       const allowedCategories = ATTACHMENT_ROLE_ALLOWED_CATEGORIES[role];
-      const staged = input.stagedByName.get(token);
+      // A file id is matched exactly as written. A filename is matched as
+      // written and through the upload sanitizer (`csvMediaName`): a staged
+      // upload's stored name is already sanitized (#282), so `café.png` in a
+      // cell only finds the upload stored as `caf-.png` after the cleaning.
+      const staged =
+        input.stagedById.get(token) ??
+        input.stagedByName.get(token) ??
+        input.stagedByName.get(csvMediaName(token));
       if (staged) {
         if (!allowedCategories.includes(staged.category)) {
           errorsForRow.push({

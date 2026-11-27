@@ -1,6 +1,7 @@
 import { CommunityErasureService } from './services/community-erasure.service.js';
 import type { ErasureRecordStore } from './services/erasure-record-store.js';
 import { sessionLifetime } from './shared/session-policy.js';
+import { withDeadline } from './shared/deadline.js';
 import { registerExploreAdapter } from './explore-adapter.js';
 import { ExploreAdapterRepository } from './repositories/explore-adapter.repository.js';
 import { CommunityReadsRepository } from './repositories/community-reads.repository.js';
@@ -175,6 +176,13 @@ export interface FoundationOptions {
   mapboxAccessToken?: string;
   /** Offline mode ignores Mapbox/Protomaps external provider credentials. */
   offlineMode?: boolean;
+  /** Deadline for the /ready database probe (default 3000 ms). */
+  readinessTimeoutMs?: number;
+  /**
+   * Register work that may outlive its request (e.g. past the /ready
+   * deadline) so a Node shutdown can await it before closing the database.
+   */
+  trackWork?: (work: Promise<unknown>) => void;
 }
 const preloginSchema = z
   .object({
@@ -369,14 +377,21 @@ export function createHonoApp(options: FoundationOptions) {
     }
     // Resolve persisted notice deadlines before any public or authenticated read.
     // A bounded backlog fails closed until subsequent requests/ticks drain it.
+    // /ready bounds these calls too, so a stalled database cannot hang it.
+    const guard = <T>(work: Promise<T>) => {
+      if (c.req.path !== '/ready') return work;
+      // The deadline abandons the wait, not the work: keep it tracked.
+      options.trackWork?.(work);
+      return withDeadline(work, options.readinessTimeoutMs ?? 3000);
+    };
     if (
       c.req.path !== '/health' &&
-      !(await sovereigntyRepository.applyDueWithdrawals(now()))
+      !(await guard(sovereigntyRepository.applyDueWithdrawals(now())))
     )
       return c.json({ error: 'Service unavailable' }, 503);
     if (
       c.req.path !== '/health' &&
-      !(await sovereigntyRepository.activateDueErasures(now()))
+      !(await guard(sovereigntyRepository.activateDueErasures(now())))
     )
       return c.json({ error: 'Service unavailable' }, 503);
     await next();
@@ -390,7 +405,10 @@ export function createHonoApp(options: FoundationOptions) {
   app.notFound((c) => c.json({ error: 'Not found' }, 404));
   app.get('/health', (c) => c.json({ status: 'ok' }));
   app.get('/ready', async (c) => {
-    await options.repository.readiness();
+    await withDeadline(
+      options.repository.readiness(),
+      options.readinessTimeoutMs ?? 3000
+    );
     return c.json({ status: 'ready' });
   });
   app.post(

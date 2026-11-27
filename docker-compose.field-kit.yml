@@ -231,7 +231,7 @@ services:
       resources:
         limits:
           cpus: '0.1'
-          memory: 64M
+          memory: 256M # node + better-sqlite3 online backup; 64M is not enough
 
 # =============================================================================
 # FIELD KIT-SPECIFIC VOLUMES

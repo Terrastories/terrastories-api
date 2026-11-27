@@ -57,6 +57,11 @@ function run(shell: string[], dirs: ReturnType<typeof tree>, extra = {}) {
   });
 }
 
+const leftovers = (dirs: ReturnType<typeof tree>) =>
+  readdirSync(dirs.backups).filter(
+    (f) => f.startsWith('fieldkit_backup_') || f.startsWith('.partial')
+  );
+
 const archives = (dirs: ReturnType<typeof tree>) =>
   readdirSync(dirs.backups).filter((f) => f.endsWith('.tar.gz'));
 
@@ -105,6 +110,7 @@ describe('field-kit-backup.sh is POSIX sh (#136)', () => {
     });
     expect(r.status).not.toBe(0);
     expect(archives(dirs)).toHaveLength(0);
+    expect(leftovers(dirs)).toEqual([]);
   });
 
   it.skipIf(process.getuid?.() === 0)(
@@ -118,6 +124,7 @@ describe('field-kit-backup.sh is POSIX sh (#136)', () => {
         const r = run(['sh'], dirs);
         expect(r.status).not.toBe(0);
         expect(archives(dirs)).toHaveLength(0);
+        expect(leftovers(dirs)).toEqual([]);
         expect(existsSync(path.join(dirs.backups))).toBe(true);
       } finally {
         chmodSync(locked, 0o600);

@@ -31,15 +31,18 @@ mkdir -p "$BACKUP_DIR"
 BACKUP_DATE=$(date +"%Y%m%d_%H%M%S")
 BACKUP_NAME="fieldkit_backup_${BACKUP_DATE}"
 BACKUP_PATH="$BACKUP_DIR/$BACKUP_NAME"
+# Work in a hidden .partial- directory and rename on success, so a failed or
+# killed run never leaves something that looks like a valid backup.
+WORK_PATH="$BACKUP_DIR/.partial-$BACKUP_NAME"
 LIST_FILE="$BACKUP_DIR/.${BACKUP_NAME}.list"
-trap 'rm -f "$LIST_FILE"' EXIT
+trap 'rm -f "$LIST_FILE"; [ -d "$WORK_PATH" ] && rm -rf "$WORK_PATH"' EXIT
 
 echo "Starting field kit backup..."
 echo "Data directory: $DATA_DIR"
 echo "Uploads directory: $UPLOADS_DIR"
 echo "Backup name: $BACKUP_NAME"
 
-mkdir -p "$BACKUP_PATH"
+mkdir -p "$WORK_PATH"
 
 # Consistent copy of a live SQLite database through the online backup API;
 # a raw file copy could capture a torn write, so there is no cp fallback.
@@ -58,15 +61,15 @@ sqlite_copy() {
 # other file (except journal/WAL sidecars, which the backup API folds in) as-is.
 if [ -d "$DATA_DIR" ]; then
     echo "Backing up sqlite databases..."
-    mkdir -p "$BACKUP_PATH/data"
+    mkdir -p "$WORK_PATH/data"
     find "$DATA_DIR" -type f > "$LIST_FILE"
     while IFS= read -r f; do
         rel="${f#"$DATA_DIR"/}"
-        mkdir -p "$BACKUP_PATH/data/$(dirname "$rel")"
+        mkdir -p "$WORK_PATH/data/$(dirname "$rel")"
         case "$f" in
             *-wal|*-shm|*-journal) ;;
-            *.db|*.sqlite|*.sqlite3) sqlite_copy "$f" "$BACKUP_PATH/data/$rel" ;;
-            *) cp -p "$f" "$BACKUP_PATH/data/$rel" ;;
+            *.db|*.sqlite|*.sqlite3) sqlite_copy "$f" "$WORK_PATH/data/$rel" ;;
+            *) cp -p "$f" "$WORK_PATH/data/$rel" ;;
         esac
     done < "$LIST_FILE"
 fi
@@ -77,25 +80,25 @@ if [ -d "$UPLOADS_DIR" ]; then
     echo "Backing up uploaded files..."
     find "$UPLOADS_DIR" -type f > "$LIST_FILE"
     while IFS= read -r f; do
-        mkdir -p "$BACKUP_PATH$(dirname "$f")"
-        cp -p "$f" "$BACKUP_PATH$f"
+        mkdir -p "$WORK_PATH$(dirname "$f")"
+        cp -p "$f" "$WORK_PATH$f"
     done < "$LIST_FILE"
-    cp "$LIST_FILE" "$BACKUP_PATH/uploads_manifest.txt"
+    cp "$LIST_FILE" "$WORK_PATH/uploads_manifest.txt"
     # Every manifest entry must exist in the backup.
     while IFS= read -r f; do
-        [ -f "$BACKUP_PATH$f" ] || { echo "ERROR: missing in backup: $f" >&2; exit 1; }
-    done < "$BACKUP_PATH/uploads_manifest.txt"
+        [ -f "$WORK_PATH$f" ] || { echo "ERROR: missing in backup: $f" >&2; exit 1; }
+    done < "$WORK_PATH/uploads_manifest.txt"
 fi
 
 # Backup offline map tiles (critical for field operations)
 if [ -d "$TILES_DIR" ]; then
     echo "Backing up offline map tiles..."
-    cp -R "$TILES_DIR" "$BACKUP_PATH/tiles"
+    cp -R "$TILES_DIR" "$WORK_PATH/tiles"
     echo "Map tiles backed up for offline use"
 fi
 
 # Create backup metadata
-cat > "$BACKUP_PATH/backup_info.json" << EOF
+cat > "$WORK_PATH/backup_info.json" << EOF
 {
   "backup_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "backup_type": "field-kit",
@@ -103,10 +106,13 @@ cat > "$BACKUP_PATH/backup_info.json" << EOF
   "disk_usage": {
     "data_size": "$(du -sh "$DATA_DIR" 2>/dev/null | cut -f1 || echo 'N/A')",
     "uploads_size": "$(du -sh "$UPLOADS_DIR" 2>/dev/null | cut -f1 || echo 'N/A')",
-    "backup_size": "$(du -sh "$BACKUP_PATH" | cut -f1)"
+    "backup_size": "$(du -sh "$WORK_PATH" | cut -f1)"
   }
 }
 EOF
+
+# Commit: the backup directory only exists under its final name when complete.
+mv "$WORK_PATH" "$BACKUP_PATH"
 
 # Compress backup if enabled
 if [ "$COMPRESSION" = "true" ]; then

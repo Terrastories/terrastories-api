@@ -19,22 +19,27 @@
 import Database from 'better-sqlite3';
 import postgres from 'postgres';
 
-/** Audit actions whose effects revert on restore and must be replayed. */
+/**
+ * Audit actions that change a user row (so the change reverts on restore) and
+ * how each writer stores the affected user: `user.*` entries list the target
+ * in resource_ids (resource_type 'user'); `auth.*` entries are self-service,
+ * resource_type 'auth' / 'login_code' / 'recovery_codes', with the account in
+ * resource_ids and actor_id. Claim-token actions touch no user row and are
+ * covered by the post-restore supersede; `user.session.revoke` is covered by
+ * the session purge.
+ */
 export const ACCOUNT_CHANGE_AUDIT_ACTIONS = [
   'user.create',
   'user.update',
   'user.password_reset',
-  'user.session.revoke',
   'user.login_code_issue',
   'auth.password.change',
   'auth.identifier.change',
   'auth.recovery.redeem',
   'auth.recovery_codes.generate',
-  'claim_token.issue',
-  'claim_token.consume',
 ] as const;
 
-/** Account-authority columns copied from the frozen database on replay. */
+/** Account columns copied from the frozen database on replay. */
 export const ACCOUNT_AUTHORITY_COLUMNS = [
   'is_active',
   'role',
@@ -44,6 +49,13 @@ export const ACCOUNT_AUTHORITY_COLUMNS = [
   'password_salt',
   'password_params',
   'password_verifier',
+  'email',
+  'email_normalized',
+  'username',
+  'username_normalized',
+  'display_name',
+  'first_name',
+  'last_name',
 ] as const;
 
 export interface PostRestoreResult {
@@ -94,23 +106,34 @@ export async function applyPostRestorePostgres(
   return result;
 }
 
+export interface ReplayResult {
+  /** Users whose authority/identity columns were copied onto the restored DB. */
+  replayed: number[];
+  /** Users changed or created after the backup with no restored row: re-create them. */
+  missing: number[];
+}
+
 /**
- * Replay account changes recorded after the backup: for every user touched by
- * an ACCOUNT_CHANGE_AUDIT_ACTIONS entry newer than `afterAuditId` in the
- * frozen pre-restore database, copy the authority columns onto the restored
- * row. Returns the user ids replayed. Review the list before serving.
+ * Replay account changes recorded after the backup: for every user named by a
+ * successful ACCOUNT_CHANGE_AUDIT_ACTIONS entry newer than `afterAuditId` in
+ * the frozen pre-restore database (selected by action only, the user resolved
+ * per writer: resource_ids, else actor_id), copy the columns onto the
+ * restored row. Users with no restored row (created after the backup) are
+ * returned and printed; re-create them from the frozen database by hand.
  */
 export function replayAccountChanges(
   frozen: Database.Database,
   restored: Database.Database,
   afterAuditId: number
-): number[] {
+): ReplayResult {
   const placeholders = ACCOUNT_CHANGE_AUDIT_ACTIONS.map(() => '?').join(',');
   const entries = frozen
     .prepare(
-      `SELECT resource_ids FROM audit_entries WHERE id > ? AND resource_type = 'user' AND action IN (${placeholders})`
+      `SELECT action, actor_id, resource_ids FROM audit_entries WHERE id > ? AND outcome = 'success' AND action IN (${placeholders})`
     )
     .all(afterAuditId, ...ACCOUNT_CHANGE_AUDIT_ACTIONS) as Array<{
+    action: string;
+    actor_id: number | null;
     resource_ids: string | null;
   }>;
   const userIds = new Set<number>();
@@ -118,24 +141,34 @@ export function replayAccountChanges(
     const parsed: unknown = entry.resource_ids
       ? JSON.parse(entry.resource_ids)
       : [];
-    for (const id of Array.isArray(parsed) ? parsed : [parsed])
-      if (Number.isInteger(Number(id))) userIds.add(Number(id));
+    const ids = (Array.isArray(parsed) ? parsed : [parsed])
+      .map(Number)
+      .filter((id) => Number.isInteger(id));
+    if (ids.length === 0 && entry.action.startsWith('auth.') && entry.actor_id)
+      ids.push(entry.actor_id);
+    for (const id of ids) userIds.add(id);
   }
   const cols = ACCOUNT_AUTHORITY_COLUMNS.join(', ');
   const assign = ACCOUNT_AUTHORITY_COLUMNS.map((c) => `${c} = @${c}`).join(
     ', '
   );
   const update = restored.prepare(`UPDATE users SET ${assign} WHERE id = @id`);
-  const replayed: number[] = [];
+  const result: ReplayResult = { replayed: [], missing: [] };
   restored.transaction(() => {
     for (const id of userIds) {
       const row = frozen
         .prepare(`SELECT ${cols} FROM users WHERE id = ?`)
         .get(id) as Record<string, unknown> | undefined;
-      if (row && update.run({ ...row, id }).changes > 0) replayed.push(id);
+      if (!row) continue;
+      if (update.run({ ...row, id }).changes > 0) result.replayed.push(id);
+      else result.missing.push(id);
     }
   })();
-  return replayed;
+  if (result.missing.length > 0)
+    console.warn(
+      `post-restore: users with no restored row (created after the backup): ${result.missing.join(', ')}`
+    );
+  return result;
 }
 
 async function main(target: string): Promise<void> {

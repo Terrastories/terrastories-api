@@ -29,7 +29,15 @@ import { createHonoApp } from '../../src/hono-app.js';
 import { createLocalStorage } from '../../src/node-storage.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
 import { MediaCleanupCoordinator } from '../../src/services/media-cleanup.service.js';
-import { makeServerSecret } from '../hono/auth-test-utils.js';
+import {
+  ARGON2ID_ALGORITHM,
+  ARGON2ID_PARAMS,
+} from '../../src/shared/auth-policy.js';
+import {
+  makeDerivedKey,
+  makeServerSecret,
+  makeVerifierSalt,
+} from '../hono/auth-test-utils.js';
 import {
   applyPostRestoreSqlite,
   replayAccountChanges,
@@ -80,6 +88,7 @@ const media: { recent?: string; aged?: string } = {};
 const cookies: Record<string, string> = {};
 let archiveName = '';
 let auditMarker = 0;
+const newAdminKey = makeDerivedKey();
 let backupMs = 0;
 let restoreMs = 0;
 const openApps: Sqlite.Database[] = [];
@@ -233,13 +242,34 @@ beforeAll(async () => {
     DRILL_ACCOUNTS.adminAlpha,
     'drill-alpha'
   );
+  // The admin also changes their own password (auth.password.change).
+  const passwordChange = await liveApp.request(`${ORIGIN}/v2/auth/password`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      cookie: adminCookie,
+      origin: ORIGIN,
+    },
+    body: JSON.stringify({
+      currentDerivedKey: DRILL_KEY,
+      algorithm: ARGON2ID_ALGORITHM,
+      salt: makeVerifierSalt(),
+      params: { ...ARGON2ID_PARAMS },
+      derivedKey: newAdminKey,
+    }),
+  });
+  expect(passwordChange.status).toBe(200);
+  // The change revokes the other sessions and issues a fresh one.
+  const freshAdminCookie = (
+    passwordChange.headers.get('set-cookie') ?? ''
+  ).split(';')[0]!;
   const disable = await liveApp.request(
     `${ORIGIN}/v2/users/${ids.viewerAlpha}`,
     {
       method: 'PATCH',
       headers: {
         'content-type': 'application/json',
-        cookie: adminCookie,
+        cookie: freshAdminCookie,
         origin: ORIGIN,
       },
       body: JSON.stringify({ status: 'disabled' }),
@@ -429,23 +459,61 @@ describe('SQLite field-kit restore drill (#136)', () => {
   it('reverts account changes to backup time and replays them from the frozen database audit log', async () => {
     const { db, uploads } = restore('replay', true);
     const app = await buildApp(db, uploads);
-    const loginViewer = () =>
+    const loginAs = (email: string, key: string) =>
       app.request(`${ORIGIN}/v2/auth/login`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          identifier: DRILL_ACCOUNTS.viewerAlpha,
-          derivedKey: DRILL_KEY,
+          identifier: email,
+          derivedKey: key,
           communitySlug: 'drill-alpha',
         }),
       });
-    // The viewer was disabled after the backup; the restore reverts that.
-    expect((await loginViewer()).status).toBe(200);
+    // Reverted: the viewer was disabled and the admin changed their own
+    // password after the backup, but the restored rows predate both.
+    expect((await loginAs(DRILL_ACCOUNTS.viewerAlpha, DRILL_KEY)).status).toBe(
+      200
+    );
+    expect((await loginAs(DRILL_ACCOUNTS.adminAlpha, DRILL_KEY)).status).toBe(
+      200
+    );
+    expect((await loginAs(DRILL_ACCOUNTS.adminAlpha, newAdminKey)).status).toBe(
+      401
+    );
     db.prepare('DELETE FROM sessions').run();
+
     // Runbook step: replay account changes from the frozen pre-restore database.
-    const replayed = replayAccountChanges(live, db, auditMarker);
-    expect(replayed).toContain(ids.viewerAlpha);
-    expect((await loginViewer()).status).toBe(401);
+    const { replayed, missing } = replayAccountChanges(live, db, auditMarker);
+    expect(replayed).toEqual(
+      expect.arrayContaining([ids.viewerAlpha, ids.adminAlpha])
+    );
+    expect(missing).toEqual([]);
+    expect((await loginAs(DRILL_ACCOUNTS.viewerAlpha, DRILL_KEY)).status).toBe(
+      401
+    );
+    // The self password change (audited under resource_type 'auth') is replayed.
+    expect((await loginAs(DRILL_ACCOUNTS.adminAlpha, DRILL_KEY)).status).toBe(
+      401
+    );
+    expect((await loginAs(DRILL_ACCOUNTS.adminAlpha, newAdminKey)).status).toBe(
+      200
+    );
+  });
+
+  it('reports users created after the backup that have no restored row', () => {
+    const { db } = restore('missing', true);
+    live
+      .prepare(
+        "INSERT INTO audit_entries (actor_id, action, resource_type, resource_ids, outcome, created_at) VALUES (?, 'user.create', 'user', ?, 'success', ?)"
+      )
+      .run(ids.adminAlpha, JSON.stringify([999]), Date.now());
+    live
+      .prepare(
+        "INSERT INTO users (id, email, first_name, last_name, role, community_id, is_active, password_hash, created_at, updated_at) VALUES (999, 'late@alpha.drill.test', 'L', 'U', 'viewer', ?, 1, 'x', 1, 1)"
+      )
+      .run(ids.alpha);
+    const { missing } = replayAccountChanges(live, db, auditMarker);
+    expect(missing).toEqual([999]);
   });
 
   it('writes the archive owner-only and reports hold no secrets', () => {

@@ -637,14 +637,17 @@ describe('media adversarial suite on the Hono V2 app (#140)', () => {
     function streamed(chunks: Uint8Array[], contentLength?: number) {
       const state = { pulled: 0 };
       let next = 0;
-      const body = new ReadableStream<Uint8Array>({
-        pull(controller) {
-          const chunk = chunks[next++];
-          if (!chunk) return controller.close();
-          state.pulled += 1;
-          controller.enqueue(chunk);
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            const chunk = chunks[next++];
+            if (!chunk) return controller.close();
+            state.pulled += 1;
+            controller.enqueue(chunk);
+          },
         },
-      });
+        { highWaterMark: 0 }
+      );
       const digest = createHash('sha256');
       for (const c of chunks) digest.update(c);
       const headers: Record<string, string> = {
@@ -720,8 +723,8 @@ describe('media adversarial suite on the Hono V2 app (#140)', () => {
       const before = await snapshot();
       const res = await app.request(request);
       expect(res.status).toBe(413);
-      // At most the stream's own one-chunk prefetch; nothing reaches storage.
-      expect(state.pulled).toBeLessThanOrEqual(1);
+      // The stream has no prefetch: the guard must answer before any read.
+      expect(state.pulled).toBe(0);
       expect(counters.putBytes).toBe(putBefore);
       expect(await snapshot()).toBe(before);
     });
@@ -803,12 +806,19 @@ describe('media adversarial suite on the Hono V2 app (#140)', () => {
         const file = queue.pop()!;
         if (seen.has(file)) continue;
         seen.add(file);
-        const text = readFileSync(file, 'utf8');
+        const text = readFileSync(file, 'utf8')
+          .replace(/\/\*[\s\S]*?\*\//g, '')
+          .replace(/^\s*\/\/.*$/gm, '');
         for (const m of text.matchAll(specifier)) {
           const spec = m[1]!;
-          if (spec.startsWith('.')) {
-            const next = resolveRel(file, spec);
-            if (next) queue.push(next);
+          if (spec.startsWith('.') || spec.startsWith('@/')) {
+            if (spec.endsWith('.json')) continue;
+            const next = spec.startsWith('@/')
+              ? resolveRel(resolve('src', '_'), spec.slice(2))
+              : resolveRel(file, spec);
+            // An import the guard cannot follow is a failure, not a skip.
+            expect(next, file + ' imports unresolvable ' + spec).not.toBeNull();
+            queue.push(next!);
             continue;
           }
           const pkg = spec.startsWith('@')
@@ -1237,7 +1247,16 @@ describe('media adversarial suite on the Hono V2 app (#140)', () => {
         await expectDenied(
           'put part ' + label,
           putPart(target, cookie),
-          status
+          status,
+          concealed
+            ? putPart(
+                {
+                  ...target,
+                  url: target.url.replace(owned.id, NOT_FOUND),
+                },
+                cookie
+              )
+            : undefined
         );
         await expectDenied(
           'complete ' + label,
@@ -1257,16 +1276,34 @@ describe('media adversarial suite on the Hono V2 app (#140)', () => {
         ['member', cookies.memberA],
         ['super_admin', cookies.superAdmin],
       ] as Array<[string, string]>) {
-        for (const [what, run] of [
-          ['presign', presign(owned.id, cookie)],
-          ['complete', complete(owned.id, sha, cookie)],
-          ['abort', abort(owned.id, cookie)],
-        ] as Array<[string, () => Promise<Response>]>) {
-          const before = await snapshot();
-          const res = await run();
-          expect([403, 404], what + ' ' + label).toContain(res.status);
-          expect(await snapshot(), what + ' ' + label).toBe(before);
-        }
+        // A role that cannot own sessions sees the session as nonexistent.
+        await expectDenied(
+          'presign ' + label,
+          presign(owned.id, cookie),
+          404,
+          presign(NOT_FOUND, cookie)
+        );
+        await expectDenied(
+          'put part ' + label,
+          putPart(target, cookie),
+          404,
+          putPart(
+            { ...target, url: target.url.replace(owned.id, NOT_FOUND) },
+            cookie
+          )
+        );
+        await expectDenied(
+          'complete ' + label,
+          complete(owned.id, sha, cookie),
+          404,
+          complete(NOT_FOUND, sha, cookie)
+        );
+        await expectDenied(
+          'abort ' + label,
+          abort(owned.id, cookie),
+          404,
+          abort(NOT_FOUND, cookie)
+        );
       }
 
       // The owner path still works after every denial.

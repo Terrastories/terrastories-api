@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "NODE_ENV=development tsx watch src/server.ts",
     "build": "tsc",
+    "postbuild": "node scripts/copy-migrations.mjs",
     "start": "node dist/server.js",
     "test": "vitest",
     "test:coverage": "SKIP_TIMING_ASSERTIONS=true vitest run --coverage --exclude tests/production/performance.test.ts --reporter=dot --silent=true --maxWorkers=4",

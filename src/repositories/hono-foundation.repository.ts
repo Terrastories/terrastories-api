@@ -25,6 +25,9 @@ import {
   communityMediaSqlite,
 } from '../db/schema/sessions.js';
 
+// SQLite returns 0/1 for `exists(...)`; Postgres returns a boolean.
+const isTruthy = (v: unknown): boolean => v === true || v === 1 || v === '1';
+
 export interface FoundationUser {
   id: number;
   email: string | null;
@@ -702,12 +705,18 @@ export class HonoFoundationRepository {
   async sessionContext(
     tokenHash: string,
     now: Date,
-    renew = true
+    renew = true,
+    withGates = false
   ): Promise<{
     user: FoundationUser;
     kind: SessionKind;
     /** The row's absolute expiry, so a device cookie can carry the remainder. */
     absoluteExpiresAt: number | null;
+    /**
+     * Per-request gate state, read in the same query as the session when
+     * `withGates` is set (one round trip instead of three).
+     */
+    gates?: { erasurePending: boolean; recoveryCodesActive: boolean };
   } | null> {
     const { users, communities } = this.tables;
     const sessions = this.sessions;
@@ -718,9 +727,12 @@ export class HonoFoundationRepository {
       absoluteExpiresAt: number | null;
       lastSeenAt: number | null;
       kind: string;
+      erasurePending?: unknown;
+      recoveryCodesActive?: unknown;
     })[] = await this.database
       .select({
         ...this.projection(),
+        ...(withGates ? this.gateColumns() : {}),
         expiresAt: sessions.expiresAt,
         idleExpiresAt: sessions.idleExpiresAt,
         absoluteExpiresAt: sessions.absoluteExpiresAt,
@@ -755,8 +767,20 @@ export class HonoFoundationRepository {
       renew &&
       nowMs >=
         idleExpiresAt - sessionIdleWindowMs(kind) + sessionRenewalInterval;
-    if (!staleLastSeen && !renewWindow)
-      return { user, kind, absoluteExpiresAt: row.absoluteExpiresAt };
+    const result = {
+      user,
+      kind,
+      absoluteExpiresAt: row.absoluteExpiresAt,
+      ...(withGates
+        ? {
+            gates: {
+              erasurePending: isTruthy(row.erasurePending),
+              recoveryCodesActive: isTruthy(row.recoveryCodesActive),
+            },
+          }
+        : {}),
+    };
+    if (!staleLastSeen && !renewWindow) return result;
     const patch: Record<string, unknown> = { lastSeenAt: nowMs };
     if (renewWindow) {
       const next = sessionLifetimesFor(kind, nowMs);
@@ -780,8 +804,47 @@ export class HonoFoundationRepository {
     // authenticate. Whenever the touch was attempted and matched 0 rows
     // (with or without a renewal due), re-read under the same validity
     // conditions or answer as unauthenticated — never return stale authority.
-    if (touched.length === 0) return this.sessionContext(tokenHash, now, false);
-    return { user, kind, absoluteExpiresAt: row.absoluteExpiresAt };
+    if (touched.length === 0)
+      return this.sessionContext(tokenHash, now, false, withGates);
+    // The touch awaited a write after the gate read: an erasure fence (or a
+    // recovery-code change) that committed in between must not be missed, so
+    // re-read the gate state once the session is confirmed live.
+    if (withGates) {
+      const gates = await this.readGates(user.id);
+      // The account vanished after the touch: never return stale authority.
+      if (gates === null) return null;
+      result.gates = gates;
+    }
+    return result;
+  }
+
+  /**
+   * Same predicates as `CommunitySovereigntyRepository.erasurePending` and
+   * `hasActiveRecoveryCodes`, as correlated `exists` columns over `users`.
+   */
+  private gateColumns() {
+    const { users, communitySovereigntyRequests, loginCodes } = this.tables;
+    return {
+      erasurePending: sql`exists (select 1 from ${communitySovereigntyRequests} where ${communitySovereigntyRequests.communityId} = ${users.communityId} and ${communitySovereigntyRequests.kind} = 'erasure' and ${communitySovereigntyRequests.state} in ('requested', 'executing'))`,
+      recoveryCodesActive: sql`exists (select 1 from ${loginCodes} where ${loginCodes.userId} = ${users.id} and ${loginCodes.purpose} = 'recovery' and ${loginCodes.usedAt} is null and ${loginCodes.supersededAt} is null)`,
+    };
+  }
+
+  private async readGates(userId: number): Promise<{
+    erasurePending: boolean;
+    recoveryCodesActive: boolean;
+  } | null> {
+    const { users } = this.tables;
+    const [row] = await this.database
+      .select(this.gateColumns())
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    if (!row) return null;
+    return {
+      erasurePending: isTruthy(row.erasurePending),
+      recoveryCodesActive: isTruthy(row.recoveryCodesActive),
+    };
   }
 
   async session(

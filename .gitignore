@@ -156,3 +156,5 @@ scripts/fix_database.ts
 
 # Production environment backups
 .env.production.backup
+
+graft/

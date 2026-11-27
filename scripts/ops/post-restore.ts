@@ -201,7 +201,7 @@ function checkLineage(
   }
   if (diverged.length > 0)
     throw new Error(
-      `post-restore: the frozen database is not a descendant of the restored backup (unrelated lineage): ${diverged.join('; ')}. Nothing was changed. Use --allow-unrelated-lineage only after verifying by hand.`
+      `post-restore: the frozen database is not a descendant of the restored backup (unrelated lineage): ${diverged.join('; ')}. No account rows were changed. Use --allow-unrelated-lineage only after verifying by hand.`
     );
   return 'verified';
 }
@@ -277,7 +277,7 @@ export function replayAccountChanges(
     .map((fr) => Number(fr.id));
   if (ambiguous.length > 0)
     throw new Error(
-      `post-restore: user ids ${ambiguous.join(', ')} name different accounts in the frozen and restored databases (created_at/community_id differ); nothing was changed. Resolve by hand (a legitimate community move needs the restored row aligned first).`
+      `post-restore: user ids ${ambiguous.join(', ')} name different accounts in the frozen and restored databases (created_at/community_id differ); no account rows were changed. Resolve by hand (a legitimate community move needs the restored row aligned first).`
     );
   for (const fr of frozenRows) {
     const rr = restoredById.get(Number(fr.id));
@@ -455,9 +455,10 @@ async function main(argv: string[]): Promise<void> {
   }
   const db = new Database(args.file!, { fileMustExist: true });
   try {
-    // Replay first: its lineage and identity checks run before any write, so a
-    // refusal leaves the database untouched. The purge follows (it must also
-    // cover credential material the replay just restored).
+    // Always purge first: backup-era sessions, login codes and claim tokens must
+    // never survive, even when the replay is refused. The replay's lineage and
+    // identity checks run before any ACCOUNT write.
+    const purge = applyPostRestoreSqlite(db);
     let replay: ReplayResult | undefined;
     if (args.replayFrom !== undefined) {
       const frozen = new Database(args.replayFrom, {
@@ -468,11 +469,16 @@ async function main(argv: string[]): Promise<void> {
         replay = replayAccountChanges(frozen, db, args.afterAuditId!, {
           allowUnrelatedLineage: args.allowUnrelatedLineage,
         });
+        // The replay may restore credential material: purge sessions again.
+        applyPostRestoreSqlite(db);
+      } catch (error) {
+        throw new Error(
+          `${error instanceof Error ? error.message : String(error)} Sessions, login codes and claim tokens were purged.`
+        );
       } finally {
         frozen.close();
       }
     }
-    const purge = applyPostRestoreSqlite(db);
     console.log(JSON.stringify({ purge, replay }));
   } finally {
     db.close();

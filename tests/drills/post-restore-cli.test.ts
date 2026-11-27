@@ -66,10 +66,12 @@ describe('post-restore CLI', () => {
     check.close();
   });
 
-  it('sqlite: an audit-empty restored database is refused and nothing changes', () => {
+  it('sqlite: a refused replay still purges credentials and changes no account rows', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'tsapi-drill-pr-'));
     const restored = makeDb(path.join(dir, 'restored.db'), 1);
-    restored.exec('DELETE FROM audit_entries');
+    restored.exec(
+      'DELETE FROM audit_entries; INSERT INTO login_codes VALUES (NULL, NULL); INSERT INTO claim_tokens VALUES (NULL, NULL);'
+    );
     restored.close();
     makeDb(path.join(dir, 'frozen.db'), 0).close();
     const r = run([
@@ -82,9 +84,24 @@ describe('post-restore CLI', () => {
     ]);
     expect(r.status).toBe(2);
     expect(r.stderr).toContain('no audit entries');
+    expect(r.stderr).toContain('No account rows were changed');
+    expect(r.stderr).toContain(
+      'Sessions, login codes and claim tokens were purged'
+    );
     const check = new Sqlite(path.join(dir, 'restored.db'));
-    expect(check.prepare('SELECT count(*) AS n FROM sessions').get()).toEqual({
-      n: 1,
+    const n = (sql: string) => (check.prepare(sql).get() as { n: number }).n;
+    expect(n('SELECT count(*) AS n FROM sessions')).toBe(0);
+    expect(
+      n('SELECT count(*) AS n FROM login_codes WHERE superseded_at IS NULL')
+    ).toBe(0);
+    expect(
+      n('SELECT count(*) AS n FROM claim_tokens WHERE superseded_at IS NULL')
+    ).toBe(0);
+    // Account rows are exactly as restored (the frozen DB had is_active = 0).
+    expect(
+      check.prepare('SELECT is_active FROM users WHERE id = 1').get()
+    ).toEqual({
+      is_active: 1,
     });
     check.close();
   });

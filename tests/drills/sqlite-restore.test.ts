@@ -842,7 +842,7 @@ describe('SQLite field-kit restore drill (#136)', () => {
     ).run(ids.viewerAlpha);
     const before = snapshotSqlite(db);
     expect(() => replayAccountChanges(live, db, auditMarker)).toThrow(
-      new RegExp(`user ids ${ids.viewerAlpha}\\b.*nothing was changed`)
+      new RegExp(`user ids ${ids.viewerAlpha}\\b.*no account rows were changed`)
     );
     expect(diffSnapshots(before, snapshotSqlite(db))).toEqual([]);
   });
@@ -858,7 +858,7 @@ describe('SQLite field-kit restore drill (#136)', () => {
     await seedDrillDataset(drizzle(other));
     const before = snapshotSqlite(db);
     expect(() => replayAccountChanges(other, db, 0)).toThrow(
-      /unrelated lineage.*Nothing was changed/
+      /unrelated lineage.*No account rows were changed/
     );
     expect(diffSnapshots(before, snapshotSqlite(db))).toEqual([]);
     // The documented, dangerous override skips only the lineage check.
@@ -898,7 +898,7 @@ describe('SQLite field-kit restore drill (#136)', () => {
     await seedDrillDataset(drizzle(other));
     const before = snapshotSqlite(db);
     expect(() => replayAccountChanges(other, db, 0)).toThrow(
-      /no audit entries.*Nothing was changed/
+      /no audit entries.*No account rows were changed/
     );
     expect(diffSnapshots(before, snapshotSqlite(db))).toEqual([]);
   });

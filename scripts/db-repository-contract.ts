@@ -10,12 +10,18 @@ import assert from 'node:assert/strict';
  * Assert a timestamp read back from a repository is a real, usable Date:
  * `instanceof Date` alone also accepts `new Date(NaN)`.
  */
+/** Describe a value for the failure message; never throws (Invalid Date has no ISO form). */
+function describeNotDate(value: unknown): string {
+  if (!(value instanceof Date)) return typeof value;
+  return Number.isFinite(value.getTime())
+    ? value.toISOString()
+    : 'Invalid Date';
+}
+
 export function assertValidDate(value: unknown, label: string): void {
   assert.ok(
     value instanceof Date && Number.isFinite(value.getTime()),
-    `${label} must be a Date with a finite time, got ${
-      value instanceof Date ? value.toISOString() : typeof value
-    }`
+    `${label} must be a Date with a finite time, got ${describeNotDate(value)}`
   );
 }
 
@@ -506,6 +512,52 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
     createdBy: storyAuthor.id,
     tags: ['Water', 'Sacred'],
   });
+
+  // S2 (V2 read path): PublicContentRepository story ordering must be byte
+  // order on both backends, exercised through the real query, not the helper.
+  const { PublicContentRepository } = await import(
+    '../src/repositories/public-content.repository.js'
+  );
+  const { tablesFor: orderTablesFor } = await import('../src/db/dialect.js');
+  const orderTables: any = orderTablesFor(database as any);
+  const publicOrderSlug = 'public-title-order';
+  const [publicOrderCommunity] = await (database as any)
+    .insert(orderTables.communities)
+    .values({
+      name: 'Public Title Order',
+      slug: publicOrderSlug,
+      locale: 'en',
+      publicStories: true,
+      isActive: true,
+    })
+    .returning();
+  for (const title of ['cherry', 'Banana', 'Álamo', 'apple', 'Zebra']) {
+    await (database as any).insert(orderTables.stories).values({
+      title,
+      slug: `order-${title.toLowerCase()}`,
+      communityId: publicOrderCommunity.id,
+      createdBy: storyAuthor.id,
+      privacyLevel: 'public',
+      isRestricted: false,
+      language: 'en',
+    });
+  }
+  const publicStories = new PublicContentRepository(database as any);
+  for (const [sort, expected] of [
+    ['title_asc', ['Banana', 'Zebra', 'apple', 'cherry', 'Álamo']],
+    ['title_desc', ['Álamo', 'cherry', 'apple', 'Zebra', 'Banana']],
+  ] as const) {
+    const page = await publicStories.listStories(publicOrderSlug, {
+      sort,
+      limit: 20,
+      offset: 0,
+    });
+    assert.deepEqual(
+      page?.stories.map((story: any) => story.title),
+      expected,
+      `public stories ${sort} must be byte order`
+    );
+  }
 
   const readStory = await stories.findByIdWithRelations(riverStory.id);
   if (!readStory) {

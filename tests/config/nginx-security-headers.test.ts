@@ -110,7 +110,7 @@ describe.each(['nginx.conf', 'nginx.field-kit.conf'])('%s', (file) => {
       expect(
         b.errorPages.map((p) => p.codes.join(',')),
         b.name
-      ).toEqual(['400', '408', '413', '502', '503', '504']);
+      ).toEqual(['400', '413', '502', '503', '504']);
       for (const page of b.errorPages) {
         const handler = named.get(page.target.slice(1));
         expect(handler, page.target).toBeDefined();

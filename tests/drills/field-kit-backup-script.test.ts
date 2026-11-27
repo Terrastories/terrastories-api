@@ -137,6 +137,55 @@ describe('field-kit-backup.sh is POSIX sh (#136)', () => {
     expect(r.stderr).toContain('a.bin');
   });
 
+  it('retention never touches payload files inside a completed backup', () => {
+    const dirs = tree();
+    const payload = path.join(
+      dirs.uploads,
+      '.partial-fieldkit_backup_payload.bin'
+    );
+    writeFileSync(payload, 'payload');
+    const old = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+    utimesSync(payload, old, old);
+    const keep = { BACKUP_COMPRESSION: 'false' };
+    expect(run(['sh'], dirs, keep).status).toBe(0);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1100);
+    expect(run(['sh'], dirs, keep).status).toBe(0);
+    const backups = readdirSync(dirs.backups).filter((f) =>
+      f.startsWith('fieldkit_backup_')
+    );
+    expect(backups).toHaveLength(2);
+    for (const b of backups)
+      expect(
+        existsSync(
+          path.join(
+            dirs.backups,
+            b,
+            dirs.uploads,
+            '.partial-fieldkit_backup_payload.bin'
+          )
+        )
+      ).toBe(true);
+  });
+
+  it('removes stale hidden temp files at the top level', () => {
+    const dirs = tree();
+    const old = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+    for (const name of [
+      '.fieldkit_backup_old.list',
+      '.fieldkit_backup_old.keys',
+    ]) {
+      const f = path.join(dirs.backups, name);
+      writeFileSync(f, 'x');
+      utimesSync(f, old, old);
+    }
+    expect(run(['sh'], dirs).status).toBe(0);
+    expect(
+      readdirSync(dirs.backups).filter(
+        (f) => f.endsWith('.list') || f.endsWith('.keys')
+      )
+    ).toEqual([]);
+  });
+
   it('removes stale hidden .partial- leftovers on the retention pass', () => {
     const dirs = tree();
     const stale = path.join(

@@ -197,7 +197,10 @@ function parseArgs(argv: string[]): {
     if (rest[i] === '--replay-from') out.replayFrom = rest[i + 1];
     else if (rest[i] === '--after-audit-id') {
       // NaN would bind as NULL and silently replay nothing.
-      if (!/^\d+$/.test(rest[i + 1] ?? ''))
+      if (
+        !/^\d+$/.test(rest[i + 1] ?? '') ||
+        !Number.isSafeInteger(Number(rest[i + 1]))
+      )
         throw new Error('--after-audit-id must be a non-negative integer');
       out.afterAuditId = Number(rest[i + 1]);
     } else throw new Error(`unknown argument ${rest[i]}`);

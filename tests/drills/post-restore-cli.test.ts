@@ -63,7 +63,7 @@ describe('post-restore CLI', () => {
     check.close();
   });
 
-  it.each(['abc', '-1', '1.5', ''])(
+  it.each(['abc', '-1', '1.5', '', '9'.repeat(309), '9007199254740992'])(
     'sqlite: rejects --after-audit-id %j instead of replaying nothing',
     (value) => {
       const dir = mkdtempSync(path.join(tmpdir(), 'tsapi-drill-pr-'));

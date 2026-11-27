@@ -172,19 +172,15 @@ else
 fi
 
 # Clean up old backups
+# Only top-level entries of BACKUP_DIR: payload files inside a completed
+# (uncompressed) backup may legitimately carry any name.
 echo "Cleaning up backups older than $RETENTION_DAYS days..."
 # (no find -delete: not every BusyBox build has it)
-find "$BACKUP_DIR" -name "fieldkit_backup_*" -type f -mtime +"$RETENTION_DAYS" > "$LIST_FILE"
+find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 \( -name "fieldkit_backup_*" -o -name ".partial-fieldkit_backup_*" -o -name ".fieldkit_backup_*.list" -o -name ".fieldkit_backup_*.keys" \) -type f -mtime +"$RETENTION_DAYS" > "$LIST_FILE"
 while IFS= read -r old; do
     rm -f "$old"
 done < "$LIST_FILE"
-find "$BACKUP_DIR" -name "fieldkit_backup_*" -type d -mtime +"$RETENTION_DAYS" -exec rm -rf {} + 2>/dev/null || true
-# Leftovers of a killed run (hidden .partial- archives and directories).
-find "$BACKUP_DIR" -name ".partial-fieldkit_backup_*" -type f -mtime +"$RETENTION_DAYS" > "$LIST_FILE"
-while IFS= read -r old; do
-    rm -f "$old"
-done < "$LIST_FILE"
-find "$BACKUP_DIR" -name ".partial-fieldkit_backup_*" -type d -mtime +"$RETENTION_DAYS" -exec rm -rf {} + 2>/dev/null || true
+find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 \( -name "fieldkit_backup_*" -o -name ".partial-fieldkit_backup_*" \) -type d -mtime +"$RETENTION_DAYS" -exec rm -rf {} + 2>/dev/null || true
 
 # Show remaining backups
 echo "Remaining backups:"

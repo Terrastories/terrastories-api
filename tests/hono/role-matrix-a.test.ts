@@ -161,6 +161,14 @@ function collect(node: unknown, key: string, acc: unknown[] = []): unknown[] {
   return acc;
 }
 
+/** Every map point of a response must be a place of the foreign community. */
+async function expectPointsOwnedByForeign(points: Array<{ id: number }>) {
+  const foreignPlaces = (await db.select().from(tables.places))
+    .filter((r: any) => r.communityId === ids.foreign)
+    .map((r: any) => r.id);
+  for (const point of points) expect(foreignPlaces).toContain(point.id);
+}
+
 /** Every content row of every community: a denied write must change none. */
 async function allSnapshot(): Promise<string> {
   return JSON.stringify({
@@ -298,14 +306,16 @@ beforeAll(async () => {
     updatedAt: T0,
   });
   // Distinct map configs so a cross-tenant leak is detectable.
-  for (const [communityId, tag, zoom] of [
-    [ids.own!, 'ownmark', 4.25],
-    [ids.foreign!, 'foreignmark', 8.5],
+  for (const [communityId, tag, zoom, centerLatitude, centerLongitude] of [
+    [ids.own!, 'ownmark', 4.25, 61.5, -149.5],
+    [ids.foreign!, 'foreignmark', 8.5, -33.5, 151.5],
   ] as const) {
     await db.insert(tables.communityMapConfigs).values({
       communityId,
       styleUrl: 'https://tiles.example.test/' + tag + '/style.json',
       zoom,
+      centerLatitude,
+      centerLongitude,
       createdAt: T0,
       updatedAt: T0,
     } as any);
@@ -602,6 +612,11 @@ describe('rows 21-45: other-community admin is confined to its own community', (
     });
     expect(res.status).toBe(200);
     expect(collect(res.json, 'slug')).toEqual(['foreign-nation']);
+    const foreignStories = (await db.select().from(tables.stories)).filter(
+      (r: any) => r.communityId === ids.foreign
+    );
+    expect(res.json.data.storiesCount).toBe(foreignStories.length);
+    await expectPointsOwnedByForeign(res.json.data.points);
     expect(collect(res.json, 'id').filter((v) => v === ids.own)).toEqual([]);
     noOwn(res.text);
   });
@@ -615,6 +630,8 @@ describe('rows 21-45: other-community admin is confined to its own community', (
       'https://tiles.example.test/foreignmark/style.json',
     ]);
     expect(collect(res.json, 'zoom')).toEqual([8.5]);
+    expect(collect(res.json, 'centerLatitude')).toEqual([-33.5]);
+    expect(collect(res.json, 'centerLongitude')).toEqual([151.5]);
     noOwn(res.text);
   });
 
@@ -640,6 +657,8 @@ describe('rows 21-45: other-community admin is confined to its own community', (
         .sort((l, r) => l - r);
       expect(returned).toEqual(expected);
       expect(res.json.meta.total).toBe(expected.length);
+      if (table === 'stories')
+        await expectPointsOwnedByForeign(res.json.data.points);
       expect(res.text).toContain(mark);
       noOwn(res.text);
     }

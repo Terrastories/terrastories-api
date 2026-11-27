@@ -578,18 +578,20 @@ export class MediaWritesService {
         );
       }
 
-      const headerBytes = new Uint8Array(
-        Math.min(initialLen, MAGIC_SNIFF_BYTES)
-      );
-      let copyPos = 0;
-      for (const chunk of initialChunks) {
-        if (copyPos >= headerBytes.byteLength) break;
-        const take = Math.min(
-          chunk.byteLength,
-          headerBytes.byteLength - copyPos
-        );
-        headerBytes.set(chunk.subarray(0, take), copyPos);
-        copyPos += take;
+      const headerLen = Math.min(initialLen, MAGIC_SNIFF_BYTES);
+      let headerBytes: Uint8Array;
+      if (initialChunks.length === 1) {
+        // One chunk holds the whole prefix (the common case): view it, no copy.
+        headerBytes = initialChunks[0]!.subarray(0, headerLen);
+      } else {
+        headerBytes = new Uint8Array(headerLen);
+        let copyPos = 0;
+        for (const chunk of initialChunks) {
+          if (copyPos >= headerLen) break;
+          const take = Math.min(chunk.byteLength, headerLen - copyPos);
+          headerBytes.set(chunk.subarray(0, take), copyPos);
+          copyPos += take;
+        }
       }
 
       const headerCheck = await validateMediaHeaderBytes({

@@ -118,13 +118,17 @@ export interface ReplayResult {
   removed: number[];
   /** Identifiers a restored account holds that a missing (post-backup) account also holds. */
   conflicts: Array<{ id: number; column: string; heldBy: number }>;
-  /** 'verified': newest restored audit row found identical in the frozen DB; 'none': restored DB has no audit rows (users/communities checks only); 'skipped': --allow-unrelated-lineage. */
-  lineage: 'verified' | 'none' | 'skipped';
+  /** 'verified': the restored backup is an ancestor of the frozen DB; 'skipped': --allow-unrelated-lineage. */
+  lineage: 'verified' | 'skipped';
 }
 
-const canon = (row: unknown): string =>
+/** Audit columns the scheduled network-metadata scrub may null. */
+const AUDIT_SCRUBBED = ['ip_address', 'user_agent'];
+
+const canon = (row: unknown, exclude: string[] = []): string =>
   JSON.stringify(
     Object.entries(row as Record<string, unknown>)
+      .filter(([k]) => !exclude.includes(k))
       .map(([k, v]) => [k, typeof v === 'bigint' ? v.toString() : v])
       .sort(([a], [b]) => String(a).localeCompare(String(b)))
   );
@@ -142,25 +146,31 @@ const canon = (row: unknown): string =>
 function checkLineage(
   frozen: Database.Database,
   restored: Database.Database
-): 'verified' | 'none' {
+): 'verified' {
   const diverged: string[] = [];
   const newestAudit = restored
     .prepare('SELECT * FROM audit_entries ORDER BY id DESC LIMIT 1')
-    .get();
-  let lineage: 'verified' | 'none' = 'none';
-  if (newestAudit) {
-    lineage = 'verified';
+    .get() as { id: number } | undefined;
+  if (!newestAudit) {
+    // Nothing anchors the lineage: users and communities alone can collide
+    // across lineages, so refuse unless the operator overrides.
+    diverged.push(
+      'restored database has no audit entries, so lineage cannot be anchored'
+    );
+  } else {
     const same = frozen
       .prepare('SELECT * FROM audit_entries WHERE id = ?')
-      .get((newestAudit as { id: number }).id);
-    if (!same || canon(same) !== canon(newestAudit))
+      .get(newestAudit.id);
+    // The only permitted mutation of an audit entry is the scheduled scrub of
+    // ip_address/user_agent (scrubExpiredAuditNetworkMetadata in
+    // audit-entry.repository.ts), so compare the immutable columns only.
+    if (
+      !same ||
+      canon(same, AUDIT_SCRUBBED) !== canon(newestAudit, AUDIT_SCRUBBED)
+    )
       diverged.push(
-        `newest restored audit entry ${(newestAudit as { id: number }).id} is absent or different in the frozen database`
+        `newest restored audit entry ${newestAudit.id} is absent or different in the frozen database`
       );
-  } else {
-    console.warn(
-      'post-restore: restored database has no audit rows; lineage verified from users and communities only'
-    );
   }
   const newestUser = restored
     .prepare(
@@ -193,7 +203,7 @@ function checkLineage(
     throw new Error(
       `post-restore: the frozen database is not a descendant of the restored backup (unrelated lineage): ${diverged.join('; ')}. Nothing was changed. Use --allow-unrelated-lineage only after verifying by hand.`
     );
-  return lineage;
+  return 'verified';
 }
 
 /**
@@ -445,7 +455,9 @@ async function main(argv: string[]): Promise<void> {
   }
   const db = new Database(args.file!, { fileMustExist: true });
   try {
-    const purge = applyPostRestoreSqlite(db);
+    // Replay first: its lineage and identity checks run before any write, so a
+    // refusal leaves the database untouched. The purge follows (it must also
+    // cover credential material the replay just restored).
     let replay: ReplayResult | undefined;
     if (args.replayFrom !== undefined) {
       const frozen = new Database(args.replayFrom, {
@@ -459,9 +471,8 @@ async function main(argv: string[]): Promise<void> {
       } finally {
         frozen.close();
       }
-      // Replay may restore credential material: purge sessions again.
-      applyPostRestoreSqlite(db);
     }
+    const purge = applyPostRestoreSqlite(db);
     console.log(JSON.stringify({ purge, replay }));
   } finally {
     db.close();

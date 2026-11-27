@@ -28,6 +28,7 @@ function makeDb(file: string, active: number) {
     CREATE TABLE users (id INTEGER PRIMARY KEY, created_at INTEGER, is_active INTEGER, role TEXT, community_id INTEGER, password_hash TEXT, password_algorithm TEXT, password_salt TEXT, password_params TEXT, password_verifier TEXT, email TEXT, email_normalized TEXT, username TEXT, username_normalized TEXT, display_name TEXT, first_name TEXT, last_name TEXT);
     CREATE TABLE communities (id INTEGER PRIMARY KEY, slug TEXT, created_at INTEGER);
     INSERT INTO communities VALUES (1, 'a', 1);
+    INSERT INTO audit_entries VALUES (1, 'auth.login', NULL, NULL, '[]', 'success');
     INSERT INTO sessions VALUES ('s');
     INSERT INTO users (id, is_active, role) VALUES (1, ${active}, 'viewer');
   `);
@@ -61,6 +62,29 @@ describe('post-restore CLI', () => {
     });
     expect(check.prepare('SELECT count(*) AS n FROM sessions').get()).toEqual({
       n: 0,
+    });
+    check.close();
+  });
+
+  it('sqlite: an audit-empty restored database is refused and nothing changes', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'tsapi-drill-pr-'));
+    const restored = makeDb(path.join(dir, 'restored.db'), 1);
+    restored.exec('DELETE FROM audit_entries');
+    restored.close();
+    makeDb(path.join(dir, 'frozen.db'), 0).close();
+    const r = run([
+      'sqlite',
+      path.join(dir, 'restored.db'),
+      '--replay-from',
+      path.join(dir, 'frozen.db'),
+      '--after-audit-id',
+      '0',
+    ]);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('no audit entries');
+    const check = new Sqlite(path.join(dir, 'restored.db'));
+    expect(check.prepare('SELECT count(*) AS n FROM sessions').get()).toEqual({
+      n: 1,
     });
     check.close();
   });

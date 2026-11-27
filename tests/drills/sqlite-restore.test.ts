@@ -887,4 +887,43 @@ describe('SQLite field-kit restore drill (#136)', () => {
       'verified'
     );
   });
+
+  it('refuses an audit-empty restored backup even when the user tuples collide', async () => {
+    const { db } = restore('lineage-empty', true);
+    db.prepare('DELETE FROM audit_entries').run();
+    const other = new Sqlite(':memory:');
+    openApps.push(other);
+    other.pragma('foreign_keys = ON');
+    migrate(drizzle(other), { migrationsFolder: 'src/db/migrations' });
+    await seedDrillDataset(drizzle(other));
+    const before = snapshotSqlite(db);
+    expect(() => replayAccountChanges(other, db, 0)).toThrow(
+      /no audit entries.*Nothing was changed/
+    );
+    expect(diffSnapshots(before, snapshotSqlite(db))).toEqual([]);
+  });
+
+  it('still verifies a genuine ancestor after the scheduled ip/user-agent scrub', () => {
+    const { db } = restore('lineage-scrub', true);
+    const saved = live
+      .prepare('SELECT id, ip_address, user_agent FROM audit_entries')
+      .all() as Array<{
+      id: number;
+      ip_address: string | null;
+      user_agent: string | null;
+    }>;
+    live
+      .prepare('UPDATE audit_entries SET ip_address = NULL, user_agent = NULL')
+      .run();
+    try {
+      expect(replayAccountChanges(live, db, auditMarker).lineage).toBe(
+        'verified'
+      );
+    } finally {
+      const put = live.prepare(
+        'UPDATE audit_entries SET ip_address = ?, user_agent = ? WHERE id = ?'
+      );
+      for (const r of saved) put.run(r.ip_address, r.user_agent, r.id);
+    }
+  });
 });

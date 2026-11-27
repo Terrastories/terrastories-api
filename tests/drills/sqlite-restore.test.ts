@@ -472,10 +472,18 @@ describe('SQLite field-kit restore drill (#136)', () => {
   });
 
   it('reverts account changes to backup time and replays them from the frozen database audit log', async () => {
+    // Serving a restored copy writes audit rows, so the "reverted" state is shown
+    // on a separate copy; the copy that is replayed has served no traffic.
+    const demo = restore('replay-demo', true);
+    const demoApp = await buildApp(demo.db, demo.uploads);
     const { db, uploads } = restore('replay', true);
     const app = await buildApp(db, uploads);
-    const loginAs = (email: string, key: string) =>
-      app.request(`${ORIGIN}/v2/auth/login`, {
+    const loginOn = (
+      target: ReturnType<typeof createHonoApp>,
+      email: string,
+      key: string
+    ) =>
+      target.request(`${ORIGIN}/v2/auth/login`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -484,18 +492,18 @@ describe('SQLite field-kit restore drill (#136)', () => {
           communitySlug: 'drill-alpha',
         }),
       });
+    const loginAs = (email: string, key: string) => loginOn(app, email, key);
     // Reverted: the viewer was disabled and the admin changed their own
     // password after the backup, but the restored rows predate both.
-    expect((await loginAs(DRILL_ACCOUNTS.viewerAlpha, DRILL_KEY)).status).toBe(
-      200
-    );
-    expect((await loginAs(DRILL_ACCOUNTS.adminAlpha, DRILL_KEY)).status).toBe(
-      200
-    );
-    expect((await loginAs(DRILL_ACCOUNTS.adminAlpha, newAdminKey)).status).toBe(
-      401
-    );
-    db.prepare('DELETE FROM sessions').run();
+    expect(
+      (await loginOn(demoApp, DRILL_ACCOUNTS.viewerAlpha, DRILL_KEY)).status
+    ).toBe(200);
+    expect(
+      (await loginOn(demoApp, DRILL_ACCOUNTS.adminAlpha, DRILL_KEY)).status
+    ).toBe(200);
+    expect(
+      (await loginOn(demoApp, DRILL_ACCOUNTS.adminAlpha, newAdminKey)).status
+    ).toBe(401);
 
     // Runbook step: replay account changes from the frozen pre-restore database.
     const { replayed, missing } = replayAccountChanges(live, db, auditMarker);
@@ -774,8 +782,8 @@ describe('SQLite field-kit restore drill (#136)', () => {
           communitySlug: 'drill-alpha',
         }),
       });
-    // Restored state is older: the backup-time password still works.
-    expect((await loginAdmin(DRILL_KEY)).status).toBe(200);
+    // (The restored state is older: the backup-time password would still work;
+    // not exercised here because serving writes audit rows before the replay.)
     // Nothing is audited after auditMax, yet the replay restores the newer state.
     const { replayed } = replayAccountChanges(live, db, auditMax);
     expect(replayed).toEqual(
@@ -830,12 +838,53 @@ describe('SQLite field-kit restore drill (#136)', () => {
   it('refuses a replay when an id names a different account, changing nothing', () => {
     const { db } = restore('reused-id', true);
     db.prepare(
-      'UPDATE users SET created_at = created_at + 12345 WHERE id = ?'
+      'UPDATE users SET created_at = created_at - 12345 WHERE id = ?'
     ).run(ids.viewerAlpha);
     const before = snapshotSqlite(db);
     expect(() => replayAccountChanges(live, db, auditMarker)).toThrow(
       new RegExp(`user ids ${ids.viewerAlpha}\\b.*nothing was changed`)
     );
     expect(diffSnapshots(before, snapshotSqlite(db))).toEqual([]);
+  });
+
+  it('refuses a frozen database of an unrelated lineage even when (id, created_at, community_id) collide', async () => {
+    const { db } = restore('lineage', true);
+    // A different lineage seeded identically: same ids, created_at and
+    // community ids, but none of the audit history of the restored backup.
+    const other = new Sqlite(':memory:');
+    openApps.push(other);
+    other.pragma('foreign_keys = ON');
+    migrate(drizzle(other), { migrationsFolder: 'src/db/migrations' });
+    await seedDrillDataset(drizzle(other));
+    const before = snapshotSqlite(db);
+    expect(() => replayAccountChanges(other, db, 0)).toThrow(
+      /unrelated lineage.*Nothing was changed/
+    );
+    expect(diffSnapshots(before, snapshotSqlite(db))).toEqual([]);
+    // The documented, dangerous override skips only the lineage check.
+    expect(
+      replayAccountChanges(other, db, 0, { allowUnrelatedLineage: true })
+        .lineage
+    ).toBe('skipped');
+  });
+
+  it('refuses when a restored community differs in the frozen database', () => {
+    const { db } = restore('lineage-community', true);
+    db.prepare('UPDATE communities SET slug = ? WHERE id = ?').run(
+      'renamed',
+      ids.alpha
+    );
+    const before = snapshotSqlite(db);
+    expect(() => replayAccountChanges(live, db, auditMarker)).toThrow(
+      new RegExp(`community ${ids.alpha} .*differs`)
+    );
+    expect(diffSnapshots(before, snapshotSqlite(db))).toEqual([]);
+  });
+
+  it('accepts a true ancestor and reports the lineage as verified', () => {
+    const { db } = restore('lineage-ok', true);
+    expect(replayAccountChanges(live, db, auditMarker).lineage).toBe(
+      'verified'
+    );
   });
 });

@@ -118,6 +118,82 @@ export interface ReplayResult {
   removed: number[];
   /** Identifiers a restored account holds that a missing (post-backup) account also holds. */
   conflicts: Array<{ id: number; column: string; heldBy: number }>;
+  /** 'verified': newest restored audit row found identical in the frozen DB; 'none': restored DB has no audit rows (users/communities checks only); 'skipped': --allow-unrelated-lineage. */
+  lineage: 'verified' | 'none' | 'skipped';
+}
+
+const canon = (row: unknown): string =>
+  JSON.stringify(
+    Object.entries(row as Record<string, unknown>)
+      .map(([k, v]) => [k, typeof v === 'bigint' ? v.toString() : v])
+      .sort(([a], [b]) => String(a).localeCompare(String(b)))
+  );
+
+/**
+ * Lineage check (fail closed, before any write): the restored backup must be
+ * an ancestor of the frozen database. Matching on id/created_at alone is not
+ * enough: a frozen database of a different lineage (for example Rails-derived,
+ * keeping source ids and created_at) can reuse the same tuples. Requires the
+ * restored database's newest audit row to exist identically (all columns) in
+ * the frozen one, its newest user (id, created_at) to exist there, and every
+ * restored community (id, slug, created_at) to exist there. Without audit rows
+ * only the users/communities checks run.
+ */
+function checkLineage(
+  frozen: Database.Database,
+  restored: Database.Database
+): 'verified' | 'none' {
+  const diverged: string[] = [];
+  const newestAudit = restored
+    .prepare('SELECT * FROM audit_entries ORDER BY id DESC LIMIT 1')
+    .get();
+  let lineage: 'verified' | 'none' = 'none';
+  if (newestAudit) {
+    lineage = 'verified';
+    const same = frozen
+      .prepare('SELECT * FROM audit_entries WHERE id = ?')
+      .get((newestAudit as { id: number }).id);
+    if (!same || canon(same) !== canon(newestAudit))
+      diverged.push(
+        `newest restored audit entry ${(newestAudit as { id: number }).id} is absent or different in the frozen database`
+      );
+  } else {
+    console.warn(
+      'post-restore: restored database has no audit rows; lineage verified from users and communities only'
+    );
+  }
+  const newestUser = restored
+    .prepare(
+      'SELECT id, created_at FROM users ORDER BY created_at DESC, id DESC LIMIT 1'
+    )
+    .get() as { id: number; created_at: unknown } | undefined;
+  if (newestUser) {
+    const same = frozen
+      .prepare('SELECT id, created_at FROM users WHERE id = ?')
+      .get(newestUser.id);
+    if (!same || canon(same) !== canon(newestUser))
+      diverged.push(
+        `newest restored user ${newestUser.id} (id, created_at) differs in the frozen database`
+      );
+  }
+  const communities = restored
+    .prepare('SELECT id, slug, created_at FROM communities')
+    .all();
+  const frozenCommunity = frozen.prepare(
+    'SELECT id, slug, created_at FROM communities WHERE id = ?'
+  );
+  for (const c of communities) {
+    const same = frozenCommunity.get((c as { id: number }).id);
+    if (!same || canon(same) !== canon(c))
+      diverged.push(
+        `community ${(c as { id: number }).id} (id, slug, created_at) differs in the frozen database`
+      );
+  }
+  if (diverged.length > 0)
+    throw new Error(
+      `post-restore: the frozen database is not a descendant of the restored backup (unrelated lineage): ${diverged.join('; ')}. Nothing was changed. Use --allow-unrelated-lineage only after verifying by hand.`
+    );
+  return lineage;
 }
 
 /**
@@ -132,8 +208,11 @@ export function replayAccountChanges(
   frozen: Database.Database,
   restored: Database.Database,
   afterAuditId: number,
-  options: { tempSource?: () => string } = {}
+  options: { tempSource?: () => string; allowUnrelatedLineage?: boolean } = {}
 ): ReplayResult {
+  const lineage = options.allowUnrelatedLineage
+    ? 'skipped'
+    : checkLineage(frozen, restored);
   const placeholders = ACCOUNT_CHANGE_AUDIT_ACTIONS.map(() => '?').join(',');
   const entries = frozen
     .prepare(
@@ -206,6 +285,7 @@ export function replayAccountChanges(
     missing: [],
     removed: [],
     conflicts: [],
+    lineage,
   };
   // Unique identifiers (email/username and their normalized forms) can be
   // swapped between users after the backup, or still held by an account that
@@ -312,6 +392,7 @@ function parseArgs(argv: string[]): {
   file?: string;
   replayFrom?: string;
   afterAuditId?: number;
+  allowUnrelatedLineage?: boolean;
 } {
   const [profile, ...rest] = argv;
   if (profile === 'postgres') {
@@ -329,7 +410,11 @@ function parseArgs(argv: string[]): {
   const out: ReturnType<typeof parseArgs> = { profile, file: rest[0] };
   for (let i = 1; i < rest.length; i += 2) {
     if (rest[i] === '--replay-from') out.replayFrom = rest[i + 1];
-    else if (rest[i] === '--after-audit-id') {
+    else if (rest[i] === '--allow-unrelated-lineage') {
+      // DANGEROUS: skips the ancestry check; ids may name different people.
+      out.allowUnrelatedLineage = true;
+      i -= 1; // flag takes no value
+    } else if (rest[i] === '--after-audit-id') {
       // NaN would bind as NULL and silently replay nothing.
       if (
         !/^\d+$/.test(rest[i + 1] ?? '') ||
@@ -368,7 +453,9 @@ async function main(argv: string[]): Promise<void> {
         fileMustExist: true,
       });
       try {
-        replay = replayAccountChanges(frozen, db, args.afterAuditId!);
+        replay = replayAccountChanges(frozen, db, args.afterAuditId!, {
+          allowUnrelatedLineage: args.allowUnrelatedLineage,
+        });
       } finally {
         frozen.close();
       }

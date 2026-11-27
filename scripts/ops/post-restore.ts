@@ -18,6 +18,7 @@
  *   npx tsx scripts/ops/post-restore.ts sqlite <restored-file> [--replay-from <frozen-db> --after-audit-id <n>]
  *   DATABASE_URL=postgresql://... npx tsx scripts/ops/post-restore.ts postgres
  */
+import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
 import postgres from 'postgres';
 
@@ -160,8 +161,12 @@ export function replayAccountChanges(
   // swapped between users after the backup; applying finals one user at a time
   // would hit a unique conflict mid-replay. Stage every affected user onto
   // unique temporary values first, in the same transaction, then apply finals.
+  // Temporaries carry a per-run random token and spaces, which no valid
+  // username or email contains, so they cannot equal a stored or final value.
+  const token = randomUUID();
+  const tmp = (id: number) => `replay tmp ${token} ${id}`;
   const stage = restored.prepare(
-    "UPDATE users SET username = 'replay-tmp-' || id, username_normalized = 'replay-tmp-' || id, email = 'replay-tmp-' || id || '@replay.invalid', email_normalized = 'replay-tmp-' || id || '@replay.invalid' WHERE id = ?"
+    'UPDATE users SET username = @t, username_normalized = @t, email = @e, email_normalized = @e WHERE id = @id'
   );
   restored.transaction(() => {
     const rows: Array<{ id: number; row: Record<string, unknown> }> = [];
@@ -170,7 +175,11 @@ export function replayAccountChanges(
         .prepare(`SELECT ${cols} FROM users WHERE id = ?`)
         .get(id) as Record<string, unknown> | undefined;
       if (!row) continue;
-      if (stage.run(id).changes === 0) result.missing.push(id);
+      if (
+        stage.run({ id, t: tmp(id), e: `${tmp(id)}@replay.invalid` })
+          .changes === 0
+      )
+        result.missing.push(id);
       else rows.push({ id, row });
     }
     for (const { id, row } of rows) {

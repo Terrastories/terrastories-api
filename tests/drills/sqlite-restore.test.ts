@@ -548,6 +548,13 @@ describe('SQLite field-kit restore drill (#136)', () => {
         JSON.stringify([ids.editorAlpha, ids.viewerAlpha]),
         Date.now()
       );
+    // An unrelated restored account already holds the old temporary pattern.
+    db.prepare(
+      "UPDATE users SET username = 'replay-tmp-' || id, username_normalized = 'replay-tmp-' || id WHERE id = ?"
+    ).run(ids.adminBeta);
+    const adminBetaBefore = db
+      .prepare('SELECT username FROM users WHERE id = ?')
+      .get(ids.adminBeta);
     const { replayed } = replayAccountChanges(live, db, auditMarker);
     expect(replayed).toEqual(
       expect.arrayContaining([ids.editorAlpha, ids.viewerAlpha])
@@ -556,6 +563,9 @@ describe('SQLite field-kit restore drill (#136)', () => {
       .prepare(`SELECT ${cols} FROM users WHERE id = ?`)
       .get(ids.editorAlpha);
     expect(restoredEditor).toEqual(b);
+    expect(
+      db.prepare('SELECT username FROM users WHERE id = ?').get(ids.adminBeta)
+    ).toEqual(adminBetaBefore);
   });
 
   it('reports users created after the backup that have no restored row', () => {

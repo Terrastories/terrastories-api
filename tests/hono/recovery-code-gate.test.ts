@@ -23,7 +23,12 @@ describe('recovery-code gate (#254)', () => {
     while (openDbs.length > 0) openDbs.pop()?.close();
   });
 
-  async function setup(role: 'admin' | 'member', gate: boolean) {
+  async function setup(
+    role: 'admin' | 'member',
+    gate: boolean,
+    dropGates = false,
+    staleSeen = false
+  ) {
     const sqlite = new Sqlite(':memory:');
     sqlite.pragma('foreign_keys = ON');
     openDbs.push(sqlite);
@@ -66,12 +71,22 @@ describe('recovery-code gate (#254)', () => {
         user.id,
         nowMs + 12 * 3600_000,
         nowMs,
-        nowMs,
+        staleSeen ? nowMs - 3600_000 : nowMs,
         nowMs + 12 * 3600_000,
         nowMs + 30 * 24 * 3600_000
       );
+    const repository = new HonoFoundationRepository(db);
+    if (dropGates) {
+      // A repository that answers the session but omits the gate state.
+      const original = repository.sessionContext.bind(repository);
+      repository.sessionContext = async (...args) => {
+        const context = await original(...args);
+        if (context) delete context.gates;
+        return context;
+      };
+    }
     const app = createHonoApp({
-      repository: new HonoFoundationRepository(db),
+      repository,
       storage: { read: async () => null },
       serverSecret: makeServerSecret(),
       secureCookies: false,
@@ -94,7 +109,7 @@ describe('recovery-code gate (#254)', () => {
         supersededAt: null,
       });
     };
-    return { get, grantCode };
+    return { get, grantCode, sqlite, communityId: community.id, db };
   }
 
   it('denies an administrator without recovery codes everything but /v2/auth/*', async () => {
@@ -122,6 +137,80 @@ describe('recovery-code gate (#254)', () => {
   it('is opt-in per app instance', async () => {
     const { get } = await setup('admin', false);
     expect((await get('/v2/stories')).status).toBe(200);
+  });
+
+  it('fails closed when the session read returns no gate state', async () => {
+    const { get } = await setup('member', true, true);
+    expect((await get('/v2/stories')).status).toBe(403);
+    const admin = await setup('admin', true, true);
+    expect((await admin.get('/v2/stories')).status).toBe(403);
+  });
+
+  const insertErasure = (
+    sqlite: Sqlite.Database,
+    communityId: number,
+    state: string
+  ) =>
+    sqlite
+      .prepare(
+        `INSERT INTO community_sovereignty_requests (id, community_id, kind, state, initiated_by_role, requested_at, updated_at)
+         VALUES (?, ?, 'erasure', ?, 'admin', 1, 1)`
+      )
+      .run(`req-${communityId}-${state}`, communityId, state);
+
+  it('denies a member of a community with a pending erasure, from the real predicate', async () => {
+    for (const state of ['requested', 'executing']) {
+      const { get, sqlite, communityId } = await setup('member', true);
+      expect((await get('/v2/stories')).status).toBe(200);
+      insertErasure(sqlite, communityId, state);
+      expect((await get('/v2/stories')).status).toBe(403);
+    }
+  });
+
+  it('leaves a community without a pending erasure accessible', async () => {
+    const { get, sqlite } = await setup('member', true);
+    const other = sqlite
+      .prepare(
+        `INSERT INTO communities (name, slug, public_stories, is_active, created_at, updated_at) VALUES ('Other', 'other', 1, 1, 1, 1)`
+      )
+      .run().lastInsertRowid;
+    insertErasure(sqlite, Number(other), 'requested');
+    expect((await get('/v2/stories')).status).toBe(200);
+  });
+
+  it('denies recovery independently on an erasure-exempt path when gates are missing', async () => {
+    const { get } = await setup('admin', true, true);
+    const res = await get('/v2/community/sovereignty');
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({
+      code: 'recovery_codes_required',
+    });
+  });
+
+  it('sees an erasure fence committed during the session touch', async () => {
+    const { get, sqlite, communityId } = await setup(
+      'member',
+      true,
+      false,
+      true
+    );
+    // The erasure request commits while the session touch runs: after the
+    // joined read, before the response gate decision.
+    sqlite.exec(`CREATE TRIGGER fence_during_touch AFTER UPDATE OF last_seen_at ON sessions
+      BEGIN
+        INSERT INTO community_sovereignty_requests (id, community_id, kind, state, initiated_by_role, requested_at, updated_at)
+        VALUES ('req-race', ${communityId}, 'erasure', 'requested', 'admin', 1, 1);
+      END`);
+    expect((await get('/v2/stories')).status).toBe(403);
+  });
+
+  it('answers 401 when the account is deleted during the session touch', async () => {
+    const { get, sqlite } = await setup('member', true, false, true);
+    sqlite.exec(`CREATE TRIGGER delete_during_touch AFTER UPDATE OF last_seen_at ON sessions
+      BEGIN
+        DELETE FROM users WHERE id = NEW.user_id;
+      END`);
+    expect((await get('/v2/stories')).status).toBe(401);
   });
 
   it('is enabled by both production entrypoints', () => {

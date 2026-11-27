@@ -16,6 +16,7 @@ import { HonoFoundationRepository } from '../../src/repositories/hono-foundation
 import {
   ARGON2ID_ALGORITHM,
   ARGON2ID_PARAMS,
+  AUTH_LOGIN_FAILURE_BODY,
 } from '../../src/shared/auth-policy.js';
 import { deriveUserIdentityColumns } from '../../src/shared/utils/derived-columns.js';
 import {
@@ -137,6 +138,27 @@ async function ownSnapshot(): Promise<string> {
     storyPlaces: await db.select().from(tables.storyPlaces),
     storySpeakers: await db.select().from(tables.storySpeakers),
   });
+}
+
+/** A cross-tenant or hidden denial must be exactly the missing-id answer. */
+function expectSameAsMissing(
+  res: { status: number; json: unknown },
+  missing: { status: number; json: unknown }
+) {
+  expect(missing.status).toBe(404);
+  expect(res.status).toBe(missing.status);
+  expect(res.json).toEqual(missing.json);
+}
+
+/** Collect every value stored under `key` anywhere in a JSON tree. */
+function collect(node: unknown, key: string, acc: unknown[] = []): unknown[] {
+  if (Array.isArray(node)) node.forEach((n) => collect(n, key, acc));
+  else if (node && typeof node === 'object')
+    for (const [k, v] of Object.entries(node)) {
+      if (k === key) acc.push(v);
+      collect(v, key, acc);
+    }
+  return acc;
 }
 
 /** Every content row of every community: a denied write must change none. */
@@ -370,7 +392,8 @@ describe('rows 15-20: public community content, editor allowed', () => {
       expect(anon.status).toBe(404);
       expect(editor.status).toBe(404);
       expect(editor.json).toEqual(anon.json);
-      expect(editor.json).toEqual(missing.json);
+      expectSameAsMissing(anon, missing);
+      expectSameAsMissing(editor, missing);
       expect(editor.text).not.toContain('Hiddenmark');
     }
   );
@@ -413,7 +436,7 @@ describe('rows 3-6: own-account routes', () => {
       const before = await sessionRows();
       const res = await call('POST', path);
       expect(res.status).toBe(401);
-      expect(res.json).toEqual({ error: expect.any(String) });
+      expect(res.json).toEqual({ error: 'Unauthorized' });
       expect(res.text).not.toContain(bystander.email);
       expect(await sessionRows()).toBe(before);
       expect(await meStatus(bystander.cookie)).toBe(200);
@@ -489,6 +512,7 @@ describe('rows 3-6: own-account routes', () => {
       body: passwordBody(makeDerivedKey(), makeDerivedKey()),
     });
     expect(res.status).toBe(401);
+    expect(res.json).toEqual(AUTH_LOGIN_FAILURE_BODY);
     expect(await userRow(a.id)).toBe(users);
     expect(await sessionRows()).toBe(sessions);
     expect(await meStatus(a.cookie)).toBe(200);
@@ -559,7 +583,7 @@ describe('rows 29-35: story writes, anonymous denied', () => {
       const before = await allSnapshot();
       const res = await call(method, path(), { body: body() });
       expect(res.status).toBe(401);
-      expect(res.json).toEqual({ error: expect.any(String) });
+      expect(res.json).toEqual({ error: 'Unauthorized' });
       expect(res.text).not.toContain('Ownmark');
       expect(await allSnapshot()).toBe(before);
     }
@@ -577,7 +601,8 @@ describe('rows 21-45: other-community admin is confined to its own community', (
       cookie: cookies.foreignAdmin,
     });
     expect(res.status).toBe(200);
-    expect(res.text).toContain('foreign-nation');
+    expect(collect(res.json, 'slug')).toEqual(['foreign-nation']);
+    expect(collect(res.json, 'id').filter((v) => v === ids.own)).toEqual([]);
     noOwn(res.text);
   });
 
@@ -586,19 +611,35 @@ describe('rows 21-45: other-community admin is confined to its own community', (
       cookie: cookies.foreignAdmin,
     });
     expect(res.status).toBe(200);
-    expect(res.text).toContain('tiles.example.test/foreignmark/style.json');
+    expect(collect(res.json, 'styleUrl')).toEqual([
+      'https://tiles.example.test/foreignmark/style.json',
+    ]);
+    expect(collect(res.json, 'zoom')).toEqual([8.5]);
     noOwn(res.text);
   });
 
   it.each([
-    ['/v2/stories', 'Foreignmark Story'],
-    ['/v2/places', 'Foreignmark Place'],
-    ['/v2/speakers', 'Foreignmark Speaker'],
-  ])(
-    'GET %s lists the caller records and none of the other',
-    async (path, mark) => {
+    ['/v2/stories', 'stories', 'Foreignmark Story'],
+    ['/v2/places', 'places', 'Foreignmark Place'],
+    ['/v2/speakers', 'speakers', 'Foreignmark Speaker'],
+  ] as const)(
+    'GET %s returns exactly the caller community records and total',
+    async (path, table, mark) => {
       const res = await call('GET', path, { cookie: cookies.foreignAdmin });
       expect(res.status).toBe(200);
+      const expected = (await db.select().from(tables[table]))
+        .filter((r: any) => r.communityId === ids.foreign)
+        .map((r: any) => r.id)
+        .sort((l: number, r: number) => l - r);
+      const returned = (
+        (Array.isArray(res.json.data)
+          ? res.json.data
+          : res.json.data.stories) as Array<{ id: number }>
+      )
+        .map((r) => r.id)
+        .sort((l, r) => l - r);
+      expect(returned).toEqual(expected);
+      expect(res.json.meta.total).toBe(expected.length);
       expect(res.text).toContain(mark);
       noOwn(res.text);
     }
@@ -618,8 +659,7 @@ describe('rows 21-45: other-community admin is confined to its own community', (
       const missing = await call('GET', prefix + '999999', {
         cookie: cookies.foreignAdmin,
       });
-      expect(res.status).toBe(404);
-      expect(res.json).toEqual(missing.json);
+      expectSameAsMissing(res, missing);
       noOwn(res.text);
       expect(await allSnapshot()).toBe(before);
     }
@@ -671,37 +711,65 @@ describe('rows 21-45: other-community admin is confined to its own community', (
         cookie: cookies.foreignAdmin,
         body: body(),
       });
-      expect(res.status).toBe(404);
-      expect(res.json).toEqual(missing.json);
+      expectSameAsMissing(res, missing);
       noOwn(res.text);
       expect(await allSnapshot()).toBe(before);
     }
   );
 
   it('PATCH /v2/community and PUT /v2/community/map-config act on the caller community only', async () => {
-    const own = await ownSnapshot();
+    // A dedicated fourth community keeps this write off the shared foreign fixture.
+    const putCommunity = await insertRow(tables.communities, {
+      name: 'Put Nation',
+      slug: 'put-nation',
+      locale: 'en',
+      publicStories: true,
+      isActive: true,
+      createdAt: T0,
+      updatedAt: T0,
+    });
+    await db.insert(tables.communityMapConfigs).values({
+      communityId: putCommunity,
+      styleUrl: 'https://tiles.example.test/putmark/style.json',
+      zoom: 2,
+      createdAt: T0,
+      updatedAt: T0,
+    } as any);
+    const putAdmin = await makeUser('admin', putCommunity, 'putadmin');
+    const cookie = await loginOk(putAdmin.email, 'put-nation');
+    const everyoneElse = async () =>
+      JSON.stringify({
+        own: await ownSnapshot(),
+        foreign: (await db.select().from(tables.communities)).filter(
+          (r: any) => r.id === ids.foreign
+        ),
+        foreignCfg: (await db.select().from(tables.communityMapConfigs)).filter(
+          (r: any) => r.communityId === ids.foreign
+        ),
+      });
+    const before = await everyoneElse();
     const patch = await call('PATCH', '/v2/community', {
-      cookie: cookies.foreignAdmin,
-      body: { name: 'Foreign Renamed' },
+      cookie,
+      body: { name: 'Put Renamed' },
     });
     expect(patch.status).toBe(200);
     const put = await call('PUT', '/v2/community/map-config', {
-      cookie: cookies.foreignAdmin,
-      body: { styleUrl: 'https://tiles.example.test/foreign-put/style.json' },
+      cookie,
+      body: { styleUrl: 'https://tiles.example.test/put-written/style.json' },
     });
     expect(put.status).toBe(200);
-    expect(await ownSnapshot()).toBe(own);
-    const [foreign] = await db
+    expect(await everyoneElse()).toBe(before);
+    const [row] = await db
       .select()
       .from(tables.communities)
-      .where(eq(tables.communities.id, ids.foreign!));
-    expect(foreign!.name).toBe('Foreign Renamed');
+      .where(eq(tables.communities.id, putCommunity));
+    expect(row!.name).toBe('Put Renamed');
     const [cfg] = await db
       .select()
       .from(tables.communityMapConfigs)
-      .where(eq(tables.communityMapConfigs.communityId, ids.foreign!));
+      .where(eq(tables.communityMapConfigs.communityId, putCommunity));
     expect(cfg!.styleUrl).toBe(
-      'https://tiles.example.test/foreign-put/style.json'
+      'https://tiles.example.test/put-written/style.json'
     );
   });
 

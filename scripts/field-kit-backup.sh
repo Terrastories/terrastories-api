@@ -104,6 +104,9 @@ if [ -d "$UPLOADS_DIR" ]; then
     done < "$WORK_PATH/uploads_manifest.txt"
 fi
 
+# Rows never precede their bytes (storage.put before the files row: media-writes.service.ts
+# uploadMedia/registerStagedUpload, direct-upload.service.ts adapter.complete, imports.service.ts
+# staged put), so no row state is excluded below.
 # Coherence check: the uploads were copied after the database snapshot, so a file
 # deleted in between would leave a database row without bytes. Every storage
 # key a backed-up database references must exist in the archive.

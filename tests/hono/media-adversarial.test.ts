@@ -7,12 +7,13 @@
  * the byte store changed; the owner re-reads the file afterwards.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
-import { eq } from 'drizzle-orm';
+import { eq, getTableColumns } from 'drizzle-orm';
 import {
   argon2Seed,
   makeDerivedKey,
@@ -30,6 +31,7 @@ import {
   MediaMetadataResponseSchema,
   MediaUploadResponseSchema,
 } from '../../src/shared/schemas/media-v2.js';
+import { DirectUploadSessionResponseSchema } from '../../src/shared/schemas/media-uploads-v2.js';
 import { deriveUserIdentityColumns } from '../../src/shared/utils/derived-columns.js';
 
 const sqlite = new Sqlite(':memory:');
@@ -78,6 +80,8 @@ const WAV = (() => {
 })();
 
 type Entry = { bytes: Uint8Array; contentType?: string };
+/** Bytes any storage put() consumed; lets a test prove a guard stopped early. */
+const counters = { putBytes: 0 };
 function createMemoryStorage(): {
   store: Map<string, Entry>;
   storage: FoundationStorage;
@@ -95,16 +99,24 @@ function createMemoryStorage(): {
       };
     },
     async put(storageKey, stream, opts) {
-      const reader = stream.getReader();
       const chunks: Uint8Array[] = [];
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value) chunks.push(value);
+      if (stream instanceof Uint8Array) {
+        chunks.push(stream);
+        counters.putBytes += stream.byteLength;
+      } else {
+        const reader = stream.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            chunks.push(value);
+            counters.putBytes += value.byteLength;
+          }
+        }
       }
       const merged = concat(...chunks);
       assertPutSha256(merged, opts?.sha256);
-      store.set(storageKey, { bytes: merged, contentType: opts.contentType });
+      store.set(storageKey, { bytes: merged, contentType: opts?.contentType });
       return { size: merged.byteLength };
     },
     async delete(storageKey) {
@@ -196,21 +208,68 @@ async function snapshot() {
     attachments,
     bytes: [...memStore.entries()].map(([k, v]) => [
       k,
+      v.contentType ?? null,
       Buffer.from(v.bytes).toString('base64'),
     ]),
   });
 }
 
+/** Strings that must never appear in any denial body. */
+const leaks: string[] = [];
+
+const LEAK_HEADERS = [
+  'content-disposition',
+  'content-range',
+  'accept-ranges',
+  'etag',
+];
+
+/**
+ * Exact status, unchanged state, and a non-disclosing response: a JSON error
+ * envelope, no file headers, no leaked names/ids/keys, and (for concealed
+ * resources) a body identical to a request for a valid nonexistent resource.
+ */
 async function expectDenied(
   label: string,
   run: () => Promise<Response>,
-  status: number
+  status: number,
+  control?: () => Promise<Response>
 ) {
   const before = await snapshot();
   const res = await run();
+  const text = await res.text();
   expect(res.status, label).toBe(status);
   expect(await snapshot(), label + ' changed state').toBe(before);
+  expect(res.headers.get('content-type') ?? '', label).toMatch(
+    /application\/json/
+  );
+  const parsed = JSON.parse(text) as Record<string, unknown>;
+  expect(typeof parsed.error, label + ' envelope').toBe('string');
+  for (const h of LEAK_HEADERS) {
+    expect(res.headers.get(h), label + ' ' + h).toBeNull();
+  }
+  for (const secret of [...leaks, 'communities/', 'storageKey', 'checksum']) {
+    expect(text, label + ' leaked ' + secret).not.toContain(secret);
+  }
+  if (control) {
+    const ctl = await control();
+    expect(ctl.status, label + ' control').toBe(status);
+    expect(text, label + ' differs from nonexistent').toBe(await ctl.text());
+  }
   return res;
+}
+
+/** Parses Set-Cookie: only the session cookie, only known attributes. */
+function expectOnlySessionCookie(res: Response) {
+  const raw = res.headers.get('set-cookie');
+  if (raw === null) return;
+  const [pair, ...attrs] = raw.split(';').map((x) => x.trim());
+  expect(pair!.split('=')[0]).toBe('ts_session');
+  for (const attr of attrs) {
+    expect(attr.split('=')[0]!.toLowerCase()).toMatch(
+      /^(max-age|path|httponly|samesite|secure|expires)$/
+    );
+  }
 }
 
 function expectSafeDownload(res: Response) {
@@ -220,8 +279,7 @@ function expectSafeDownload(res: Response) {
     "default-src 'none'; sandbox"
   );
   expect(res.headers.get('cache-control')).toBe('no-store');
-  // A rolling session cookie may ride along; it must never carry file input.
-  expect(res.headers.get('set-cookie') ?? '').not.toMatch(/pwn|filename/i);
+  expectOnlySessionCookie(res);
 }
 
 describe('media adversarial suite on the Hono V2 app (#140)', () => {
@@ -266,7 +324,10 @@ describe('media adversarial suite on the Hono V2 app (#140)', () => {
       });
     };
     ids.viewerA = await mkUser('viewer@a.test', 'viewer', ids.a);
+    ids.memberA = await mkUser('member@a.test', 'member', ids.a);
     ids.editorA = await mkUser('editor@a.test', 'editor', ids.a);
+    ids.editorA2 = await mkUser('editor2@a.test', 'editor', ids.a);
+    ids.adminA = await mkUser('admin@a.test', 'admin', ids.a);
     ids.editorB = await mkUser('editor@b.test', 'editor', ids.b);
     ids.adminB = await mkUser('admin@b.test', 'admin', ids.b);
     ids.superAdmin = await mkUser('super@system.test', 'super_admin', null);
@@ -296,7 +357,10 @@ describe('media adversarial suite on the Hono V2 app (#140)', () => {
       mediaCleanup: new MediaCleanupCoordinator(db, mem.storage),
     });
     cookies.viewerA = await loginAs('viewer@a.test');
+    cookies.memberA = await loginAs('member@a.test');
     cookies.editorA = await loginAs('editor@a.test');
+    cookies.editorA2 = await loginAs('editor2@a.test');
+    cookies.adminA = await loginAs('admin@a.test');
     cookies.editorB = await loginAs('editor@b.test');
     cookies.adminB = await loginAs('admin@b.test');
     cookies.superAdmin = await loginAs('super@system.test');
@@ -369,7 +433,15 @@ describe('media adversarial suite on the Hono V2 app (#140)', () => {
             range: 'bytes=0-3',
           });
           expect(ranged.status).toBe(206);
+          expect(ranged.headers.get('content-type')).toBe(contentType);
+          expect(ranged.headers.get('content-range')).toBe(
+            'bytes 0-3/' + bytes.byteLength
+          );
+          expect(ranged.headers.get('content-length')).toBe('4');
           expectSafeDownload(ranged);
+          expect(new Uint8Array(await ranged.arrayBuffer())).toEqual(
+            bytes.subarray(0, 4)
+          );
         }
       );
     }
@@ -483,8 +555,10 @@ describe('media adversarial suite on the Hono V2 app (#140)', () => {
           expectSafeDownload(res);
           for (const [name, value] of res.headers) {
             expect(value, name).not.toMatch(/[\r\n"]/);
-            expect(value, name).not.toContain(created.originalName);
             expect(value, name).toMatch(/^[\x20-\x7e]*$/);
+            if (name !== 'set-cookie') {
+              expect(value, name).not.toContain(created.originalName);
+            }
           }
         }
       );
@@ -558,6 +632,39 @@ describe('media adversarial suite on the Hono V2 app (#140)', () => {
   });
 
   describe('zero-byte and oversize bodies', () => {
+    const MIB = 1024 * 1024;
+    /** A pull-driven multi-chunk request body; counts chunks the server read. */
+    function streamed(chunks: Uint8Array[], contentLength?: number) {
+      const state = { pulled: 0 };
+      let next = 0;
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          const chunk = chunks[next++];
+          if (!chunk) return controller.close();
+          state.pulled += 1;
+          controller.enqueue(chunk);
+        },
+      });
+      const digest = createHash('sha256');
+      for (const c of chunks) digest.update(c);
+      const headers: Record<string, string> = {
+        'content-type': 'image/png',
+        'x-content-sha256': digest.digest('hex'),
+        cookie: cookies.editorA!,
+        origin: ORIGIN,
+      };
+      if (contentLength !== undefined) {
+        headers['content-length'] = String(contentLength);
+      }
+      const request = new Request(API + '/v2/media?filename=big.png', {
+        method: 'POST',
+        headers,
+        body,
+        duplex: 'half',
+      } as RequestInit);
+      return { request, state };
+    }
+
     it('rejects an empty body with 400, with and without Content-Length', async () => {
       for (const omitContentLength of [false, true]) {
         await expectDenied(
@@ -575,46 +682,48 @@ describe('media adversarial suite on the Hono V2 app (#140)', () => {
       }
     });
 
-    it('rejects an image above the per-type cap with 413 (declared and chunked) and stores nothing', async () => {
+    it('rejects a declared image above the per-type cap with 413 and stores nothing', async () => {
       const over = new Uint8Array(MAX_IMAGE_UPLOAD_BYTES + 1);
       over.set(PNG, 0);
-      for (const omitContentLength of [false, true]) {
-        await expectDenied(
-          'oversize ' + omitContentLength,
-          () =>
-            upload({
-              cookie: cookies.editorA,
-              filename: 'huge.png',
-              contentType: 'image/png',
-              bytes: over,
-              omitContentLength,
-            }),
-          413
-        );
-      }
-    });
-
-    it('rejects a Content-Length above the global ceiling with 413', async () => {
-      const raw = rawUploadRequest({
-        filename: 'lie.png',
-        contentType: 'image/png',
-        bytes: PNG,
-      });
       await expectDenied(
-        'ceiling',
+        'oversize declared',
         () =>
-          app.request(API + '/v2/media' + raw.search, {
-            method: 'POST',
-            headers: {
-              ...raw.headers,
-              cookie: cookies.editorA,
-              origin: ORIGIN,
-              'content-length': String(101 * 1024 * 1024),
-            },
-            body: raw.body,
+          upload({
+            cookie: cookies.editorA,
+            filename: 'huge.png',
+            contentType: 'image/png',
+            bytes: over,
           }),
         413
       );
+    });
+
+    it('stops a chunked image without Content-Length at the cap: 413, nothing stored, bounded bytes into storage', async () => {
+      const chunks = Array.from({ length: 12 }, () => new Uint8Array(MIB));
+      chunks[0]!.set(PNG, 0);
+      const before = await snapshot();
+      const putBefore = counters.putBytes;
+      const { request, state } = streamed(chunks);
+      const res = await app.request(request);
+      expect(res.status).toBe(413);
+      expect(await snapshot()).toBe(before);
+      expect(counters.putBytes - putBefore).toBeLessThanOrEqual(
+        MAX_IMAGE_UPLOAD_BYTES + MIB
+      );
+    });
+
+    it('rejects a Content-Length above the global ceiling with 413 before reading any body byte', async () => {
+      const chunks = Array.from({ length: 12 }, () => new Uint8Array(MIB));
+      chunks[0]!.set(PNG, 0);
+      const { request, state } = streamed(chunks, 101 * MIB);
+      const putBefore = counters.putBytes;
+      const before = await snapshot();
+      const res = await app.request(request);
+      expect(res.status).toBe(413);
+      // At most the stream's own one-chunk prefetch; nothing reaches storage.
+      expect(state.pulled).toBeLessThanOrEqual(1);
+      expect(counters.putBytes).toBe(putBefore);
+      expect(await snapshot()).toBe(before);
     });
   });
 
@@ -658,7 +767,7 @@ describe('media adversarial suite on the Hono V2 app (#140)', () => {
       expect(new Uint8Array(await res.arrayBuffer())).toEqual(header);
     });
 
-    it('guard: the V2 media path imports no image or archive decoder', () => {
+    it('guard: nothing reachable from the Hono entrypoints imports an image or archive decoder', () => {
       // sharp is a dependency, but only the legacy Fastify file.service uses it.
       const decoders = [
         'sharp',
@@ -677,55 +786,91 @@ describe('media adversarial suite on the Hono V2 app (#140)', () => {
         'pako',
         'node-stream-zip',
       ];
-      const walk = (dir: string): string[] =>
-        readdirSync(dir).flatMap((entry) => {
-          const full = join(dir, entry);
-          if (statSync(full).isDirectory()) return walk(full);
-          return full.endsWith('.ts') ? [full] : [];
-        });
-      const escaped = decoders.map((d) => d.replace(/[/@.-]/g, '\\$&'));
-      const importPattern = new RegExp(
-        'from\\s+[\'"](' + escaped.join('|') + ')[\'"]'
-      );
-      const legacy = join('src', 'services', 'file.service.ts');
-      for (const file of walk('src')) {
-        if (file === legacy) continue;
-        expect(readFileSync(file, 'utf8'), file).not.toMatch(importPattern);
+      const specifier = /(?:from|import|require)\s*\(?\s*['"]([^'"]+)['"]/g;
+      const resolveRel = (from: string, spec: string): string | null => {
+        const base = resolve(dirname(from), spec.replace(/\.js$/, ''));
+        for (const c of [base + '.ts', join(base, 'index.ts')]) {
+          if (existsSync(c)) return c;
+        }
+        return null;
+      };
+      const seen = new Set<string>();
+      const queue = ['src/hono-app.ts', 'src/worker.ts', 'src/hono-server.ts']
+        .map((f) => resolve(f))
+        .filter((f) => existsSync(f));
+      expect(queue.length).toBeGreaterThan(0);
+      while (queue.length > 0) {
+        const file = queue.pop()!;
+        if (seen.has(file)) continue;
+        seen.add(file);
+        const text = readFileSync(file, 'utf8');
+        for (const m of text.matchAll(specifier)) {
+          const spec = m[1]!;
+          if (spec.startsWith('.')) {
+            const next = resolveRel(file, spec);
+            if (next) queue.push(next);
+            continue;
+          }
+          const pkg = spec.startsWith('@')
+            ? spec.split('/').slice(0, 2).join('/')
+            : spec.split('/')[0]!;
+          expect(decoders, file + ' imports ' + spec).not.toContain(pkg);
+        }
       }
-      // No Hono-side module reaches the decoding legacy service.
-      const honoSide = walk('src').filter(
-        (f) =>
-          /\.hono\.ts$/.test(f) ||
-          /[\\/]hono-[^\\/]*\.ts$/.test(f) ||
-          /[\\/]media-[^\\/]*\.ts$/.test(f)
-      );
-      expect(honoSide.length).toBeGreaterThan(5);
-      for (const file of honoSide) {
-        expect(readFileSync(file, 'utf8'), file).not.toMatch(
-          /services\/file\.service|\.\/file\.service/
-        );
-      }
+      expect(seen.size).toBeGreaterThan(50);
+      expect([...seen].some((f) => f.endsWith('file.service.ts'))).toBe(false);
     });
   });
 
-  describe('cross-community and role denial', () => {
-    it('denies read, metadata, delete, attach, detach and reorder across communities and below editor, with no change', async () => {
+  describe('cross-community and role matrix', () => {
+    const NOT_FOUND_FILE = '00000000-0000-4000-8000-000000000000';
+    const NOT_FOUND_ID = 999999;
+
+    it('keeps no signed or absolute URL identity: the legacy url column holds only the stable API path', async () => {
+      const created = await uploadOk({
+        cookie: cookies.editorA,
+        filename: 'url-check.png',
+        contentType: 'image/png',
+        bytes: PNG,
+      });
+      const [row] = await db
+        .select()
+        .from(tables.files)
+        .where(eq(tables.files.id, created.id));
+      expect((row as { url: string }).url).toBe('/v2/media/' + created.id);
+      for (const table of [tables.files, tables.attachments]) {
+        for (const name of Object.keys(getTableColumns(table))) {
+          expect(name, name).not.toMatch(/signed|expires|token|presign/i);
+        }
+      }
+    });
+
+    it('denies read, metadata, upload, delete, attach, detach and reorder across communities and below editor, with no change', async () => {
       const file = await uploadOk({
         cookie: cookies.editorA,
         filename: 'owned.png',
         contentType: 'image/png',
         bytes: PNG,
       });
-      const attachRes = await send('POST', '/v2/attachments', cookies.editorA, {
-        fileId: file.id,
-        ownerType: 'story',
-        ownerId: ids.storyA,
-        role: 'story_media',
+      const file2 = await uploadOk({
+        cookie: cookies.editorA,
+        filename: 'owned-two.png',
+        contentType: 'image/png',
+        bytes: PNG,
       });
-      expect(attachRes.status).toBe(201);
-      const attachment = AttachmentResponseSchema.parse(
-        await attachRes.json()
-      ).data;
+      leaks.push('owned.png', 'owned-two.png', file.id, file2.id);
+      const attachOne = async (fileId: string) => {
+        const res = await send('POST', '/v2/attachments', cookies.editorA, {
+          fileId,
+          ownerType: 'story',
+          ownerId: ids.storyA,
+          role: 'story_media',
+        });
+        expect(res.status).toBe(201);
+        return AttachmentResponseSchema.parse(await res.json()).data;
+      };
+      const att1 = await attachOne(file.id);
+      const att2 = await attachOne(file2.id);
       const own = await uploadOk({
         cookie: cookies.editorB,
         filename: 'b-own.png',
@@ -738,183 +883,413 @@ describe('media adversarial suite on the Hono V2 app (#140)', () => {
         contentType: 'image/png',
         bytes: PNG,
       });
+      leaks.push('staged.png', staged.id);
 
-      const notFound = await (
-        await get('/v2/media/999999', cookies.adminB)
-      ).text();
-      const foreign = await expectDenied(
-        'foreign read',
-        () => get('/v2/media/' + file.id, cookies.adminB),
-        404
-      );
-      // A guessed id and a foreign id are indistinguishable.
-      expect(await foreign.text()).toBe(notFound);
-
-      const attachBody = (fileId: number, ownerId: number) => ({
+      const readOf =
+        (id: string, cookie?: string, extra = {}) =>
+        () =>
+          get('/v2/media/' + id, cookie, extra);
+      const metaOf = (id: string, cookie?: string) => () =>
+        get('/v2/media/' + id + '/metadata', cookie);
+      const delOf = (id: string, cookie?: string) => () =>
+        send('DELETE', '/v2/media/' + id, cookie);
+      const attachBody = (fileId: string, ownerId: number) => ({
         fileId,
         ownerType: 'story',
         ownerId,
         role: 'story_media',
       });
-      const reorderBody = {
+      const attachOf =
+        (cookie: string | undefined, fileId: string, owner: number) => () =>
+          send('POST', '/v2/attachments', cookie, attachBody(fileId, owner));
+      const detachOf = (id: number, cookie?: string) => () =>
+        send('DELETE', '/v2/attachments/' + id, cookie);
+      // Reverse order of two attachments: a leaked write would show in the snapshot.
+      const reorderBody = (owner: number) => ({
         ownerType: 'story',
-        ownerId: ids.storyA,
+        ownerId: owner,
         role: 'story_media',
-        attachmentIds: [attachment.id],
-      };
-      const attPath = '/v2/attachments/' + attachment.id;
-      const denied: Array<[string, () => Promise<Response>, number]> = [
-        ['anon read', () => get('/v2/media/' + file.id), 401],
+        attachmentIds: [att2.id, att1.id],
+      });
+      const reorderOf =
+        (cookie: string | undefined, owner = ids.storyA!) =>
+        () =>
+          send('PATCH', '/v2/attachments/reorder', cookie, reorderBody(owner));
+
+      type Cell = [
+        string,
+        () => Promise<Response>,
+        number,
+        (() => Promise<Response>)?,
+      ];
+      const denied: Cell[] = [
+        // read and metadata
+        ['anon read', readOf(file.id), 401],
+        ['anon metadata', metaOf(file.id), 401],
         [
           'foreign editor read',
-          () => get('/v2/media/' + file.id, cookies.editorB),
+          readOf(file.id, cookies.editorB),
           404,
+          readOf(NOT_FOUND_FILE, cookies.editorB),
+        ],
+        [
+          'foreign admin read',
+          readOf(file.id, cookies.adminB),
+          404,
+          readOf(NOT_FOUND_FILE, cookies.adminB),
         ],
         [
           'foreign admin metadata',
-          () => get('/v2/media/' + file.id + '/metadata', cookies.adminB),
+          metaOf(file.id, cookies.adminB),
           404,
+          metaOf(NOT_FOUND_FILE, cookies.adminB),
         ],
         [
           'foreign range read',
-          () =>
-            get('/v2/media/' + file.id, cookies.adminB, { range: 'bytes=0-3' }),
+          readOf(file.id, cookies.adminB, { range: 'bytes=0-3' }),
           404,
+          readOf(NOT_FOUND_FILE, cookies.adminB, { range: 'bytes=0-3' }),
         ],
         [
           'super_admin read',
-          () => get('/v2/media/' + file.id, cookies.superAdmin),
+          readOf(file.id, cookies.superAdmin),
           404,
+          readOf(NOT_FOUND_FILE, cookies.superAdmin),
         ],
         [
-          'anon delete',
-          () => send('DELETE', '/v2/media/' + file.id, undefined),
+          'super_admin metadata',
+          metaOf(file.id, cookies.superAdmin),
+          404,
+          metaOf(NOT_FOUND_FILE, cookies.superAdmin),
+        ],
+        [
+          'member read of foreign staged file',
+          readOf(own.id, cookies.memberA),
+          404,
+          readOf(NOT_FOUND_FILE, cookies.memberA),
+        ],
+        [
+          'member read of unattached staged file',
+          readOf(staged.id, cookies.memberA),
+          404,
+          readOf(NOT_FOUND_FILE, cookies.memberA),
+        ],
+        [
+          'member metadata of unattached staged file',
+          metaOf(staged.id, cookies.memberA),
+          404,
+          metaOf(NOT_FOUND_FILE, cookies.memberA),
+        ],
+        [
+          'viewer read of unattached staged file',
+          readOf(staged.id, cookies.viewerA),
+          404,
+          readOf(NOT_FOUND_FILE, cookies.viewerA),
+        ],
+        // upload
+        [
+          'anon upload',
+          () =>
+            upload({ filename: 'a.png', contentType: 'image/png', bytes: PNG }),
           401,
         ],
         [
-          'foreign admin delete',
-          () => send('DELETE', '/v2/media/' + file.id, cookies.adminB),
-          404,
-        ],
-        [
-          'foreign editor delete staged',
-          () => send('DELETE', '/v2/media/' + staged.id, cookies.editorB),
-          404,
-        ],
-        [
-          'viewer delete',
-          () => send('DELETE', '/v2/media/' + file.id, cookies.viewerA),
+          'viewer upload',
+          () =>
+            upload({
+              cookie: cookies.viewerA,
+              filename: 'a.png',
+              contentType: 'image/png',
+              bytes: PNG,
+            }),
           403,
         ],
         [
-          'anon attach',
+          'member upload',
           () =>
-            send(
-              'POST',
-              '/v2/attachments',
-              undefined,
-              attachBody(staged.id, ids.storyA!)
-            ),
-          401,
+            upload({
+              cookie: cookies.memberA,
+              filename: 'a.png',
+              contentType: 'image/png',
+              bytes: PNG,
+            }),
+          403,
         ],
         [
-          'viewer attach',
+          'super_admin upload',
           () =>
-            send(
-              'POST',
-              '/v2/attachments',
-              cookies.viewerA,
-              attachBody(staged.id, ids.storyA!)
-            ),
+            upload({
+              cookie: cookies.superAdmin,
+              filename: 'a.png',
+              contentType: 'image/png',
+              bytes: PNG,
+            }),
+          403,
+        ],
+        // delete
+        ['anon delete', delOf(file.id), 401],
+        [
+          'foreign admin delete',
+          delOf(file.id, cookies.adminB),
+          404,
+          delOf(NOT_FOUND_FILE, cookies.adminB),
+        ],
+        [
+          'foreign editor delete staged',
+          delOf(staged.id, cookies.editorB),
+          404,
+          delOf(NOT_FOUND_FILE, cookies.editorB),
+        ],
+        [
+          'super_admin delete',
+          delOf(file.id, cookies.superAdmin),
+          404,
+          delOf(NOT_FOUND_FILE, cookies.superAdmin),
+        ],
+        ['member delete', delOf(file.id, cookies.memberA), 403],
+        ['viewer delete', delOf(file.id, cookies.viewerA), 403],
+        // attach
+        ['anon attach', attachOf(undefined, staged.id, ids.storyA!), 401],
+        [
+          'viewer attach',
+          attachOf(cookies.viewerA, staged.id, ids.storyA!),
+          403,
+        ],
+        [
+          'member attach',
+          attachOf(cookies.memberA, staged.id, ids.storyA!),
+          403,
+        ],
+        [
+          'super_admin attach',
+          attachOf(cookies.superAdmin, staged.id, ids.storyA!),
           403,
         ],
         [
           'foreign file onto own story',
-          () =>
-            send(
-              'POST',
-              '/v2/attachments',
-              cookies.adminB,
-              attachBody(staged.id, ids.storyB!)
-            ),
+          attachOf(cookies.adminB, staged.id, ids.storyB!),
           404,
+          attachOf(cookies.adminB, NOT_FOUND_FILE, ids.storyB!),
         ],
         [
           'own file onto foreign story',
-          () =>
-            send(
-              'POST',
-              '/v2/attachments',
-              cookies.adminB,
-              attachBody(own.id, ids.storyA!)
-            ),
+          attachOf(cookies.adminB, own.id, ids.storyA!),
           404,
+          attachOf(cookies.adminB, own.id, NOT_FOUND_ID),
         ],
         [
           'reuse of a foreign attached file',
-          () =>
-            send(
-              'POST',
-              '/v2/attachments',
-              cookies.adminB,
-              attachBody(file.id, ids.storyB!)
-            ),
+          attachOf(cookies.adminB, file.id, ids.storyB!),
           404,
+          attachOf(cookies.adminB, NOT_FOUND_FILE, ids.storyB!),
         ],
-        [
-          'super_admin attach',
-          () =>
-            send(
-              'POST',
-              '/v2/attachments',
-              cookies.superAdmin,
-              attachBody(staged.id, ids.storyA!)
-            ),
-          403,
-        ],
-        ['anon detach', () => send('DELETE', attPath, undefined), 401],
-        ['viewer detach', () => send('DELETE', attPath, cookies.viewerA), 403],
+        // detach
+        ['anon detach', detachOf(att1.id), 401],
+        ['viewer detach', detachOf(att1.id, cookies.viewerA), 403],
+        ['member detach', detachOf(att1.id, cookies.memberA), 403],
+        ['super_admin detach', detachOf(att1.id, cookies.superAdmin), 403],
         [
           'foreign admin detach',
-          () => send('DELETE', attPath, cookies.adminB),
+          detachOf(att1.id, cookies.adminB),
           404,
+          detachOf(NOT_FOUND_ID, cookies.adminB),
         ],
+        // reorder
+        ['anon reorder', reorderOf(undefined), 401],
+        ['viewer reorder', reorderOf(cookies.viewerA), 403],
+        ['member reorder', reorderOf(cookies.memberA), 403],
+        ['super_admin reorder', reorderOf(cookies.superAdmin), 403],
         [
           'foreign admin reorder',
-          () =>
-            send(
-              'PATCH',
-              '/v2/attachments/reorder',
-              cookies.adminB,
-              reorderBody
-            ),
+          reorderOf(cookies.adminB),
           404,
-        ],
-        [
-          'viewer reorder',
-          () =>
-            send(
-              'PATCH',
-              '/v2/attachments/reorder',
-              cookies.viewerA,
-              reorderBody
-            ),
-          403,
+          reorderOf(cookies.adminB, NOT_FOUND_ID),
         ],
       ];
-      for (const [label, run, status] of denied) {
-        await expectDenied(label, run, status);
+      for (const [label, run, status, control] of denied) {
+        await expectDenied(label, run, status, control);
       }
 
-      // The owner still reads the exact bytes after every denied write.
+      // The owner still reads the exact bytes, and the order is unchanged.
       const reread = await get('/v2/media/' + file.id, cookies.editorA);
       expect(reread.status).toBe(200);
       expect(new Uint8Array(await reread.arrayBuffer())).toEqual(PNG);
-      const [stillThere] = await db
-        .select()
-        .from(tables.attachments)
-        .where(eq(tables.attachments.id, attachment.id));
-      expect(stillThere).toBeDefined();
+      const order = async () =>
+        (
+          await db
+            .select()
+            .from(tables.attachments)
+            .where(eq(tables.attachments.ownerId, ids.storyA!))
+        )
+          .sort((x, y) => x.ordinal - y.ordinal)
+          .map((r) => r.id);
+      expect(await order()).toEqual([att1.id, att2.id]);
+
+      // Allowed paths: read by every community role, then admin write paths.
+      for (const cookie of [cookies.viewerA, cookies.memberA, cookies.adminA]) {
+        const ok = await get('/v2/media/' + file.id, cookie);
+        expect(ok.status).toBe(200);
+        expect(new Uint8Array(await ok.arrayBuffer())).toEqual(PNG);
+      }
+      expect((await metaOf(file.id, cookies.memberA)()).status).toBe(200);
+      const reordered = await reorderOf(cookies.adminA)();
+      expect(reordered.status).toBe(200);
+      expect(await order()).toEqual([att2.id, att1.id]);
+      expect(
+        (await attachOf(cookies.adminA, staged.id, ids.storyA!)()).status
+      ).toBe(201);
+      expect((await detachOf(att1.id, cookies.adminA)()).status).toBe(204);
+      const toDelete = await uploadOk({
+        cookie: cookies.editorA,
+        filename: 'to-delete.png',
+        contentType: 'image/png',
+        bytes: PNG,
+      });
+      expect((await delOf(toDelete.id, cookies.adminA)()).status).toBe(204);
+      expect(
+        (await get('/v2/media/' + toDelete.id, cookies.editorA)).status
+      ).toBe(404);
+    });
+  });
+
+  describe('direct multipart upload routes', () => {
+    const video = (() => {
+      const bytes = new Uint8Array(1024);
+      bytes.set([
+        0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 0, 0, 2,
+        0, 0x69, 0x73, 0x6f, 0x6d, 0x6d, 0x70, 0x34, 0x31,
+      ]);
+      return bytes;
+    })();
+    const sha = createHash('sha256').update(video).digest('hex');
+    const NOT_FOUND = '00000000-0000-4000-8000-000000000000';
+
+    const create = (cookie?: string) =>
+      send('POST', '/v2/media/uploads', cookie, {
+        filename: 'clip.mp4',
+        contentType: 'video/mp4',
+        size: video.byteLength,
+        sha256: sha,
+        partSha256: [sha],
+      });
+    async function session(cookie: string) {
+      const res = await create(cookie);
+      expect(res.status, await res.clone().text()).toBe(201);
+      return DirectUploadSessionResponseSchema.parse(await res.json()).data;
+    }
+    const presign = (id: string, cookie?: string) => () =>
+      send('POST', '/v2/media/uploads/' + id + '/parts/presign', cookie);
+    const putPart =
+      (
+        target: { url: string; headers: Record<string, string> },
+        cookie?: string
+      ) =>
+      () =>
+        app.request(target.url, {
+          method: 'PUT',
+          headers: {
+            ...target.headers,
+            ...(cookie ? { cookie } : {}),
+            'content-length': String(video.byteLength),
+          },
+          body: video,
+        });
+    const complete = (id: string, etag: string, cookie?: string) => () =>
+      send('POST', '/v2/media/uploads/' + id + '/complete', cookie, {
+        parts: [{ partNumber: 1, etag }],
+      });
+    const abort = (id: string, cookie?: string) => () =>
+      send('DELETE', '/v2/media/uploads/' + id, cookie);
+
+    it('denies session create for anon, viewer, member and super_admin and allows editor and admin', async () => {
+      for (const [label, cookie, status] of [
+        ['anon', undefined, 401],
+        ['viewer', cookies.viewerA, 403],
+        ['member', cookies.memberA, 403],
+        ['super_admin', cookies.superAdmin, 403],
+      ] as Array<[string, string | undefined, number]>) {
+        await expectDenied('create ' + label, () => create(cookie), status);
+      }
+      for (const cookie of [cookies.editorA, cookies.adminA]) {
+        const created = await session(cookie!);
+        expect((await abort(created.id, cookie)()).status).toBe(204);
+      }
+    });
+
+    it('isolates presign, part upload, complete and abort to the owner session', async () => {
+      const owned = await session(cookies.editorA!);
+      leaks.push(owned.id);
+      const target = owned.parts[0]!;
+      const other = [
+        ['anon', undefined, 401],
+        ['same-community editor', cookies.editorA2, 404],
+        ['foreign editor', cookies.editorB, 404],
+        ['foreign admin', cookies.adminB, 404],
+      ] as Array<[string, string | undefined, number]>;
+      for (const [label, cookie, status] of other) {
+        const concealed = status === 404;
+        await expectDenied(
+          'presign ' + label,
+          presign(owned.id, cookie),
+          status,
+          concealed ? presign(NOT_FOUND, cookie) : undefined
+        );
+        await expectDenied(
+          'put part ' + label,
+          putPart(target, cookie),
+          status
+        );
+        await expectDenied(
+          'complete ' + label,
+          complete(owned.id, sha, cookie),
+          status,
+          concealed ? complete(NOT_FOUND, sha, cookie) : undefined
+        );
+        await expectDenied(
+          'abort ' + label,
+          abort(owned.id, cookie),
+          status,
+          concealed ? abort(NOT_FOUND, cookie) : undefined
+        );
+      }
+      for (const [label, cookie] of [
+        ['viewer', cookies.viewerA],
+        ['member', cookies.memberA],
+        ['super_admin', cookies.superAdmin],
+      ] as Array<[string, string]>) {
+        for (const [what, run] of [
+          ['presign', presign(owned.id, cookie)],
+          ['complete', complete(owned.id, sha, cookie)],
+          ['abort', abort(owned.id, cookie)],
+        ] as Array<[string, () => Promise<Response>]>) {
+          const before = await snapshot();
+          const res = await run();
+          expect([403, 404], what + ' ' + label).toContain(res.status);
+          expect(await snapshot(), what + ' ' + label).toBe(before);
+        }
+      }
+
+      // The owner path still works after every denial.
+      expect((await presign(owned.id, cookies.editorA)()).status).toBe(200);
+      const put = await putPart(target, cookies.editorA)();
+      expect(put.status).toBe(200);
+      const etag = put.headers.get('etag')!.replace(/"/g, '');
+      const done = await complete(owned.id, etag, cookies.editorA)();
+      expect(done.status).toBe(201);
+      const created = MediaUploadResponseSchema.parse(await done.json()).data;
+      expect(created.checksum).toBe(sha);
+      const read = await get('/v2/media/' + created.id, cookies.editorA);
+      expect(new Uint8Array(await read.arrayBuffer())).toEqual(video);
+      // A finished session is gone.
+      expect((await complete(owned.id, etag, cookies.editorA)()).status).toBe(
+        404
+      );
+    });
+
+    it('lets an admin of the same community abort a stale session', async () => {
+      const owned = await session(cookies.editorA!);
+      expect((await abort(owned.id, cookies.adminA)()).status).toBe(204);
+      expect((await abort(owned.id, cookies.editorA)()).status).toBe(404);
     });
   });
 });

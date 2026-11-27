@@ -9713,6 +9713,18 @@ export async function createFixture(
                 '<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>'
               ),
             }),
+            check: (body) =>
+              typeof body === 'object' &&
+              body !== null &&
+              typeof (body as { error?: unknown }).error === 'string' &&
+              !JSON.stringify(body).includes('script') &&
+              !JSON.stringify(body).includes('communities/'),
+            checkHeaders: (headers) =>
+              (headers.get('content-type') ?? '').includes(
+                'application/json'
+              ) &&
+              headers.get('content-disposition') === null &&
+              headers.get('etag') === null,
           },
           {
             name: 'reject a zero-byte upload',
@@ -9724,6 +9736,18 @@ export async function createFixture(
               contentType: 'image/png',
               bytes: new Uint8Array(0),
             }),
+            check: (body) =>
+              typeof body === 'object' &&
+              body !== null &&
+              typeof (body as { error?: unknown }).error === 'string' &&
+              !JSON.stringify(body).includes('script') &&
+              !JSON.stringify(body).includes('communities/'),
+            checkHeaders: (headers) =>
+              (headers.get('content-type') ?? '').includes(
+                'application/json'
+              ) &&
+              headers.get('content-disposition') === null &&
+              headers.get('etag') === null,
           },
           {
             name: 'sanitize a CRLF and traversal filename',

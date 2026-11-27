@@ -359,7 +359,7 @@ describe('Slice 13a community export endpoints', () => {
     expect(mRes1.headers.get('cache-control')).toBe('no-store');
     expect(mRes1.headers.get('x-content-type-options')).toBe('nosniff');
     expect(mRes1.headers.get('content-security-policy')).toBe(
-      "default-src 'none'; sandbox"
+      "default-src 'none'; frame-ancestors 'none'; sandbox"
     );
     expect(mRes1.headers.get('content-disposition')).toBe(
       'attachment; filename="community-export-manifest.json"'

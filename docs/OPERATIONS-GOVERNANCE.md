@@ -183,3 +183,87 @@ Neither hold touches the database; lifting the hold never deletes anything by it
 ## 7. Change control
 
 Changes to this document follow the `docs/SOURCE-OF-TRUTH.md` change-control contract: retention numbers belong to `docs/SPEC-V2.md` and may only change there; validator rules change in the same commit as `src/config/v2-runtime.ts` and their tests.
+
+## 9. Observability and alerts (#143)
+
+Everything below is implemented; no telemetry is exported and no log line carries community content, credentials, or tokens. The implementation lives in `src/shared/observability/` (`log.ts` redaction + JSON logger, `request-log.ts` correlation) and is wired once in `src/hono-app.ts` for both Node and Workers.
+
+### 9.1 What exists
+
+| Signal              | Where                                                                          | Content                                                                                                              |
+| ------------------- | ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| Liveness            | `GET /health` → `200 {"status":"ok"}`                                          | process up; no dependency probe                                                                                      |
+| Readiness           | `GET /ready` → `200 {"status":"ready"}` or `503` within `READINESS_TIMEOUT_MS` | database probe only                                                                                                  |
+| Request log         | one JSON line per request, `"msg":"http.request"`                              | `time`, `level`, `requestId`, `method`, `path`, `status`, `durationMs`; `level` is `error` for 5xx, otherwise `info` |
+| Error log           | one JSON line per unhandled error, `"msg":"http.error"`                        | the same request fields plus `error.name`, `error.message`, `error.stack`, all redacted                              |
+| Correlation id      | response header `X-Request-Id`, exposed through CORS                           | incoming `x-request-id` accepted only when it matches `^[A-Za-z0-9._-]{1,64}$`; otherwise a UUID is generated        |
+| Startup refusal     | Node stderr, Workers console                                                   | one content-free line naming settings (never values); Node exits non-zero                                            |
+| Background failures | Node stderr, Workers console                                                   | content-free `media cleanup: … failed`, `maintenance: … failed`, `maintenance sweeps: run failed` lines              |
+| Audit trail         | `audit_entries` (admin/community read APIs)                                    | actor/community/action/resource/outcome; IP/User-Agent only on auth/security entries, scrubbed within 90 days        |
+
+`LOG_LEVEL` (`debug`/`info`/`warn`/`error`, default `info`) controls the Node V2 entrypoint (`src/hono-server.ts`); Workers use `info` and the platform's console capture. The committed `wrangler.jsonc` keeps Workers observability and traces disabled, so a hosted deployment that wants retained request logs must enable them in the platform while keeping the same content-free rule.
+
+The request path is logged as a route shape: opaque segments of 32+ characters (the export download token) are replaced with `[REDACTED]`. Query strings and bodies are never read for logging.
+
+### 9.2 Redaction
+
+Every log record (message, fields, bound fields, error) passes through one `redact` function before `JSON.stringify`. It removes:
+
+- sensitive keys (`password`, `passphrase`, `secret`, `token`, `authorization`, `cookie`, `credential`, `derivedKey`, `salt`, `signature`, `apiKey`, `privateKey`, `accessKey`, `recoveryCode`, `claimToken`, `loginCode`, `sessionId`, `code`) entirely;
+- `Bearer …` values, `ts_session=…` cookies, JWT-shaped values, `X-Amz-Signature`/`X-Amz-Credential`/`sig`/`token`/`key`/`code` query parameters, and `/export/download/<token>` path tokens inside free text;
+- anything beyond depth 8, 50 entries, or 2048 characters (cycles become `[circular]`).
+
+`Error` values keep only name, message and stack, all scrubbed. Request/response bodies are never passed to the logger, so story, place and speaker text cannot reach a log line even when a request fails. Proof: `tests/hono/observability-logging.test.ts` (credentials, cookies, login/claim/recovery codes, Authorization, presigned signatures, body-text markers, and a failing-request error stack).
+
+### 9.3 Audit events for privileged actions
+
+All entries are content-free (no bodies, titles, names, URLs, codes or tokens) and are covered by tests.
+
+| Privileged action     | Audit action                                                                 | Written by                                                                                          | Proof                                              |
+| --------------------- | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| Role change           | `user.update` (success/failure)                                              | `src/services/user-management.service.ts`                                                           | `tests/hono/users-crud.test.ts`                    |
+| User disable/enable   | `user.update` (success/failure)                                              | same service/repository                                                                             | same                                               |
+| Admin password reset  | `user.password_reset` (success/failure, atomic with reset)                   | `src/services/user-management.service.ts`, `src/repositories/user-management.repository.ts`         | `tests/hono/users-audit-atomic.test.ts`            |
+| Community withdrawal  | `community.sovereignty.withdrawal.notice_started` / `.completed`             | `src/repositories/community-sovereignty.repository.ts`                                              | `tests/hono/community-sovereignty-steward.test.ts` |
+| Community erasure     | `community.sovereignty.erasure.requested` / `.notice_started` / `.completed` | `src/repositories/community-sovereignty.repository.ts`, `src/services/community-erasure.service.ts` | `tests/hono/community-erasure-*.test.ts`           |
+| Export                | `community.export.request` / `.generate` / `.download`                       | `src/repositories/community-export.repository.ts`                                                   | `tests/hono/community-export.test.ts`              |
+| Claim-token issue     | `claim_token.issue` (success atomic; failure best-effort)                    | `src/repositories/bootstrap.repository.ts`, `src/services/admin.service.ts`                         | `tests/hono/admin-lifecycle-and-audit.test.ts`     |
+| Global session revoke | `security.sessions.revoke_all` (operator command)                            | `src/ops/revoke-all-sessions.ts`                                                                    | `tests/hono/revoke-all-sessions.test.ts`           |
+
+Also present: `system.community.provision`, `system.community.status.active`/`.disabled`, `system.community.deprovision`, steward designation/removal, auth login/logout/revoke/password/identifier changes, recovery-code generation/redeem, session revoke, and media/story visibility decisions.
+
+### 9.4 Alert thresholds
+
+Thresholds are operator policy, not application behaviour; each is evaluated from the signals in §9.1.
+
+| Condition             | Page when                                                                                              | Warning when                                                                        |
+| --------------------- | ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| Database unavailable  | `/ready` non-200 on 2 consecutive probes (30 s apart), or Node startup exits on the database probe     | any `/ready` failure                                                                |
+| Storage unavailable   | media requests returning 5xx for 5 minutes, or the storage root is read-only/unmounted                 | repeated `media cleanup: … failed` lines                                            |
+| Elevated 5xx          | `http.request` with `status >= 500` exceeds 2% of requests over 5 minutes with at least 20 requests    | any sustained 5xx above 0.5%                                                        |
+| Backup failure        | the backup container exits non-zero or logs `ERROR: Backup failed at`                                  | one missed scheduled run (no success line for 24 h Node/PostgreSQL, 12 h field kit) |
+| Disk pressure         | filesystem holding the database, uploads or backups is above 95%                                       | above 85%                                                                           |
+| Migration failure     | Node startup logs `startup failed: database is unreachable or not migrated` and exits non-zero         | `/ready` 503 after a deploy                                                         |
+| Session-store failure | database unavailable (sessions and throttle state are database rows) or an unexpected spike in 401/503 | isolated 401 spikes from a single client                                            |
+
+### 9.5 Runbooks
+
+**Database unavailable.** Check `/ready` and the process/container state. On Node the startup probe exits non-zero rather than serving a half-ready process; on Workers the app answers 503 from middleware. Verify the database host/volume, credentials and free space, restore service, then confirm `/ready` returns `{"status":"ready"}`. Sessions, login/recovery/claim codes, throttle rows and audit entries are all in that database — a restore revives them, so run the R1a global revocation before serving traffic again (§6.4, R1a).
+
+**Storage unavailable.** Media reads/writes fail while JSON routes stay up. Check the storage root/mount and permissions (Node `HONO_STORAGE_ROOT`, Workers `MEDIA` binding), then retry a single media read. Do not delete or re-create the `system/orphan-sweep-hold` marker during an incident; use the restore hold from §6.4 for any restore. The orphan sweeper is the backstop for bytes whose `files` row is gone.
+
+**Elevated 5xx.** Group `http.error` lines by `path` and `requestId`; the id is also on the client response, so a user report maps to exactly one line. Check whether the failures share a database, storage or upstream cause before changing code. A single error line carries only name/message/stack (redacted), never the request body.
+
+**Backup failure.** The scheduled container logs `ERROR: Backup failed at <date>` and exits non-zero (`scripts/backup.sh`, `scripts/field-kit-backup.sh`). Check free space, database reachability, and backup-volume permissions; rerun the script manually and confirm the success line plus a fresh `terrastories_backup_*`/`fieldkit_backup_*` artifact. Never place erasure records in a backup (§6.4); they live outside every backup volume by design.
+
+**Disk pressure.** Identify the largest consumer (`df -h`, then the database, `uploads/`, `/backups`, or offline tiles). Reduce backup retention within policy (`BACKUP_RETENTION_DAYS`), move completed backups off the host, and expand the volume. Do not delete the database, uploads, erasure records or the last verified backup to recover space.
+
+**Migration failure.** Node refuses to serve and exits non-zero with the content-free startup line above. Stop the rollout, run the deployment's migration step (`npm run db:migrate` / the image's entrypoint), inspect the failing migration on a copy, and restart. `/ready` must return 200 before routing traffic. Do not bypass the startup probe.
+
+**Session-store failure.** Sessions, throttle and code state are database rows, so treat it as the database runbook. If logins fail uniformly, confirm `/ready` and the `sessions`/`auth_throttle` tables are readable. After a restore, run R1a (§3) — old digests in the backup would otherwise authenticate again.
+
+**Field kit (offline) operators.** There is no telemetry export and no cloud dependency. Read the local service output: `docker compose -f docker-compose.field-kit.yml logs -f api` (or `journalctl -u <service>` for a native install), and follow one request by its `X-Request-Id`. Keep `LOG_LEVEL=warn` or `error` on constrained devices; request lines are one small JSON object each. Audit entries are read through the community audit API (`GET /v2/community/audit-entries`) or the admin API on a connected deployment. Backups are local (`scripts/field-kit-backup.sh`, twice daily, `BACKUP_RETENTION_DAYS=3` default) and the same disk-pressure and backup-failure runbooks apply. Because logs are content-free by construction, community erasure leaves no log copy to purge locally.
+
+### 9.6 Metrics endpoint decision (#127)
+
+No metrics endpoint is exposed on the V2 Hono runtime, and the legacy Fastify `/file-operations` route is not mounted. #127 is superseded by this design: request rate/error/latency come from the structured `http.request` lines, dependency health from `/health` and `/ready`, and privileged activity from the content-free audit trail. This keeps Workers CPU low (one small `JSON.stringify` per request), avoids a new authenticated cross-community surface, and leaves field-kit deployments without any in-process metrics store to maintain. If a Prometheus-style endpoint is added later it must be admin-only or bound to localhost on Node, and it must not carry community content, tokens or per-community aggregates.

@@ -662,9 +662,28 @@ function runSinglePass(
   }
 }
 
-function runSanitiser(
+/**
+ * Characters that can change text or markup meaning in the HTML pipeline:
+ * markup/entity starters, line separators, control, format, private-use and
+ * unassigned/non-character code points. An input with none of them is plain
+ * text that the full pipeline returns unchanged (proved by
+ * tests/shared/safe-description-fast-path.test.ts).
+ */
+const NOT_PLAIN_TEXT =
+  /[<>&\u{2028}\u{2029}\x00-\x08\x0B-\x1F\x7F-\x9F\p{Cf}\p{Co}\p{Cn}]/u;
+
+function isPlainTextDescription(input: string): boolean {
+  return !NOT_PLAIN_TEXT.test(input);
+}
+
+/**
+ * The shared sanitiser pipeline. `allowFastPath = false` forces the full
+ * parse/sanitise path (used by the equivalence test).
+ */
+export function runSanitiser(
   input: string,
-  mode: 'runtime' | 'migration'
+  mode: 'runtime' | 'migration',
+  allowFastPath = true
 ): {
   html: string;
   changed: boolean;
@@ -674,6 +693,9 @@ function runSanitiser(
   assertValidStringInput(input);
   if (input === '') {
     return { html: '', changed: false, droppedHrefs: 0, removedNodes: 0 };
+  }
+  if (allowFastPath && isPlainTextDescription(input)) {
+    return { html: input, changed: false, droppedHrefs: 0, removedNodes: 0 };
   }
 
   const first = runSinglePass(input, mode);

@@ -127,7 +127,8 @@ export interface ReplayResult {
 export function replayAccountChanges(
   frozen: Database.Database,
   restored: Database.Database,
-  afterAuditId: number
+  afterAuditId: number,
+  options: { tempSource?: () => string } = {}
 ): ReplayResult {
   const placeholders = ACCOUNT_CHANGE_AUDIT_ACTIONS.map(() => '?').join(',');
   const entries = frozen
@@ -160,27 +161,54 @@ export function replayAccountChanges(
   // Unique identifiers (email/username and their normalized forms) can be
   // swapped between users after the backup; applying finals one user at a time
   // would hit a unique conflict mid-replay. Stage every affected user onto
-  // unique temporary values first, in the same transaction, then apply finals.
-  // Temporaries carry a per-run random token and spaces, which no valid
-  // username or email contains, so they cannot equal a stored or final value.
-  const token = randomUUID();
-  const tmp = (id: number) => `replay tmp ${token} ${id}`;
+  // temporary values first, in the same transaction, then apply finals.
+  // Temporaries are protected by an explicit disjointness check, not by their
+  // shape (usernames may contain spaces): each candidate carries a random token
+  // and must equal no stored identifier, no final value to be applied and no
+  // other temporary; a collision regenerates it.
+  const nextToken = options.tempSource ?? randomUUID;
   const stage = restored.prepare(
     'UPDATE users SET username = @t, username_normalized = @t, email = @e, email_normalized = @e WHERE id = @id'
   );
+  const exists = restored.prepare('SELECT 1 FROM users WHERE id = ?');
+  const taken = restored.prepare(
+    'SELECT 1 FROM users WHERE username = @t OR username_normalized = @t OR email = @e OR email_normalized = @e LIMIT 1'
+  );
   restored.transaction(() => {
     const rows: Array<{ id: number; row: Record<string, unknown> }> = [];
+    const reserved = new Set<string>(); // final values and temporaries in use
     for (const id of userIds) {
       const row = frozen
         .prepare(`SELECT ${cols} FROM users WHERE id = ?`)
         .get(id) as Record<string, unknown> | undefined;
       if (!row) continue;
-      if (
-        stage.run({ id, t: tmp(id), e: `${tmp(id)}@replay.invalid` })
-          .changes === 0
-      )
+      if (!exists.get(id)) {
         result.missing.push(id);
-      else rows.push({ id, row });
+        continue;
+      }
+      rows.push({ id, row });
+      for (const c of [
+        'username',
+        'username_normalized',
+        'email',
+        'email_normalized',
+      ])
+        if (typeof row[c] === 'string') reserved.add(row[c] as string);
+    }
+    for (const { id } of rows) {
+      let t = '';
+      let e = '';
+      for (let attempt = 0; ; attempt++) {
+        if (attempt >= 100)
+          throw new Error('post-restore: no collision-free temporary found');
+        t = `replay tmp ${nextToken()} ${id}`;
+        e = `${t}@replay.invalid`;
+        if (reserved.has(t) || reserved.has(e) || taken.get({ t, e })) continue;
+        break;
+      }
+      reserved.add(t);
+      reserved.add(e);
+      stage.run({ id, t, e });
     }
     for (const { id, row } of rows) {
       update.run({ ...row, id });

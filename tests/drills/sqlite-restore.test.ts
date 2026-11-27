@@ -548,10 +548,16 @@ describe('SQLite field-kit restore drill (#136)', () => {
         JSON.stringify([ids.editorAlpha, ids.viewerAlpha]),
         Date.now()
       );
-    // An unrelated restored account already holds the old temporary pattern.
+    // An unrelated restored account holds the exact old temporary value of a
+    // replayed user (the previous scheme used 'replay-tmp-<id>').
     db.prepare(
-      "UPDATE users SET username = 'replay-tmp-' || id, username_normalized = 'replay-tmp-' || id WHERE id = ?"
-    ).run(ids.adminBeta);
+      'UPDATE users SET username = ?, username_normalized = ?, email_normalized = ? WHERE id = ?'
+    ).run(
+      `replay-tmp-${ids.editorAlpha}`,
+      `replay-tmp-${ids.editorAlpha}`,
+      `replay-tmp-${ids.editorAlpha}@replay.invalid`,
+      ids.adminBeta
+    );
     const adminBetaBefore = db
       .prepare('SELECT username FROM users WHERE id = ?')
       .get(ids.adminBeta);
@@ -566,6 +572,42 @@ describe('SQLite field-kit restore drill (#136)', () => {
     expect(
       db.prepare('SELECT username FROM users WHERE id = ?').get(ids.adminBeta)
     ).toEqual(adminBetaBefore);
+  });
+
+  it('regenerates a temporary identifier that collides with a stored row', () => {
+    const { db } = restore('collide', true);
+    const cols = 'username, username_normalized, email, email_normalized';
+    const frozenViewer = live
+      .prepare(`SELECT ${cols} FROM users WHERE id = ?`)
+      .get(ids.viewerAlpha);
+    live
+      .prepare(
+        "INSERT INTO audit_entries (actor_id, action, resource_type, resource_ids, outcome, created_at) VALUES (?, 'user.update', 'user', ?, 'success', ?)"
+      )
+      .run(ids.adminAlpha, JSON.stringify([ids.viewerAlpha]), Date.now());
+    // A stored row already equals the first candidate the generator yields.
+    db.prepare('UPDATE users SET username = ? WHERE id = ?').run(
+      `replay tmp FORCED ${ids.viewerAlpha}`,
+      ids.adminBeta
+    );
+    const tokens = ['FORCED', 'SECOND'];
+    const { replayed } = replayAccountChanges(live, db, auditMarker, {
+      tempSource: () => tokens.shift() ?? 'EXHAUSTED',
+    });
+    expect(replayed).toContain(ids.viewerAlpha);
+    expect(tokens).toEqual([]); // the first candidate was rejected, the second used
+    expect(
+      db.prepare(`SELECT ${cols} FROM users WHERE id = ?`).get(ids.viewerAlpha)
+    ).toEqual(frozenViewer);
+    expect(
+      (
+        db
+          .prepare('SELECT username FROM users WHERE id = ?')
+          .get(ids.adminBeta) as {
+          username: string;
+        }
+      ).username
+    ).toBe(`replay tmp FORCED ${ids.viewerAlpha}`);
   });
 
   it('reports users created after the backup that have no restored row', () => {

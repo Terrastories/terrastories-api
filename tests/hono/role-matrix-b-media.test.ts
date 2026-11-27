@@ -1,15 +1,15 @@
 /**
  * Role-by-route matrix, part B (audit #145/#146 rows 54-66): public media,
  * media metadata/delete, direct upload sessions, raw media upload and
- * attachments. Denied cells assert the exact status, that files, attachments
- * and stored bytes are unchanged, and that 404 bodies leak no filename or id.
- * Allowed cells read back the write they performed.
+ * attachments. Denied cells assert the exact error payload, that files,
+ * attachments and stored bytes are unchanged, and that the response leaks no
+ * filename, file, session, attachment or story id. Allowed cells read back the
+ * stored effect of the write.
  */
 import { describe, expect, it, afterEach } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { rawUploadRequest } from '../helpers/raw-upload.js';
 import {
-  CLIENT,
   MP4,
   PNG,
   sha,
@@ -20,6 +20,12 @@ import {
 } from './role-matrix-media-fixture.js';
 
 type P = { id?: string; sessionId?: string; ids?: number[]; storyId?: number };
+/** Approved denial payloads, by status. */
+const DENIED_BODY: Record<number, unknown> = {
+  401: { error: 'Unauthorized' },
+  403: { error: 'Forbidden' },
+  404: { error: 'Not found' },
+};
 const sessionBody = () => ({
   filename: 'clip.mp4',
   contentType: 'video/mp4',
@@ -30,6 +36,8 @@ const sessionBody = () => ({
 });
 const json = async (res: Response) =>
   (await res.json()) as { data: Record<string, unknown> };
+const keysWith = (ctx: Ctx, part: string) =>
+  [...ctx.mem.store.keys()].filter((k) => k.includes(part));
 
 /** Part headers (checksum) from each session the owner created. */
 const partHeaders = new Map<string, Record<string, string>>();
@@ -63,15 +71,17 @@ async function putPart(ctx: Ctx, cookie: string, sessionId: string) {
     }
   );
 }
+const presign = (ctx: Ctx, cookie: string | undefined, sessionId: string) =>
+  ctx.call('POST', `/v2/media/uploads/${sessionId}/parts/presign`, cookie);
+const fileRow = (ctx: Ctx, id: string) =>
+  ctx.db.select().from(ctx.tables.files).where(eq(ctx.tables.files.id, id));
+const bytesFor = (ctx: Ctx, id: string) => keysWith(ctx, id);
 async function attachedFile(ctx: Ctx, cookie: string) {
   const fileId = await ctx.upload(cookie);
   const attId = await ctx.attach(cookie, fileId, ctx.storyId);
   return { fileId, attId };
 }
-const fileRow = (ctx: Ctx, id: string) =>
-  ctx.db.select().from(ctx.tables.files).where(eq(ctx.tables.files.id, id));
-const bytesFor = (ctx: Ctx, id: string) =>
-  [...ctx.mem.store.keys()].filter((k) => k.includes(id));
+const owner = (ctx: Ctx) => ctx.login('editor');
 
 type Route = {
   name: string;
@@ -85,11 +95,13 @@ type Route = {
   ) => Promise<Response>;
   /** After a denied write: the session must still be alive (owner presign 200). */
   alive?: (ctx: Ctx, p: P) => Promise<void>;
-  /** Read-back after an allowed success. */
+  /** Read-back of stored effects after an allowed write. */
   verify?: (ctx: Ctx, p: P, res: Response) => Promise<void>;
 };
 const none = async () => ({}) as P;
-const ownerOf = (ctx: Ctx) => ctx.login('editor');
+const sessionAlive = async (ctx: Ctx, p: P) => {
+  expect((await presign(ctx, await owner(ctx), p.sessionId!)).status).toBe(200);
+};
 
 const ROUTES: Route[] = [
   {
@@ -106,7 +118,13 @@ const ROUTES: Route[] = [
     send: (ctx, _r, cookie) =>
       ctx.call('POST', '/v2/media/uploads', cookie, sessionBody()),
     verify: async (_ctx, _p, res) => {
-      expect((await json(res)).data.id).toBeTruthy();
+      const data = (await json(res)).data as {
+        id: string;
+        partCount: number;
+        parts: Array<{ url: string }>;
+      };
+      expect(data.partCount).toBe(1);
+      expect(data.parts[0]?.url).toEqual(expect.any(String));
     },
   },
   {
@@ -119,35 +137,20 @@ const ROUTES: Route[] = [
       super_admin: 404,
       foreign_admin: 404,
     },
-    prepare: async (ctx) => ({
-      sessionId: await newSession(ctx, await ownerOf(ctx)),
-    }),
+    prepare: async (ctx) => {
+      const cookie = await owner(ctx);
+      const sessionId = await newSession(ctx, cookie);
+      expect((await putPart(ctx, cookie, sessionId)).status).toBe(200);
+      return { sessionId };
+    },
     send: (ctx, _r, cookie, p) =>
       ctx.call('DELETE', `/v2/media/uploads/${p.sessionId}`, cookie),
-    alive: async (ctx, p) => {
-      const cookie = await ownerOf(ctx);
-      expect(
-        (
-          await ctx.call(
-            'POST',
-            `/v2/media/uploads/${p.sessionId}/parts/presign`,
-            cookie
-          )
-        ).status
-      ).toBe(200);
-    },
+    alive: sessionAlive,
     verify: async (ctx, p) => {
-      // Session is gone: the owner's presign now 404s.
-      const cookie = await ownerOf(ctx);
-      expect(
-        (
-          await ctx.call(
-            'POST',
-            `/v2/media/uploads/${p.sessionId}/parts/presign`,
-            cookie
-          )
-        ).status
-      ).toBe(404);
+      expect(keysWith(ctx, p.sessionId!)).toHaveLength(0);
+      expect((await presign(ctx, await owner(ctx), p.sessionId!)).status).toBe(
+        404
+      );
     },
   },
   {
@@ -155,16 +158,19 @@ const ROUTES: Route[] = [
     expect: {
       anon: 401,
       editor: 200,
+      editor2: 404,
       admin: 404,
       super_admin: 404,
       foreign_admin: 404,
     },
     prepare: async (ctx) => ({
-      sessionId: await newSession(ctx, await ownerOf(ctx)),
+      sessionId: await newSession(ctx, await owner(ctx)),
     }),
     send: (ctx, _r, cookie, p) => putPart(ctx, cookie!, p.sessionId!),
-    verify: async (_ctx, _p, res) => {
+    alive: sessionAlive,
+    verify: async (ctx, p, res) => {
       expect(res.headers.get('etag')).toBe(`"${sha(MP4)}"`);
+      expect(keysWith(ctx, p.sessionId!).length).toBeGreaterThan(0);
     },
   },
   {
@@ -178,26 +184,29 @@ const ROUTES: Route[] = [
       foreign_admin: 404,
     },
     prepare: async (ctx) => ({
-      sessionId: await newSession(ctx, await ownerOf(ctx)),
+      sessionId: await newSession(ctx, await owner(ctx)),
     }),
-    send: (ctx, _r, cookie, p) =>
-      ctx.call(
-        'POST',
-        `/v2/media/uploads/${p.sessionId}/parts/presign`,
-        cookie
-      ),
+    send: (ctx, _r, cookie, p) => presign(ctx, cookie, p.sessionId!),
+    verify: async (_ctx, _p, res) => {
+      const data = (await json(res)).data as {
+        parts: Array<{ url: string; partNumber: number }>;
+      };
+      expect(data.parts[0]?.partNumber).toBe(1);
+      expect(data.parts[0]?.url).toEqual(expect.any(String));
+    },
   },
   {
     name: 'POST /v2/media/uploads/:id/complete',
     expect: {
       anon: 401,
       editor: 201,
+      editor2: 404,
       admin: 404,
       super_admin: 404,
       foreign_admin: 404,
     },
     prepare: async (ctx) => {
-      const cookie = await ownerOf(ctx);
+      const cookie = await owner(ctx);
       const sessionId = await newSession(ctx, cookie);
       expect((await putPart(ctx, cookie, sessionId)).status).toBe(200);
       return { sessionId };
@@ -206,9 +215,13 @@ const ROUTES: Route[] = [
       ctx.call('POST', `/v2/media/uploads/${p.sessionId}/complete`, cookie, {
         parts: [{ partNumber: 1, etag: sha(MP4) }],
       }),
-    verify: async (ctx, _p, res) => {
+    alive: sessionAlive,
+    verify: async (ctx, p, res) => {
       const id = String((await json(res)).data.id);
       expect(await fileRow(ctx, id)).toHaveLength(1);
+      const stored = bytesFor(ctx, id).map((k) => ctx.mem.store.get(k)!);
+      expect(stored.some((b) => sha(b) === sha(MP4))).toBe(true);
+      expect(keysWith(ctx, p.sessionId!)).toHaveLength(0);
     },
   },
   {
@@ -233,7 +246,8 @@ const ROUTES: Route[] = [
     verify: async (ctx, _p, res) => {
       const id = String((await json(res)).data.id);
       expect(await fileRow(ctx, id)).toHaveLength(1);
-      expect(bytesFor(ctx, id).length).toBeGreaterThan(0);
+      const stored = bytesFor(ctx, id).map((k) => ctx.mem.store.get(k)!);
+      expect(stored.some((b) => sha(b) === sha(PNG))).toBe(true);
     },
   },
   {
@@ -248,7 +262,7 @@ const ROUTES: Route[] = [
       super_admin: 404,
       foreign_admin: 404,
     },
-    prepare: async (ctx) => ({ id: await ctx.upload(await ownerOf(ctx)) }),
+    prepare: async (ctx) => ({ id: await ctx.upload(await owner(ctx)) }),
     send: (ctx, _r, cookie, p) =>
       ctx.call('DELETE', `/v2/media/${p.id}`, cookie),
     verify: async (ctx, p) => {
@@ -268,7 +282,7 @@ const ROUTES: Route[] = [
       super_admin: 404,
       foreign_admin: 404,
     },
-    prepare: async (ctx) => ({ id: await ctx.upload(await ownerOf(ctx)) }),
+    prepare: async (ctx) => ({ id: await ctx.upload(await owner(ctx)) }),
     send: (ctx, _r, cookie, p) =>
       ctx.call('GET', `/v2/media/${p.id}/metadata`, cookie),
     verify: async (_ctx, p, res) => {
@@ -288,7 +302,7 @@ const ROUTES: Route[] = [
       foreign_admin: 404,
     },
     prepare: async (ctx) => ({
-      id: (await attachedFile(ctx, await ownerOf(ctx))).fileId,
+      id: (await attachedFile(ctx, await owner(ctx))).fileId,
     }),
     send: (ctx, _r, cookie, p) =>
       ctx.call('GET', `/v2/media/${p.id}/metadata`, cookie),
@@ -309,14 +323,14 @@ const ROUTES: Route[] = [
       foreign_admin: 200,
     },
     prepare: async (ctx) => ({
-      id: (await attachedFile(ctx, await ownerOf(ctx))).fileId,
+      id: (await attachedFile(ctx, await owner(ctx))).fileId,
     }),
     send: (ctx, _r, cookie, p) =>
       ctx.call('GET', `/v2/public/communities/own-media/media/${p.id}`, cookie),
     verify: async (_ctx, _p, res) => {
-      expect(new Uint8Array(await res.arrayBuffer()).byteLength).toBe(
-        PNG.byteLength
-      );
+      expect(
+        Buffer.from(await res.arrayBuffer()).equals(Buffer.from(PNG))
+      ).toBe(true);
     },
   },
   {
@@ -331,7 +345,7 @@ const ROUTES: Route[] = [
       foreign_admin: 404,
     },
     prepare: async (ctx) => ({
-      id: await ctx.upload(await ownerOf(ctx)),
+      id: await ctx.upload(await owner(ctx)),
       storyId: ctx.storyId,
     }),
     send: (ctx, _r, cookie, p) =>
@@ -341,9 +355,16 @@ const ROUTES: Route[] = [
         ownerId: p.storyId,
         role: 'story_media',
       }),
-    verify: async (ctx, _p, res) => {
-      const id = (await json(res)).data.id;
-      expect(id).toBeTruthy();
+    verify: async (ctx, p, res) => {
+      const id = (await json(res)).data.id as number;
+      const row = (await ctx.db.select().from(ctx.tables.attachments)).find(
+        (r) => r.id === id
+      );
+      expect(row).toMatchObject({
+        fileId: p.id,
+        ownerType: 'story',
+        ownerId: p.storyId,
+      });
     },
   },
   {
@@ -358,7 +379,7 @@ const ROUTES: Route[] = [
       foreign_admin: 404,
     },
     prepare: async (ctx) => {
-      const cookie = await ownerOf(ctx);
+      const cookie = await owner(ctx);
       const ids: number[] = [];
       for (let i = 0; i < 2; i++)
         ids.push(
@@ -391,15 +412,12 @@ const ROUTES: Route[] = [
       super_admin: 403,
       foreign_admin: 404,
     },
-    prepare: async (ctx) => ({
-      ids: [
-        await ctx.attach(
-          await ownerOf(ctx),
-          await ctx.upload(await ownerOf(ctx)),
-          ctx.storyId
-        ),
-      ],
-    }),
+    prepare: async (ctx) => {
+      const cookie = await owner(ctx);
+      return {
+        ids: [await ctx.attach(cookie, await ctx.upload(cookie), ctx.storyId)],
+      };
+    },
     send: (ctx, _r, cookie, p) =>
       ctx.call('DELETE', `/v2/attachments/${p.ids![0]}`, cookie),
     verify: async (ctx, p) => {
@@ -427,10 +445,20 @@ describe('role matrix B: media, upload sessions and attachments', () => {
       const expected = route.expect[role]!;
       expect(res.status).toBe(expected);
       if (expected >= 400) {
-        const text = await res.clone().text();
-        expect(text).not.toContain('photo.png');
-        expect(text).not.toContain('clip.mp4');
-        if (p.id) expect(text).not.toContain(p.id);
+        const body = await res.clone().json();
+        expect(body).toEqual(DENIED_BODY[expected]);
+        const text = JSON.stringify(body);
+        expect(text).not.toMatch(/photo\.png|clip\.mp4/);
+        for (const id of [
+          p.id,
+          p.sessionId,
+          ...(p.ids ?? []),
+          p.storyId,
+        ].filter((v) => v !== undefined)) {
+          expect(text).not.toMatch(
+            new RegExp(`(^|[^A-Za-z0-9-])${id}($|[^A-Za-z0-9-])`)
+          );
+        }
         expect(await ctx.snapshot()).toBe(before);
         await route.alive?.(ctx, p);
       } else {
@@ -438,4 +466,53 @@ describe('role matrix B: media, upload sessions and attachments', () => {
       }
     }
   );
+});
+
+describe('role matrix B: public media visibility boundaries', () => {
+  afterEach(() => closeDbs());
+
+  it('public media is 404 for a file that is not attached', async () => {
+    const ctx = await setupMedia();
+    const fileId = await ctx.upload(await owner(ctx));
+    const res = await ctx.call(
+      'GET',
+      `/v2/public/communities/own-media/media/${fileId}`
+    );
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual(DENIED_BODY[404]);
+  });
+
+  it('public media is 404 under the wrong community slug, and 200 with exact bytes under the owner slug', async () => {
+    const ctx = await setupMedia();
+    const foreignCookie = await ctx.login('foreign_admin');
+    const [story] = await ctx.db
+      .insert(ctx.tables.stories)
+      .values({
+        title: 'Other Story',
+        slug: 'other-story',
+        privacyLevel: 'public',
+        isRestricted: false,
+        communityId: ctx.otherId,
+        createdBy: ctx.users.foreign_admin.id,
+        createdAt: new Date('2026-06-01T12:00:00.000Z'),
+        updatedAt: new Date('2026-06-01T12:00:00.000Z'),
+      })
+      .returning({ id: ctx.tables.stories.id });
+    const fileId = await ctx.upload(foreignCookie);
+    await ctx.attach(foreignCookie, fileId, story!.id);
+    const wrong = await ctx.call(
+      'GET',
+      `/v2/public/communities/own-media/media/${fileId}`
+    );
+    expect(wrong.status).toBe(404);
+    expect(await wrong.json()).toEqual(DENIED_BODY[404]);
+    const right = await ctx.call(
+      'GET',
+      `/v2/public/communities/other-media/media/${fileId}`
+    );
+    expect(right.status).toBe(200);
+    expect(
+      Buffer.from(await right.arrayBuffer()).equals(Buffer.from(PNG))
+    ).toBe(true);
+  });
 });

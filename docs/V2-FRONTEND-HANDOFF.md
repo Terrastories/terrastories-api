@@ -457,7 +457,7 @@ Client flow:
 
 1. For each media file the CSV references, call `POST /v2/media` (raw body, `x-content-sha256`, `?filename=`), as in D30.
 2. Send `POST /v2/imports/preview` as `multipart/form-data` with the CSV in `file` and text fields only: `kind`, `mappings`, `audienceMapping`, `duplicateStrategy`, and `mediaFileIds`, a JSON array of the staged ids (at most 100, no duplicates).
-3. A CSV media column references a listed file by its id or by its original filename (the `filename` sent at upload). Check the names against the CSV before sending.
+3. A CSV media column references a listed file by its id or by its original filename (the `filename` sent at upload). The API stores that filename sanitized (`café.png` is stored as `caf-.png`), and a column may use either spelling. Check the names against the CSV before sending.
 4. `POST /v2/imports/:id/commit` and `DELETE /v2/imports/:id` are unchanged.
 
 Errors:

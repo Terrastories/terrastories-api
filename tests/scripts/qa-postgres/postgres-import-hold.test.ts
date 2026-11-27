@@ -1,17 +1,18 @@
 /**
- * #282: two previews race for one staged upload on PostgreSQL.
+ * #282: a preview and an attach race for one staged upload on PostgreSQL.
  *
- * PostgreSQL is the only backend where two previews can reach the hold at the
- * same time through row locks and the per-community advisory lock: SQLite
- * serializes writers and D1 runs one batch per request. Both requests here
- * have resolved the declared upload as adoptable before either transaction
- * starts, so the loser must roll back everything it wrote and leave the
- * upload held by exactly one preview.
+ * PostgreSQL is the only backend where the two can reach the upload's row at
+ * the same time through row locks: SQLite serializes writers and D1 runs one
+ * batch per request. Two previews race for the hold itself; an attach races
+ * the hold from the other side, reading the upload as active staging before
+ * the preview's transaction takes the row lock. Whichever transaction gets
+ * the `files` row first must win: the loser rolls back everything it wrote
+ * and leaves the upload held by exactly one preview, attached to nothing.
  *
  * Gated like the persona wrappers: it resets the shared test database, so it
  * runs only under `npm run qa:personas:postgres` against a ready target.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import {
   decidePostgresPersonaQa,
@@ -20,6 +21,7 @@ import {
 import { tablesFor } from '../../../src/db/dialect.js';
 import { createHonoApp } from '../../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../../src/repositories/hono-foundation.repository.js';
+import { MediaWritesRepository } from '../../../src/repositories/media-writes.repository.js';
 import { MediaCleanupCoordinator } from '../../../src/services/media-cleanup.service.js';
 import type { FoundationStorage } from '../../../src/services/hono-foundation.service.js';
 import { deriveUserIdentityColumns } from '../../../src/shared/utils/derived-columns.js';
@@ -127,6 +129,29 @@ function postPreview(
       cookie,
     },
     body,
+  });
+}
+
+/** `POST /v2/attachments`: `fileId` becomes the photo of place `placeId`. */
+async function postAttach(
+  app: App,
+  cookie: string,
+  placeId: number,
+  fileId: string
+): Promise<Response> {
+  return app.request(`${API_ORIGIN}/v2/attachments`, {
+    method: 'POST',
+    headers: {
+      cookie,
+      origin: CLIENT_ORIGIN,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      fileId,
+      ownerType: 'place',
+      ownerId: placeId,
+      role: 'place_photo',
+    }),
   });
 }
 
@@ -297,6 +322,224 @@ describe(
       },
       // Same generous bound as the persona wrappers: the race is bounded by
       // the advisory lock, not by the network.
+      120000
+    );
+
+    // The attach reads the upload as active staging first and takes the row
+    // lock afterwards, so a preview's hold can commit in between. The attach
+    // is held exactly there: after its read, before its lock. Nothing it does
+    // reaches storage, so the read itself is wrapped instead of a storage put.
+    it.skipIf(!decision.run)(
+      'refuses an attach that resolved a staged upload before a preview held it',
+      async () => {
+        if (decision.target.status !== 'ready')
+          throw new Error(
+            `qa:personas:postgres requires a PostgreSQL target: ${decision.target.reason}`
+          );
+        type ResolveAttachable = (
+          executor: unknown,
+          fileId: string,
+          communityId: number | null
+        ) => Promise<unknown>;
+        const resolvers = MediaWritesRepository.prototype as unknown as {
+          resolveAttachableFile: ResolveAttachable;
+        };
+        const resolveAttachable = resolvers.resolveAttachableFile;
+        let contestedId = '';
+        let paused = false;
+        let resume!: () => void;
+        let hasRead!: () => void;
+        const beforeTheLock = new Promise<void>((resolve) => {
+          resume = resolve;
+        });
+        const afterTheRead = new Promise<void>((resolve) => {
+          hasRead = resolve;
+        });
+        // Fires once, for the contested upload; the preview never reads it.
+        const readSpy = vi
+          .spyOn(resolvers, 'resolveAttachableFile')
+          .mockImplementation(async function (
+            this: unknown,
+            executor: unknown,
+            fileId: string,
+            communityId: number | null
+          ) {
+            const file = await resolveAttachable.call(
+              this,
+              executor,
+              fileId,
+              communityId
+            );
+            if (fileId === contestedId && !paused) {
+              paused = true;
+              hasRead();
+              await beforeTheLock;
+            }
+            return file;
+          });
+        const qa = await openPersonaQaDatabase();
+        let attach: Promise<Response> | undefined;
+        try {
+          const db = qa.db;
+          const tables = tablesFor(db);
+          const [community] = await db
+            .insert(tables.communities)
+            .values({
+              name: 'PG Staged Import',
+              description: 'Import staged-media hold against an attach',
+              slug: `pg-staged-attach-${Date.now()}`,
+              publicStories: false,
+              locale: 'en',
+              isActive: true,
+              createdAt: APP_NOW,
+              updatedAt: APP_NOW,
+            })
+            .returning({
+              id: tables.communities.id,
+              slug: tables.communities.slug,
+            });
+          const email = 'pg-staged-editor@example.test';
+          const username = 'pg_staged_editor';
+          await db.insert(tables.users).values({
+            email,
+            username,
+            displayName: 'PG Staged',
+            ...deriveUserIdentityColumns({ email, username }),
+            ...(await argon2Seed(DERIVED_KEY)),
+            firstName: 'PG',
+            lastName: 'Staged',
+            role: 'editor',
+            communityId: community!.id,
+            isActive: true,
+          });
+          const [place] = await db
+            .insert(tables.places)
+            .values({
+              name: 'PG Attach Owner',
+              communityId: community!.id,
+              isRestricted: false,
+              createdAt: APP_NOW,
+              updatedAt: APP_NOW,
+            })
+            .returning({ id: tables.places.id });
+
+          const mem = createRacingMemoryStorage(async () => undefined);
+          const app = createHonoApp({
+            repository: new HonoFoundationRepository(db),
+            storage: mem.storage,
+            mediaCleanup: new MediaCleanupCoordinator(db, mem.storage, {
+              now: () => APP_NOW,
+            }),
+            publicOrigin: API_ORIGIN,
+            corsOrigins: [CLIENT_ORIGIN],
+            secureCookies: false,
+            serverSecret: makeServerSecret(),
+            now: () => APP_NOW,
+          });
+
+          const login = await app.request(`${API_ORIGIN}/v2/auth/login`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              identifier: email,
+              communitySlug: community!.slug,
+              derivedKey: DERIVED_KEY,
+            }),
+          });
+          expect(login.status).toBe(200);
+          const cookie = (login.headers.get('set-cookie') ?? '').split(';')[0]!;
+
+          const upload = rawUploadRequest({
+            filename: 'contested-pic.png',
+            contentType: 'image/png',
+            bytes: PNG_BYTES,
+          });
+          const staged = await app.request(
+            `${API_ORIGIN}/v2/media${upload.search}`,
+            {
+              method: 'POST',
+              headers: { ...upload.headers, cookie, origin: CLIENT_ORIGIN },
+              body: upload.body,
+            }
+          );
+          expect(staged.status).toBe(201);
+          contestedId = MediaUploadResponseSchema.parse(await staged.json())
+            .data.id;
+
+          const pending = postAttach(app, cookie, place!.id, contestedId);
+          attach = pending;
+          // The attach has resolved the upload as active staging and is now
+          // waiting, transaction open, for its row lock. An attach that never
+          // gets there fails at once instead of timing out.
+          await Promise.race([
+            afterTheRead,
+            new Promise<never>((_, reject) => {
+              pending.then(
+                (response) =>
+                  reject(
+                    new Error(
+                      `the attach finished with ${response.status} before its row lock`
+                    )
+                  ),
+                () => undefined
+              );
+            }),
+          ]);
+
+          // The preview's hold takes and releases the row lock meanwhile.
+          const preview = await postPreview(
+            app,
+            cookie,
+            'hold-first.csv',
+            'Hold First Place',
+            contestedId
+          );
+          expect(preview.status).toBe(201);
+          resume();
+
+          const response = await pending;
+          expect(paused).toBe(true);
+          expect(response.status).toBe(404);
+          expect(await response.json()).toEqual(NOT_FOUND);
+
+          // Nothing was attached to the upload ...
+          const relations = await db
+            .select({ id: tables.attachments.id })
+            .from(tables.attachments)
+            .where(eq(tables.attachments.fileId, contestedId));
+          expect(relations).toEqual([]);
+          // ... which the preview alone holds ...
+          const [contested] = await db
+            .select({ isActive: tables.files.isActive })
+            .from(tables.files)
+            .where(eq(tables.files.id, contestedId));
+          expect(contested?.isActive).toBe(false);
+          const manifests = await db
+            .select({
+              status: tables.importManifests.status,
+              stagedFileIds: tables.importManifests.stagedFileIds,
+            })
+            .from(tables.importManifests);
+          expect(manifests).toHaveLength(1);
+          expect(manifests[0]?.status).toBe('previewed');
+          const stagedIds: unknown = manifests[0]?.stagedFileIds;
+          expect(
+            typeof stagedIds === 'string' ? JSON.parse(stagedIds) : stagedIds
+          ).toEqual([contestedId]);
+          // ... and the refused attach is recorded as denied, never as a success.
+          const attachAudits = await db
+            .select({ outcome: tables.auditEntries.outcome })
+            .from(tables.auditEntries)
+            .where(eq(tables.auditEntries.action, 'attachment.create'));
+          expect(attachAudits).toEqual([{ outcome: 'denied' }]);
+        } finally {
+          // Never leave the paused transaction open behind a failed assertion.
+          resume();
+          readSpy.mockRestore();
+          await attach?.catch(() => undefined);
+          await qa.close();
+        }
+      },
       120000
     );
   }

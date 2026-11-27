@@ -26,7 +26,7 @@ import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
-import { eq, inArray, like } from 'drizzle-orm';
+import { and, eq, inArray, like } from 'drizzle-orm';
 import {
   argon2Seed,
   makeDerivedKey,
@@ -36,6 +36,7 @@ import { deriveUserIdentityColumns } from '../../src/shared/utils/derived-column
 import { tablesFor } from '../../src/db/dialect.js';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
+import { MediaWritesRepository } from '../../src/repositories/media-writes.repository.js';
 import { MediaCleanupCoordinator } from '../../src/services/media-cleanup.service.js';
 import type { FoundationStorage } from '../../src/services/hono-foundation.service.js';
 import {
@@ -952,6 +953,154 @@ describe('POST /v2/imports/preview with media staged ahead of the request (#282)
     ).toHaveLength(1);
   });
 
+  // The other side of that race: the attach resolved the upload while it was
+  // still an active staging upload, and a preview held it before the attach's
+  // own write. The hold is placed between the two, after the attach's last
+  // read, so only a check made by the write itself can refuse it.
+  it('refuses an attach that resolved a staging upload before a preview held it', async () => {
+    const picId = await stageMedia(cookies.editor, 'held-before-attach.png');
+    const resolveReuse = MediaWritesRepository.prototype.authorizeAttachReuse;
+    let holding: Response | undefined;
+    const reuse = vi
+      .spyOn(MediaWritesRepository.prototype, 'authorizeAttachReuse')
+      .mockImplementation(async function (this: MediaWritesRepository, input) {
+        const verdict = await resolveReuse.call(this, input);
+        if (input.file.id === picId && !holding) {
+          holding = await postPreview(app, {
+            cookie: cookies.editor,
+            csvText: `name,photo\nHeld First Place,${picId}\n`,
+            fields: { kind: 'places', ...declared([picId]) },
+          });
+        }
+        return verdict;
+      });
+    let attach: Response;
+    try {
+      attach = await app.request(`${API_ORIGIN}/v2/attachments`, {
+        method: 'POST',
+        headers: {
+          cookie: cookies.editor,
+          origin: CLIENT_ORIGIN,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          fileId: picId,
+          ownerType: 'place',
+          ownerId: ownPlaceId,
+          role: 'place_photo',
+        }),
+      });
+    } finally {
+      reuse.mockRestore();
+    }
+    expect(holding?.status).toBe(201);
+    expect(attach.status).toBe(404);
+    expect(await attach.json()).toEqual(NOT_FOUND);
+
+    // The upload belongs to the preview alone: nothing was attached to it ...
+    const relations = await db
+      .select({ id: tables.attachments.id })
+      .from(tables.attachments)
+      .where(eq(tables.attachments.fileId, picId));
+    expect(relations).toEqual([]);
+    // ... the preview still holds it, unreachable on every surface ...
+    expect((await fileRow(picId))?.isActive).toBe(false);
+    expect((await getMedia(cookies.editor, picId)).status).toBe(404);
+    expect((await getMedia(cookies.admin, picId)).status).toBe(404);
+    // ... and the refused attach left a denied audit entry, never a success.
+    const attachAudits = await db
+      .select({ outcome: tables.auditEntries.outcome })
+      .from(tables.auditEntries)
+      .where(
+        and(
+          eq(tables.auditEntries.action, 'attachment.create'),
+          like(tables.auditEntries.resourceIds, `%${picId}%`)
+        )
+      );
+    expect(attachAudits).toEqual([{ outcome: 'denied' }]);
+  });
+
+  // The uniform 404 must not depend on where a dead id sits in `mediaFileIds`:
+  // every listed id is judged available first, and only then is a file refused
+  // for its filename or its references.
+  it('answers the same 404 in either order when one listed id is not adoptable, whatever another listed file would be refused for', async () => {
+    const idleId = await stageMedia(cookies.editor, 'order-idle.png');
+    const twinA = await stageMedia(cookies.editor, 'order-twin.png');
+    const twinB = await stageMedia(cookies.editor, 'order-twin.png');
+    const attachedId = await stageMedia(cookies.editor, 'order-attached.png');
+    const attached = await app.request(`${API_ORIGIN}/v2/attachments`, {
+      method: 'POST',
+      headers: {
+        cookie: cookies.editor,
+        origin: CLIENT_ORIGIN,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        fileId: attachedId,
+        ownerType: 'place',
+        ownerId: ownPlaceId,
+        role: 'place_photo',
+      }),
+    });
+    expect(attached.status).toBe(201);
+    const heldId = await stageMedia(cookies.editor, 'order-held.png');
+    const holding = await postPreview(app, {
+      cookie: cookies.editor,
+      csvText: `name,photo\nOrder Holder,${heldId}\n`,
+      fields: { kind: 'places', ...declared([heldId]) },
+    });
+    expect(holding.status).toBe(201);
+    const foreignId = await stageMedia(cookies.foreign, 'order-foreign.png');
+    const before = await snapshotState();
+
+    // The CSV names an unreferenced file, or the two files with one name.
+    const unreferenced = 'name,photo\nOrder Place,\n';
+    const twins = `name,photo\nTwin Place One,${twinA}\nTwin Place Two,${twinB}\n`;
+    // Listed alone, the caller's own files are refused with 400 ...
+    for (const [listed, csvText] of [
+      [[idleId], unreferenced],
+      [[twinA, twinB], twins],
+    ] as const) {
+      const ownFiles = await postPreview(app, {
+        cookie: cookies.editor,
+        csvText,
+        fields: { kind: 'places', ...declared([...listed]) },
+      });
+      expect(ownFiles.status).toBe(400);
+    }
+    // ... but that refusal never outranks a missing, foreign, attached or
+    // held id, wherever it sits in the list.
+    for (const [reason, deadId] of Object.entries({
+      missing: MISSING_ID,
+      foreign: foreignId,
+      attached: attachedId,
+      held: heldId,
+    })) {
+      const orders: Array<[string, string[], string]> = [
+        ['after an unreferenced file', [idleId, deadId], unreferenced],
+        ['before an unreferenced file', [deadId, idleId], unreferenced],
+        ['after a duplicate filename', [twinA, twinB, deadId], twins],
+        ['before a duplicate filename', [deadId, twinA, twinB], twins],
+      ];
+      for (const [position, listed, csvText] of orders) {
+        const res = await postPreview(app, {
+          cookie: cookies.editor,
+          csvText,
+          fields: { kind: 'places', ...declared(listed) },
+        });
+        expect(res.status, `a ${reason} id ${position}`).toBe(404);
+        expect(await res.json(), `a ${reason} id ${position}`).toEqual(
+          NOT_FOUND
+        );
+      }
+    }
+    expect(await snapshotState()).toEqual(before);
+    expect((await fileRow(idleId))?.isActive).toBe(true);
+    expect((await fileRow(twinA))?.isActive).toBe(true);
+    expect((await fileRow(twinB))?.isActive).toBe(true);
+    expect((await getMedia(cookies.foreign, foreignId)).status).toBe(200);
+  });
+
   it('rejects a declared file the CSV does not reference, naming its index, and holds nothing for invalid rows', async () => {
     const usedId = await stageMedia(cookies.editor, 'used-pic.png');
     const idleId = await stageMedia(cookies.editor, 'idle-pic.png');
@@ -1060,6 +1209,138 @@ describe('POST /v2/imports/preview with media staged ahead of the request (#282)
     ).toEqual([['photo', 'too_many_refs']]);
     expect((await fileRow(crowdedId))?.isActive).toBe(true);
     expect((await getMedia(cookies.editor, crowdedId)).status).toBe(200);
+  });
+
+  // `POST /v2/media` stores a sanitized display name, so `café.png` is stored
+  // as `caf-.png`. A CSV is written against the filename the uploader sent, so
+  // a media column must find the file under that name as well.
+  it('finds a listed file by the filename the uploader sent, which is not its stored name', async () => {
+    const picId = await stageMedia(cookies.editor, 'café.png');
+    expect((await fileRow(picId))?.originalName).toBe('caf-.png');
+
+    // Named as it was sent ...
+    const asSent = await postPreview(app, {
+      cookie: cookies.editor,
+      csvText: 'name,photo\nCafé Place,café.png\n',
+      fields: { kind: 'places', ...declared([picId]) },
+    });
+    expect(asSent.status).toBe(201);
+    const data = ImportManifestDetailResponseSchema.parse(
+      await asSent.json()
+    ).data;
+    expect(data.canCommit).toBe(true);
+    expect(data.stagedMediaCount).toBe(1);
+    expect(data.previewRows).toEqual([
+      {
+        kind: 'places',
+        rowNumber: 1,
+        name: 'Café Place',
+        descriptionExcerpt: null,
+        typeOfPlace: null,
+        region: null,
+        latitude: null,
+        longitude: null,
+        attachments: [{ role: 'place_photo', ordinal: 0, source: 'staged' }],
+      },
+    ]);
+    expect((await fileRow(picId))?.isActive).toBe(false);
+    const committed = await commitManifest(cookies.editor, data.id);
+    expect(committed.status).toBe(200);
+    expect(
+      ImportManifestDetailResponseSchema.parse(await committed.json()).data
+        .resultSummary
+    ).toMatchObject({ createdPlaces: 1, createdAttachments: 1 });
+
+    // ... and as it is stored: both spellings name the upload.
+    const storedId = await stageMedia(cookies.editor, 'café.png');
+    const asStored = await postPreview(app, {
+      cookie: cookies.editor,
+      csvText: 'name,photo\nStored Name Place,caf-.png\n',
+      fields: { kind: 'places', ...declared([storedId]) },
+    });
+    expect(asStored.status).toBe(201);
+    expect(
+      ImportManifestDetailResponseSchema.parse(await asStored.json()).data
+        .stagedMediaCount
+    ).toBe(1);
+    expect((await fileRow(storedId))?.isActive).toBe(false);
+
+    // A file id is still matched exactly as written: cleaning a token never
+    // turns it into the id of a listed file.
+    const exactId = await stageMedia(cookies.editor, 'exact-id.png');
+    const decorated = await postPreview(app, {
+      cookie: cookies.editor,
+      csvText: `name,photo\nDecorated Id Place,photos/${exactId}\n`,
+      fields: { kind: 'places', ...declared([exactId]) },
+    });
+    expect(decorated.status).toBe(400);
+    expect(await decorated.json()).toEqual({
+      error: 'Validation failed',
+      code: 'validation_error',
+      details: {
+        fields: [
+          {
+            path: 'mediaFileIds[0]',
+            message:
+              'Staged media file is not referenced by any CSV media column',
+          },
+        ],
+      },
+    });
+    expect((await fileRow(exactId))?.isActive).toBe(true);
+
+    // A filename is matched the same way inside an over-limit media cell.
+    const crowdedId = await stageMedia(cookies.editor, 'café.png');
+    const crowded: string[] = Array.from(
+      { length: MAX_IMPORT_MEDIA_REFS_PER_ROW + 1 },
+      () => randomUUID()
+    );
+    crowded[MAX_IMPORT_MEDIA_REFS_PER_ROW] = 'café.png';
+    const overLimit = await postPreview(app, {
+      cookie: cookies.editor,
+      csvText: `name,photo\nCrowded Café,${crowded.join('|')}\n`,
+      fields: { kind: 'places', ...declared([crowdedId]) },
+    });
+    expect(overLimit.status).toBe(201);
+    const overLimitData = ImportManifestDetailResponseSchema.parse(
+      await overLimit.json()
+    ).data;
+    expect(overLimitData.canCommit).toBe(false);
+    expect(overLimitData.stagedMediaCount).toBe(0);
+    expect((await fileRow(crowdedId))?.isActive).toBe(true);
+
+    // An upload named before the sanitizer existed keeps its name as sent.
+    // It is still found by that name, exactly as before.
+    const legacyId = randomUUID();
+    const legacyKey = `communities/${ids.ownCommunity}/media/${legacyId}`;
+    const now = new Date('2026-06-15T12:00:00.000Z');
+    await db.insert(tables.files).values({
+      id: legacyId,
+      filename: legacyId,
+      originalName: 'café.png',
+      path: legacyKey,
+      storageKey: legacyKey,
+      url: `/v2/media/${legacyId}`,
+      mimeType: 'image/png',
+      size: PNG_BYTES.byteLength,
+      byteSize: PNG_BYTES.byteLength,
+      checksum: sha256Hex(PNG_BYTES),
+      communityId: ids.ownCommunity,
+      isActive: true,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const legacy = await postPreview(app, {
+      cookie: cookies.admin,
+      csvText: 'name,photo\nLegacy Name Place,café.png\n',
+      fields: { kind: 'places', ...declared([legacyId]) },
+    });
+    expect(legacy.status).toBe(201);
+    expect(
+      ImportManifestDetailResponseSchema.parse(await legacy.json()).data
+        .stagedMediaCount
+    ).toBe(1);
+    expect((await fileRow(legacyId))?.isActive).toBe(false);
   });
 
   it('rejects malformed mediaFileIds and duplicate filenames with a field error, rolling back any legacy multipart media', async () => {
@@ -1211,7 +1492,9 @@ describe('POST /v2/imports/preview with media staged ahead of the request (#282)
 });
 
 describe('POST /v2/imports/preview staged media on the D1 batch path (#282)', () => {
-  async function setupD1App(hooks?: { onBeforeBatch?: () => Promise<void> }) {
+  async function setupD1App(hooks?: {
+    onBeforeBatch?: (queries: string[]) => Promise<void>;
+  }) {
     const d1 = createFakeD1(hooks);
     const now = new Date('2026-06-15T12:00:00.000Z');
     const d1Tables = tablesFor(d1.db);
@@ -1530,6 +1813,111 @@ describe('POST /v2/imports/preview staged media on the D1 batch path (#282)', ()
       });
       // The preview's source CSV bytes were not kept either.
       expect(d1Mem.store.size).toBe(keysWithUploads);
+    } finally {
+      d1.sqlite.close();
+    }
+  });
+
+  // The other side of that race. The attach resolved the upload while it was
+  // an active staging upload, and a preview held it before the attach's batch
+  // ran. The relation and its success audit are two statements of one batch,
+  // so each must refuse on its own.
+  it('answers 404 and writes nothing for an attach whose upload a preview held after the attach resolved it', async () => {
+    const race: {
+      cookie: string;
+      picId: string;
+      armed: boolean;
+      target?: App;
+      preview?: Response;
+    } = { cookie: '', picId: '', armed: false };
+    const context = await setupD1App({
+      onBeforeBatch: async (queries) => {
+        if (
+          !race.armed ||
+          !race.target ||
+          !queries.some((query) => query.includes('into "attachments"'))
+        ) {
+          return;
+        }
+        race.armed = false;
+        race.preview = await postPreview(race.target, {
+          cookie: race.cookie,
+          csvText: `name,photo\nHeld First Place,${race.picId}\n`,
+          fields: { kind: 'places', ...declared([race.picId]) },
+        });
+      },
+    });
+    const { d1, d1Tables, d1App, cookie } = context;
+    race.cookie = cookie;
+    race.target = d1App;
+    try {
+      race.picId = await stageOnD1(d1App, cookie, 'held-before-attach.png');
+      const now = new Date('2026-06-15T12:00:00.000Z');
+      const [owner] = await d1.db
+        .insert(d1Tables.places)
+        .values({
+          name: 'Attachment Owner',
+          communityId: 1,
+          latitude: 1.5,
+          longitude: 2.5,
+          isRestricted: false,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning({ id: d1Tables.places.id });
+
+      race.armed = true;
+      const attach = await d1App.request(`${API_ORIGIN}/v2/attachments`, {
+        method: 'POST',
+        headers: {
+          cookie,
+          origin: CLIENT_ORIGIN,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          fileId: race.picId,
+          ownerType: 'place',
+          ownerId: owner?.id,
+          role: 'place_photo',
+        }),
+      });
+      expect(race.preview?.status).toBe(201);
+      expect(attach.status).toBe(404);
+      expect(await attach.json()).toEqual(NOT_FOUND);
+
+      // Nothing was attached to the upload ...
+      expect(
+        await d1.db
+          .select({ id: d1Tables.attachments.id })
+          .from(d1Tables.attachments)
+      ).toEqual([]);
+      // ... which the preview alone holds ...
+      expect(await uploadStates(context, [race.picId])).toEqual({
+        [race.picId]: 0,
+      });
+      const manifests = await d1.db
+        .select({
+          status: d1Tables.importManifests.status,
+          stagedFileIds: d1Tables.importManifests.stagedFileIds,
+        })
+        .from(d1Tables.importManifests);
+      expect(manifests).toHaveLength(1);
+      expect(manifests[0]?.status).toBe('previewed');
+      const stagedIds: unknown = manifests[0]?.stagedFileIds;
+      expect(
+        typeof stagedIds === 'string' ? JSON.parse(stagedIds) : stagedIds
+      ).toEqual([race.picId]);
+      // ... and the attach left a denied audit entry, never a success one.
+      const attachAudits = await d1.db
+        .select({ outcome: d1Tables.auditEntries.outcome })
+        .from(d1Tables.auditEntries)
+        .where(
+          and(
+            eq(d1Tables.auditEntries.action, 'attachment.create'),
+            like(d1Tables.auditEntries.resourceIds, `%${race.picId}%`)
+          )
+        );
+      expect(attachAudits).toEqual([{ outcome: 'denied' }]);
     } finally {
       d1.sqlite.close();
     }

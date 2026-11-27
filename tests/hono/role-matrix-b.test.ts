@@ -27,6 +27,12 @@ import {
 
 const API_ORIGIN = 'https://api.example.test';
 
+/** Every SQLite handle opened by setup(); closed after each test. */
+const openDbs: Sqlite.Database[] = [];
+afterEach(() => {
+  while (openDbs.length > 0) openDbs.pop()?.close();
+});
+
 type Role =
   | 'anon'
   | 'viewer'
@@ -50,6 +56,7 @@ async function makeCreds(): Promise<Creds> {
 
 async function setup() {
   const sqlite = new Sqlite(':memory:');
+  openDbs.push(sqlite);
   sqlite.pragma('foreign_keys = ON');
   const db = drizzle(sqlite);
   migrate(db, { migrationsFolder: 'src/db/migrations' });
@@ -356,12 +363,52 @@ const MATRIX = ROUTES.flatMap((route) =>
   (Object.keys(route.expect) as Role[]).map((role) => ({ route, role }))
 );
 
-describe('role matrix B: sovereignty writes', () => {
-  const dbs: Sqlite.Database[] = [];
-  afterEach(() => {
-    while (dbs.length > 0) dbs.pop()?.close();
-  });
+type Ctx = Awaited<ReturnType<typeof setup>>;
+/** Read-back for each allowed cell: the write must be visible in stored state. */
+const VERIFY: Record<
+  string,
+  (ctx: Ctx, extra: { requestId?: number }, role: Role) => Promise<void>
+> = {
+  'PUT /v2/community/steward': async (ctx) => {
+    const rows = await ctx.db.select().from(communityStewardsSqlite);
+    expect(rows.some((r) => r.userId === ctx.people.target.user.id)).toBe(true);
+  },
+  'POST /v2/community/withdrawal': async (ctx, _extra, role) => {
+    const [alpha] = (await ctx.db.select().from(communitiesSqlite)).filter(
+      (c) => c.id === ctx.alpha.id
+    );
+    if (role === 'admin') {
+      expect(alpha?.isActive).toBe(false);
+    } else {
+      const requests = await ctx.db
+        .select()
+        .from(communitySovereigntyRequestsSqlite);
+      expect(requests.some((r) => r.state === 'notice')).toBe(true);
+      expect(alpha?.isActive).toBe(true);
+    }
+  },
+  'POST /v2/community/erasure': async (ctx, _extra, role) => {
+    if (role === 'admin') {
+      // Immediate erasure is written to the erasure record store.
+      expect(ctx.records.has(ctx.alpha.id)).toBe(true);
+    } else {
+      const requests = await ctx.db
+        .select()
+        .from(communitySovereigntyRequestsSqlite);
+      expect(requests.some((r) => r.communityId === ctx.alpha.id)).toBe(true);
+    }
+  },
+  'POST /v2/community/sovereignty/cancel': async (ctx, extra) => {
+    const requests = await ctx.db
+      .select()
+      .from(communitySovereigntyRequestsSqlite);
+    expect(requests.find((r) => r.id === extra.requestId)?.state).toBe(
+      'cancelled'
+    );
+  },
+};
 
+describe('role matrix B: sovereignty writes', () => {
   it.each(MATRIX.map((c) => [`${c.route.name} as ${c.role}`, c] as const))(
     '%s',
     async (_label, { route, role }) => {
@@ -383,6 +430,8 @@ describe('role matrix B: sovereignty writes', () => {
         expect(await ctx.snapshot()).toBe(before);
         const json = (await res.json()) as Record<string, unknown>;
         expect(Object.keys(json)).toEqual(['error']);
+      } else {
+        await VERIFY[route.name]?.(ctx, extra, role);
       }
     }
   );
@@ -495,16 +544,35 @@ describe('role matrix B: super_admin erasure listing', () => {
     async (_label, role) => {
       const ctx = await setup();
       await ctx.designateSteward();
+      // Seed the record from the foreign community: an erasure fences only its
+      // own community, so alpha's actors stay logged in and get a real 403.
       const cookie = role === 'anon' ? undefined : await ctx.loginCookie(role);
+      const seeded = await ctx.call(
+        'POST',
+        '/v2/community/erasure',
+        await ctx.loginCookie('foreign_admin'),
+        {
+          confirmFinality: true,
+          currentDerivedKey: ctx.people.foreign_admin.creds.derivedKey,
+        }
+      );
+      expect(seeded.status).toBe(202);
+      expect(ctx.records.has(ctx.foreign.id)).toBe(true);
       const before = await ctx.snapshot();
       const res = await ctx.call('GET', '/v2/admin/erasures', cookie);
       const json = (await res.json()) as Record<string, unknown>;
       if (role === 'super_admin') {
         expect(res.status).toBe(200);
-        expect(Array.isArray(json.data)).toBe(true);
+        const listed = json.data as Array<{ communityId: number }>;
+        expect(listed.length).toBeGreaterThan(0);
+        expect(listed.some((r) => r.communityId === ctx.foreign.id)).toBe(true);
         return;
       }
-      expect(res.status).toBe(role === 'anon' ? 401 : 403);
+      // The foreign admin's own erasure fences its community and revokes its
+      // session, so that cell is 401 (session gone), not a role 403.
+      expect(res.status).toBe(
+        role === 'anon' || role === 'foreign_admin' ? 401 : 403
+      );
       expect(json).not.toHaveProperty('data');
       expect(await ctx.snapshot()).toBe(before);
     }

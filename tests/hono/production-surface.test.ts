@@ -47,6 +47,9 @@ describe('Hono production surface (#146 / #137)', () => {
       usernameNormalized: 'surface_editor',
       communityId: community!.id,
     });
+    sqlite.exec(
+      "INSERT INTO files(id,filename,original_name,path,url,mime_type,size,community_id,uploaded_by,created_at,updated_at) VALUES('00000000-0000-4000-8000-0000000000aa','f','f','communities/1/f','https://ignored.invalid','image/png',1,1,1,0,0)"
+    );
     // Production-like options: deployed https origin, secure cookies.
     const app = createHonoApp({
       repository: new HonoFoundationRepository(db),
@@ -127,7 +130,7 @@ describe('Hono production surface (#146 / #137)', () => {
     for (const [method, path] of [
       ['GET', '/v2/community/themes'],
       ['PUT', '/v2/community/themes'],
-      ['POST', '/v2/media/1/copy'],
+      ['POST', '/v2/media/00000000-0000-4000-8000-0000000000aa/copy'],
     ] as const) {
       const response = await app.request(`https://api.example.test${path}`, {
         method,
@@ -135,6 +138,8 @@ describe('Hono production surface (#146 / #137)', () => {
         body: method === 'GET' ? undefined : '{}',
       });
       expect(response.status, `${method} ${path}`).toBe(404);
+      // The router's own not-found body, even though the file exists.
+      expect(await response.json()).toEqual({ error: 'Not found' });
     }
     expect(await tableCounts(db)).toEqual(before);
   });

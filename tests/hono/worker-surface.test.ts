@@ -36,6 +36,9 @@ it('serves no dev or deferred routes and authorizes sessions from D1 only (produ
       db.prepare(
         "INSERT INTO users(id,email,password_hash,first_name,last_name,role,community_id,created_at,updated_at) VALUES(1,'editor@example.org','source-hash','Test','Editor','editor',1,0,0)"
       ),
+      db.prepare(
+        "INSERT INTO files(id,filename,original_name,path,url,mime_type,size,community_id,uploaded_by,created_at,updated_at) VALUES('00000000-0000-4000-8000-0000000000aa','f','f','communities/1/f','https://ignored.invalid','image/png',1,1,1,0,0)"
+      ),
       db
         .prepare(
           'INSERT INTO sessions(id,token_hash,user_id,expires_at) VALUES(?,?,1,?)'
@@ -61,11 +64,12 @@ it('serves no dev or deferred routes and authorizes sessions from D1 only (produ
     }
     for (const [method, path] of [
       ['GET', '/v2/community/themes'],
-      ['POST', '/v2/media/1/copy'],
+      ['POST', '/v2/media/00000000-0000-4000-8000-0000000000aa/copy'],
     ] as const) {
-      expect((await request(path, method)).status, `${method} ${path}`).toBe(
-        404
-      );
+      const response = await request(path, method);
+      expect(response.status, `${method} ${path}`).toBe(404);
+      // The router's own not-found body, not a handler answering for a seeded file.
+      expect(await response.json()).toEqual({ error: 'Not found' });
     }
     // Same running worker: the cookie dies the moment the D1 row is gone.
     expect((await request('/v2/auth/me')).status).toBe(200);

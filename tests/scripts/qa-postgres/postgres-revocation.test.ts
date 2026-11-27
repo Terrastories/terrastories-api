@@ -237,8 +237,9 @@ describe(
       // deadlock_timeout after a backend starts waiting, and the checker aborts
       // itself. The revocation is necessarily the first waiter, so its timeout
       // (5 s) leaves ample room for the other side to issue its conflicting
-      // statement before the check, while the other side's (120 s) means it
-      // never checks first. (These settings need a superuser, which the
+      // statement before the check, while the other side's (15 s, 3x) means it
+      // never checks first and, if the revocation's check ever misses, still
+      // aborts the synthetic side well inside the test timeout. (These settings need a superuser, which the
       // dedicated test database user is.)
       const revokeClient = createPostgresClient(url, {
         max: 2,
@@ -247,7 +248,7 @@ describe(
       const claimClient = createPostgresClient(url, {
         max: 2,
         onnotice: () => undefined,
-        connection: { deadlock_timeout: '120s' },
+        connection: { deadlock_timeout: '15s' },
       });
       try {
         await revokeClient.unsafe('DROP SCHEMA IF EXISTS drizzle CASCADE');
@@ -537,7 +538,9 @@ describe(
           }
         );
       },
-      120_000
+      // 3 worst-case tries x (5 s revocation check + 15 s synthetic check +
+      // 5 s setup) plus the fresh-database setup.
+      150_000
     );
   }
 );

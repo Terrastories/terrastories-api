@@ -207,12 +207,17 @@ jobs:
           cache: 'npm'
       - name: Install dependencies
         run: npm ci --legacy-peer-deps
-      - name: Ensure PostgreSQL client tools
+      - name: Install PostgreSQL 13 client tools
+        # pg_dump/pg_restore must match the server major version: a newer
+        # client writes settings (e.g. SET transaction_timeout) that a PG13
+        # server rejects on restore.
         run: |
-          command -v pg_dump pg_restore >/dev/null || {
-            sudo apt-get update && sudo apt-get install -y postgresql-client
-          }
-          pg_dump --version
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-13
+          echo /usr/lib/postgresql/13/bin >> "$GITHUB_PATH"
       - name: Run restore drills
         run: npm run test:drills
       - name: Require all three drill reports

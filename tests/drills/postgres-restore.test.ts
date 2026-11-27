@@ -105,6 +105,27 @@ describe.skipIf(Boolean(reason))(
         const before = await snapshotPostgres(reader);
         await reader.end();
 
+        // pg_dump/pg_restore must match the server major version: a newer client
+        // writes settings an older server rejects (e.g. SET transaction_timeout).
+        const clientMajor = Number(
+          /(\d+)/.exec(
+            spawnSync('pg_dump', ['--version'], {
+              encoding: 'utf8',
+              env: toolEnv,
+            }).stdout.replace('pg_dump (PostgreSQL) ', '')
+          )?.[1]
+        );
+        const serverMajor = Math.floor(
+          Number(
+            (await source.unsafe('SHOW server_version_num'))[0]!
+              .server_version_num
+          ) / 10000
+        );
+        expect(
+          clientMajor,
+          `pg_dump major ${clientMajor} must match server major ${serverMajor}`
+        ).toBe(serverMajor);
+
         const started = Date.now();
         const dumpFile = path.join(
           mkdtempSync(path.join(tmpdir(), 'tsapi-drill-pg-')),

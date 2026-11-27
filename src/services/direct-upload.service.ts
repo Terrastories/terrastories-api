@@ -70,6 +70,26 @@ const EXPIRED_BODY: V2ErrorResponse = Object.freeze({
   error: 'Upload session expired',
 });
 
+const DIRECT_UPLOAD_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const isDirectUploadId = (value: string): boolean =>
+  DIRECT_UPLOAD_ID_PATTERN.test(value);
+
+/** Stable, distinct File id for replay lookup after the journal is removed. */
+async function deriveDirectUploadFileId(uploadId: string): Promise<string> {
+  const input = new TextEncoder().encode(
+    `terrastories:direct-upload-file:v1:${uploadId}`
+  );
+  const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', input));
+  // RFC 9562 version 8: a custom, name-derived UUID with deterministic layout.
+  bytes[6] = (bytes[6]! & 0x0f) | 0x80;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) =>
+    byte.toString(16).padStart(2, '0')
+  ).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
 const tenantPrefixOf = (actor: FoundationUser): string =>
   actor.communityId !== null
     ? `communities/${actor.communityId}`
@@ -114,13 +134,7 @@ export class DirectUploadService {
     rawId: string
   ): Promise<DirectUploadSession | null> {
     if (!this.adapter) return null;
-    if (
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
-        rawId
-      )
-    ) {
-      return null;
-    }
+    if (!isDirectUploadId(rawId)) return null;
     const session = await this.adapter.load(tenantPrefixOf(actor), rawId);
     if (!session) return null;
     const ownsIt = session.actorId === actor.id;
@@ -228,7 +242,7 @@ export class DirectUploadService {
     }
 
     const id = crypto.randomUUID();
-    const fileId = crypto.randomUUID();
+    const fileId = await deriveDirectUploadFileId(id);
     const now = this.now();
     const key =
       actor.communityId !== null
@@ -446,6 +460,21 @@ export class DirectUploadService {
     }
   }
 
+  private async completedUploadConflict(
+    actor: FoundationUser,
+    session: DirectUploadSession
+  ): Promise<{ status: 409; body: typeof CONFLICT_BODY } | null> {
+    if (
+      !(await this.repository.resolveAuthorizedMedia(session.fileId, actor))
+    ) {
+      return null;
+    }
+    // The winning row owns the final object. Only staged parts/journal may be
+    // discarded, and cleanup failure must not turn an idempotent replay into 500.
+    await this.adapter!.discard(session).catch(() => {});
+    return { status: 409, body: CONFLICT_BODY };
+  }
+
   async completeUpload(
     actor: FoundationUser,
     rawId: string,
@@ -455,11 +484,22 @@ export class DirectUploadService {
     const adapter = this.adapter;
     if (!adapter) return { status: 501, body: NOT_CONFIGURED_BODY };
     const session = await this.resolveSession(actor, rawId);
-    if (!session || session.actorId !== actor.id) {
+    if (!session) {
+      if (isDirectUploadId(rawId)) {
+        const fileId = await deriveDirectUploadFileId(rawId);
+        if (await this.repository.resolveAuthorizedMedia(fileId, actor)) {
+          return { status: 409, body: CONFLICT_BODY };
+        }
+      }
+      return { status: 404, body: NOT_FOUND_BODY };
+    }
+    if (session.actorId !== actor.id) {
       return { status: 404, body: NOT_FOUND_BODY };
     }
     const gate = await this.media.uploadGate(actor);
     if (gate) return gate;
+    const conflict = await this.completedUploadConflict(actor, session);
+    if (conflict) return conflict;
     if (
       session.expiresAt + DIRECT_UPLOAD_COMPLETE_GRACE_SECONDS * 1000 <=
       this.now().getTime()
@@ -473,11 +513,6 @@ export class DirectUploadService {
         status: 400,
         body: makeValidationErrorBody(zodErrorToValidationFields(parsed.error)),
       };
-    }
-    // An upload that already produced its row must not be completed twice (and
-    // its bytes must never be treated as rollback garbage).
-    if (await this.repository.resolveAuthorizedMedia(session.fileId, actor)) {
-      return { status: 409, body: CONFLICT_BODY };
     }
     // Authorization is re-decided now: the actor's role may have changed.
     const binding = this.media.parseUploadBindingFields(
@@ -501,6 +536,8 @@ export class DirectUploadService {
       } catch (error) {
         if (error instanceof DirectUploadError) {
           if (error.kind === 'invalid_parts') {
+            const existing = await this.completedUploadConflict(actor, session);
+            if (existing) return existing;
             // Parts can be re-sent and completion retried; nothing is lost.
             return {
               status: 400,
@@ -527,6 +564,9 @@ export class DirectUploadService {
         }
         throw error;
       }
+
+      const existing = await this.completedUploadConflict(actor, session);
+      if (existing) return existing;
 
       if (size !== session.byteSize) {
         await this.discardStaged(actor, session, true);
@@ -589,11 +629,15 @@ export class DirectUploadService {
       });
       if (result.status === 201) {
         await adapter.discard(session).catch(() => {});
+      } else if (result.status === 409) {
+        await adapter.discard(session).catch(() => {});
       } else {
         await this.discardStaged(actor, session, true);
       }
       return result;
     } catch (error) {
+      const existing = await this.completedUploadConflict(actor, session);
+      if (existing) return existing;
       await this.discardStaged(actor, session, completed);
       if (error instanceof ReusedMediaRejectionError) {
         await this.audit(actor, 'media.upload', String(actor.id), 'denied');

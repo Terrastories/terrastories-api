@@ -310,14 +310,15 @@ describe('direct multipart media upload (#286)', () => {
       expect(
         [...apiStore.store.keys()].filter((k) => k.includes('.multipart/'))
       ).toEqual([]);
-      // A finished session cannot be completed again.
+      // A finished session replays as a stable conflict, never a duplicate.
       const again = await post(
         apiApp,
         `/v2/media/uploads/${session.id}/complete`,
         cookies.editor!,
         { parts: etags }
       );
-      expect(again.status).toBe(404);
+      expect(again.status).toBe(409);
+      expect(await again.json()).toEqual({ error: 'Conflict' });
     });
 
     it('keeps request metadata through completion', async () => {
@@ -727,6 +728,17 @@ describe('direct multipart media upload (#286)', () => {
       expect(
         [...bucket.objects.keys()].filter((k) => k.includes('.multipart/'))
       ).toEqual([]);
+      const replay = await post(
+        r2App,
+        `/v2/media/uploads/${session.id}/complete`,
+        cookies.editor!,
+        { parts: etags }
+      );
+      expect(replay.status).toBe(409);
+      expect(await replay.json()).toEqual({ error: 'Conflict' });
+      expect(
+        (await bucket.head(`communities/${ids.own}/media/${file.id}`))?.size
+      ).toBe(bytes.byteLength);
       // The API part route is api-mode only.
       const apiPart = await r2App.request(
         `${API}/v2/media/uploads/${session.id}/parts/1`,

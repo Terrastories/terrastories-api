@@ -6,6 +6,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { and, eq } from 'drizzle-orm';
 import type { FoundationStorage } from '../../src/services/hono-foundation.service.js';
+import { MediaWritesRepository } from '../../src/repositories/media-writes.repository.js';
 import {
   PNG_BYTES,
   closeResilienceFixtures,
@@ -61,6 +62,36 @@ const completeDirectUpload = (
     cookie: fixture.cookies.editor,
     body: { parts: session.parts },
   });
+
+type UploadedMediaInput = Parameters<
+  MediaWritesRepository['createUploadedMedia']
+>[0];
+
+const uploadedMediaInput = (
+  fixture: Awaited<ReturnType<typeof createResilienceFixture>>,
+  userPhotoTargetUserId: number | null = null
+): UploadedMediaInput => {
+  const fileId = crypto.randomUUID();
+  return {
+    fileId,
+    actor: {
+      id: fixture.ids.editor,
+      email: 'editor@resilience.example.test',
+      username: 'resilience_editor',
+      displayName: 'Resilience User',
+      passwordHash: 'unused',
+      role: 'editor',
+      communityId: fixture.ids.own,
+    },
+    storageKey: `communities/${fixture.ids.own}/media/${fileId}`,
+    originalName: 'race.png',
+    mimeType: 'image/png',
+    byteSize: PNG_BYTES.byteLength,
+    checksum: null,
+    metadata: null,
+    userPhotoTargetUserId,
+  };
+};
 
 describe('single-use credential retries (#149)', () => {
   it('elects one winner for concurrent login-code redemption and keeps replay uniformly rejected', async () => {
@@ -244,6 +275,127 @@ describe('import confirmation retries (#149)', () => {
   });
 });
 
+describe('upload insert race backstops (#149)', () => {
+  it('re-reads the SQLite winner and its user_photo binding after a duplicate insert', async () => {
+    const fixture = await createResilienceFixture();
+    const repository = new MediaWritesRepository(fixture.db);
+    const input = uploadedMediaInput(fixture, fixture.ids.editor);
+
+    const created = await repository.createUploadedMedia(input);
+    const replay = await repository.createUploadedMedia(input);
+
+    if (created.status !== 'created' || replay.status !== 'existing') {
+      throw new Error('Expected one created upload and one existing replay');
+    }
+    expect(replay.record.file.id).toBe(created.record.file.id);
+    expect(replay.record.attachment).toEqual(created.record.attachment);
+    expect(
+      await fixture.db
+        .select()
+        .from(fixture.tables.files)
+        .where(eq(fixture.tables.files.id, input.fileId))
+    ).toHaveLength(1);
+    expect(
+      await fixture.db
+        .select()
+        .from(fixture.tables.attachments)
+        .where(eq(fixture.tables.attachments.fileId, input.fileId))
+    ).toHaveLength(1);
+    expect(
+      await fixture.db
+        .select()
+        .from(fixture.tables.auditEntries)
+        .where(
+          eq(fixture.tables.auditEntries.action, 'media.upload.user_photo')
+        )
+    ).toHaveLength(1);
+  });
+
+  it('re-reads the winner after a D1-wrapped unique batch failure', async () => {
+    const fixture = await createResilienceFixture();
+    const d1Like = fixture.db as typeof fixture.db & {
+      batch: (
+        statements: Array<{
+          toSQL: () => { sql: string; params: unknown[] };
+        }>
+      ) => Promise<unknown[]>;
+    };
+    d1Like.batch = async (statements) => {
+      try {
+        return fixture.sqlite.transaction(() =>
+          statements.map((statement) => {
+            const { sql, params } = statement.toSQL();
+            const prepared = fixture.sqlite.prepare(sql);
+            return prepared.reader
+              ? prepared.all(...params)
+              : prepared.run(...params);
+          })
+        )();
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message.includes('UNIQUE constraint failed')
+        ) {
+          throw new Error('D1_ERROR: UNIQUE constraint failed: files.id', {
+            cause: error,
+          });
+        }
+        throw error;
+      }
+    };
+    const repository = new MediaWritesRepository(d1Like as never);
+    const input = uploadedMediaInput(fixture);
+
+    const created = await repository.createUploadedMedia(input);
+    const replay = await repository.createUploadedMedia(input);
+
+    if (created.status !== 'created' || replay.status !== 'existing') {
+      throw new Error('Expected one created upload and one existing replay');
+    }
+    expect(replay.record.file.id).toBe(created.record.file.id);
+    expect(
+      await fixture.db
+        .select()
+        .from(fixture.tables.files)
+        .where(eq(fixture.tables.files.id, input.fileId))
+    ).toHaveLength(1);
+    expect(
+      await fixture.db
+        .select()
+        .from(fixture.tables.auditEntries)
+        .where(eq(fixture.tables.auditEntries.action, 'media.upload'))
+    ).toHaveLength(1);
+  });
+
+  it('re-reads the winner when Drizzle wraps PostgreSQL 23505 in error.cause', async () => {
+    const fixture = await createResilienceFixture();
+    const repository = new MediaWritesRepository(fixture.db);
+    const input = uploadedMediaInput(fixture);
+    const created = await repository.createUploadedMedia(input);
+    if (created.status !== 'created')
+      throw new Error('Expected created upload');
+
+    const internals = repository as unknown as {
+      createUploadedMediaOnce(
+        value: UploadedMediaInput
+      ): ReturnType<MediaWritesRepository['createUploadedMedia']>;
+    };
+    vi.spyOn(internals, 'createUploadedMediaOnce').mockRejectedValueOnce(
+      Object.assign(new Error('Failed query'), {
+        cause: Object.assign(
+          new Error('duplicate key value violates unique constraint'),
+          { code: '23505' }
+        ),
+      })
+    );
+
+    const replay = await repository.createUploadedMedia(input);
+    if (replay.status !== 'existing')
+      throw new Error('Expected existing replay');
+    expect(replay.record.file.id).toBe(created.record.file.id);
+  });
+});
+
 describe('upload completion retries (#149)', () => {
   it('keeps a sequential completion retry stable with one File row and intact bytes', async () => {
     const memory = createResilienceStorage();
@@ -254,8 +406,8 @@ describe('upload completion retries (#149)', () => {
     expect(first.status).toBe(201);
     const file = (await first.json()) as { data: { id: string } };
     const replay = await completeDirectUpload(fixture, session);
-    expect(replay.status).toBe(404);
-    expect(await replay.json()).toEqual({ error: 'Not found' });
+    expect(replay.status).toBe(409);
+    expect(await replay.json()).toEqual({ error: 'Conflict' });
     expect(
       await fixture.db
         .select()
@@ -272,49 +424,37 @@ describe('upload completion retries (#149)', () => {
     ).toEqual([]);
   });
 
-  // Known bug: completion checks the journal/File row before writing
-  // (src/services/direct-upload.service.ts:457-480), so both requests can pass;
-  // the loser then hits the unconditional File insert at
-  // src/repositories/media-writes.repository.ts:826-846 and returns 500.
-  it.fails(
-    'rejects the loser of racing Node completions with a stable 4xx without duplicating or deleting bytes',
-    async () => {
-      const memory = createResilienceStorage();
-      const barrier = barrierStorage(
-        memory.storage,
-        (key) => key.includes('/.multipart/') && key.endsWith('.json')
-      );
-      const fixture = await createResilienceFixture({
-        storage: barrier.decorate(),
-      });
-      const session = await fixture.createDirectUpload();
+  it('returns 409 for the loser of racing Node completions without duplicating or deleting bytes', async () => {
+    const memory = createResilienceStorage();
+    const barrier = barrierStorage(
+      memory.storage,
+      (key) => key.includes('/.multipart/') && key.endsWith('.json')
+    );
+    const fixture = await createResilienceFixture({
+      storage: barrier.decorate(),
+    });
+    const session = await fixture.createDirectUpload();
 
-      barrier.arm();
-      const responses = await Promise.all([
-        completeDirectUpload(fixture, session),
-        completeDirectUpload(fixture, session),
-      ]);
-      barrier.disarm();
+    barrier.arm();
+    const responses = await Promise.all([
+      completeDirectUpload(fixture, session),
+      completeDirectUpload(fixture, session),
+    ]);
+    barrier.disarm();
 
-      const winner = responses.find((response) => response.status === 201);
-      const loser = responses.find((response) => response.status !== 201);
-      expect(winner).toBeDefined();
-      expect(loser).toBeDefined();
-      // BUG: the losing request currently reaches duplicate File insertion and
-      // answers 500. A retryable completion race must be a stable client conflict.
-      expect([400, 404, 409]).toContain(loser!.status);
-      const file = (await winner!.json()) as { data: { id: string } };
-      expect(
-        await fixture.db
-          .select()
-          .from(fixture.tables.files)
-          .where(eq(fixture.tables.files.id, file.data.id))
-      ).toHaveLength(1);
-      const [row] = await fixture.db
-        .select()
-        .from(fixture.tables.files)
-        .where(eq(fixture.tables.files.id, file.data.id));
-      expect(memory.store.get(row!.storageKey!)).toEqual(PNG_BYTES);
-    }
-  );
+    expect(responses.map((response) => response.status).sort()).toEqual([
+      201, 409,
+    ]);
+    const winner = responses.find((response) => response.status === 201)!;
+    const loser = responses.find((response) => response.status === 409)!;
+    expect(await loser.json()).toEqual({ error: 'Conflict' });
+    const file = (await winner.json()) as { data: { id: string } };
+    const files = await fixture.db.select().from(fixture.tables.files);
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatchObject({ id: file.data.id });
+    expect(memory.store.get(files[0]!.storageKey!)).toEqual(PNG_BYTES);
+    expect(
+      [...memory.store.keys()].filter((key) => key.includes('.multipart/'))
+    ).toEqual([]);
+  });
 });

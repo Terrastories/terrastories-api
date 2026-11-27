@@ -1,6 +1,8 @@
 /**
  * Canonical Hono route handlers for Slice 12 bounded CSV imports (§4, §6.9, §8):
  * - POST /v2/imports/preview
+ *   Media is staged ahead of the request with `POST /v2/media` (or the direct
+ *   upload flow) and referenced through the `mediaFileIds` form field (#282).
  * - GET /v2/imports
  * - GET /v2/imports/:id
  * - POST /v2/imports/:id/commit
@@ -24,6 +26,8 @@ export interface ImportRoutesOptions {
   now?: () => Date;
   enforceD1Budget?: boolean;
   workersPlan?: WorkersPlan;
+  /** Workers runtime: preview rejects multipart media parts (#282). */
+  isWorkers?: boolean;
 }
 
 function respondImportResult<T>(c: Context, result: ImportServiceResult<T>) {
@@ -43,6 +47,7 @@ export function registerImportRoutes(
       now: options.now,
       enforceD1Budget: options.enforceD1Budget,
       workersPlan: options.workersPlan,
+      isWorkers: options.isWorkers,
     }
   );
 

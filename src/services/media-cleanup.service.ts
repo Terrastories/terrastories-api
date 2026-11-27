@@ -71,7 +71,13 @@ export interface FileByteCleanup {
   storageKey: string;
 }
 
-function notStagedInPreviewedImportManifest(
+/**
+ * "`files` row is not held as staged media by a `previewed` manifest". Shared
+ * by the unreferenced-file deletes here and by import-preview adoption
+ * (`ImportsRepository`), so a file held by an open preview is never swept and
+ * never claimed by a second preview.
+ */
+export function notStagedInPreviewedImportManifest(
   connection: Database | DrizzleD1Database,
   tables: ReturnType<typeof tablesFor>
 ): SQL {

@@ -22,6 +22,33 @@ export const PERSONA_EDITOR = 'Editor';
 const png = (name: string) => ({ name, type: 'image/png', bytes: PNG_BYTES });
 const wav = (name: string) => ({ name, type: 'audio/wav', bytes: wavBytes() });
 
+/**
+ * Stage one import media file with a raw `POST /v2/media` (#282). An import
+ * preview carries only the CSV and the staged file ids (`mediaFileIds`); the
+ * id is deliberately not tracked as a loose upload, because the manifest owns
+ * the file from the preview on (commit attaches it, discard deletes it).
+ */
+async function stageImportMedia(
+  ctx: Ctx,
+  actor: Parameters<typeof upload>[1],
+  say: string,
+  file: { name: string; type: string; bytes: Uint8Array }
+): Promise<string> {
+  const { rawUpload } = await import('../client.js');
+  const reply = await ctx.w.step({
+    who: actor,
+    say,
+    method: 'POST',
+    path: '/v2/media',
+    ...rawUpload({}, file),
+    bodyNote: 'raw body, one file with x-content-sha256',
+    expect: 201,
+    covers: ['C30'],
+    show: (r) => [field('file id', val(r, 'data', 'id'))],
+  });
+  return str(reply, 'data', 'id');
+}
+
 export async function editorChapter(ctx: Ctx): Promise<void> {
   const { w, s } = ctx;
   const acct = s.accounts.elena!;
@@ -821,6 +848,12 @@ async function importChapter(
 
   if (ctx.cfg.d1) return importChapterD1(ctx, form);
 
+  const importPhoto = await stageImportMedia(
+    ctx,
+    elena,
+    'stages the import photo first: the browser uploads it with POST /v2/media and the page keeps its file id',
+    png(`${w.runId}-imp.png`)
+  );
   const preview = await w.step({
     who: elena,
     say: 'picks a places CSV with differently named columns; the page shows the column-mapping table and she maps "Place name" and "Area"',
@@ -835,17 +868,11 @@ async function importChapter(
           region: 'Area',
           photo: 'photo',
         }),
-      },
-      [
-        {
-          field: 'media',
-          name: `${w.runId}-imp.png`,
-          type: 'image/png',
-          bytes: PNG_BYTES,
-        },
-      ]
+        mediaFileIds: JSON.stringify([importPhoto]),
+      }
     ),
-    bodyNote: 'multipart: kind=places, mappings, one CSV, one staged image',
+    bodyNote:
+      'multipart: kind=places, mappings, mediaFileIds (the staged file id), one CSV; no media bytes',
     expect: 201,
     covers: ['C30'],
     show: (r) => [
@@ -1062,6 +1089,12 @@ async function importChapterD1(ctx: Ctx, form: ImportForm): Promise<void> {
       ? 'This target is Cloudflare D1 on Workers Paid (--workers-plan paid). Elena previews everything first and commits the stories import; the Free-only 429 assertions for a second import are skipped because src/services/imports.service.ts is not plan-switched yet.'
       : 'This target is Cloudflare D1: one committed import is allowed per UTC day for the whole database. Elena previews everything first, commits the stories import, and the platform refuses a second commit and any new preview until the next UTC day.'
   );
+  const importPhoto = await stageImportMedia(
+    ctx,
+    elena,
+    'stages the import photo first: the browser uploads it with POST /v2/media and the page keeps its file id',
+    png(`${w.runId}-imp.png`)
+  );
   const places = await w.step({
     who: elena,
     say: 'picks a places CSV with differently named columns; the page shows the column-mapping table and she maps "Place name" and "Area"',
@@ -1076,17 +1109,11 @@ async function importChapterD1(ctx: Ctx, form: ImportForm): Promise<void> {
           region: 'Area',
           photo: 'photo',
         }),
-      },
-      [
-        {
-          field: 'media',
-          name: `${w.runId}-imp.png`,
-          type: 'image/png',
-          bytes: PNG_BYTES,
-        },
-      ]
+        mediaFileIds: JSON.stringify([importPhoto]),
+      }
     ),
-    bodyNote: 'multipart: kind=places, mappings, one CSV, one staged image',
+    bodyNote:
+      'multipart: kind=places, mappings, mediaFileIds (the staged file id), one CSV; no media bytes',
     expect: 201,
     covers: ['C30'],
     show: (r) => [

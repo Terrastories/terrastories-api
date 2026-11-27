@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import Sqlite from 'better-sqlite3';
+import ts from 'typescript';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { eq, getTableColumns } from 'drizzle-orm';
@@ -788,8 +789,9 @@ describe('media adversarial suite on the Hono V2 app (#140)', () => {
         'yauzl',
         'pako',
         'node-stream-zip',
+        'zlib',
+        'node:zlib',
       ];
-      const specifier = /(?:from|import|require)\s*\(?\s*['"]([^'"]+)['"]/g;
       const resolveRel = (from: string, spec: string): string | null => {
         const base = resolve(dirname(from), spec.replace(/\.js$/, ''));
         for (const c of [base + '.ts', join(base, 'index.ts')]) {
@@ -806,11 +808,11 @@ describe('media adversarial suite on the Hono V2 app (#140)', () => {
         const file = queue.pop()!;
         if (seen.has(file)) continue;
         seen.add(file);
-        const text = readFileSync(file, 'utf8')
-          .replace(/\/\*[\s\S]*?\*\//g, '')
-          .replace(/^\s*\/\/.*$/gm, '');
-        for (const m of text.matchAll(specifier)) {
-          const spec = m[1]!;
+        // TypeScript's own scanner: static, type, dynamic and require imports.
+        const specs = ts
+          .preProcessFile(readFileSync(file, 'utf8'), true, true)
+          .importedFiles.map((i) => i.fileName);
+        for (const spec of specs) {
           if (spec.startsWith('.') || spec.startsWith('@/')) {
             if (spec.endsWith('.json')) continue;
             const next = spec.startsWith('@/')

@@ -10,7 +10,7 @@
     "start": "node dist/server.js",
     "test": "vitest",
     "test:coverage": "SKIP_TIMING_ASSERTIONS=true vitest run --coverage --exclude tests/production/performance.test.ts --reporter=dot --silent=true --maxWorkers=4",
-    "test:ci:contracts": "bash tests/scripts/user_workflow.test.sh && vitest run tests/scripts --reporter=dot --silent=true --maxWorkers=4",
+    "test:ci:contracts": "bash tests/scripts/user_workflow.test.sh && vitest run tests/scripts tests/openapi --reporter=dot --silent=true --maxWorkers=4",
     "test:ci:core": "vitest run tests/config/ tests/db tests/helpers tests/integration tests/hono --reporter=dot --silent=true --maxWorkers=4",
     "test:ci:migration": "vitest run tests/migration --reporter=dot --silent=true --maxWorkers=4",
     "test:ci:routes": "vitest run tests/routes --reporter=dot --silent=true --maxWorkers=4",

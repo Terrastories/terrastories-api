@@ -11,7 +11,7 @@ import {
 } from './registry.js';
 import { compareCodeUnits, mountedRoutes } from './route-table.js';
 import { SCHEMA_MAP } from './schema-map.js';
-import { V2ErrorResponseSchema } from '../../src/shared/schemas/public-communities.js';
+import { V2ValidationErrorResponseSchema } from '../../src/shared/schemas/community-writes.js';
 
 /**
  * V2 OpenAPI 3.1 generator (#148). Operations come from the routes the Hono
@@ -30,6 +30,13 @@ const NO_INPUT = new Set([
   'POST /v2/auth/logout',
   'POST /v2/auth/revoke',
   'GET /v2/bootstrap',
+]);
+
+/** Routes whose handler accepts an absent or empty JSON body. */
+const OPTIONAL_BODY = new Set([
+  'POST /v2/admin/communities/:id/claim-tokens',
+  'POST /v2/community/export',
+  'POST /v2/auth/recovery-codes',
 ]);
 
 /** Routes that never go through the JSON body parser (raw or multipart). */
@@ -58,8 +65,8 @@ const SUCCESS_STATUSES: Record<string, number[]> = {
   'POST /v2/community/export': [201],
   'POST /v2/admin/communities': [201],
   'POST /v2/admin/communities/:id/claim-tokens': [201],
-  // community-sovereignty.service.ts: admins withdraw at once (200), a
-  // super_admin steward files a notice (202); erasure is always accepted (202).
+  // community-sovereignty.service.ts: an admin withdraws at once (200); any
+  // designated steward files a notice (202); erasure is always accepted (202).
   'POST /v2/community/withdrawal': [200, 202],
   'POST /v2/community/erasure': [202],
 };
@@ -80,10 +87,11 @@ const EXTRA_STATUSES: Record<string, number[]> = {
   'POST /v2/media/uploads/:id/complete': [410, 422, 501],
   'DELETE /v2/media/uploads/:id': [410],
   // Range reads and expired download tokens.
-  'GET /v2/community/export/download/:token': [416],
-  'GET /v2/media/:id': [416],
-  'GET /v2/public/communities/:slug/media/:fileId': [416],
-  'GET /explore/media/:fileId': [416],
+  // (206 and 416: media-stream-response.ts and community-export.service.ts).
+  'GET /v2/community/export/download/:token': [206, 416],
+  'GET /v2/media/:id': [206, 416],
+  'GET /v2/public/communities/:slug/media/:fileId': [206, 416],
+  'GET /explore/media/:fileId': [206, 416],
   // Unauthenticated routes that still answer a uniform 401 on bad credentials.
   'POST /v2/bootstrap': [401],
   'POST /v2/bootstrap/claim': [401],
@@ -95,6 +103,7 @@ const STATUS_TEXT: Record<number, string> = {
   201: 'Created',
   202: 'Accepted',
   204: 'No Content',
+  206: 'Partial Content',
   400: 'Bad Request',
   401: 'Unauthorized',
   403: 'Forbidden',
@@ -248,8 +257,7 @@ export function buildOpenApiDocument(): Json {
     if (params.length) operation['parameters'] = params;
     if (mapped?.request) {
       operation['requestBody'] = {
-        // Optional when the handler accepts an empty JSON object.
-        required: !mapped.request.safeParse({}).success,
+        required: !OPTIONAL_BODY.has(key),
         content: {
           'application/json': { schema: jsonSchemaOf(mapped.request, 'input') },
         },
@@ -271,7 +279,9 @@ export function buildOpenApiDocument(): Json {
       securitySchemes: {
         cookieAuth: { type: 'apiKey', in: 'cookie', name: 'ts_session' },
       },
-      schemas: { V2Error: jsonSchemaOf(V2ErrorResponseSchema, 'output') },
+      schemas: {
+        V2Error: jsonSchemaOf(V2ValidationErrorResponseSchema, 'output'),
+      },
     },
   };
 }

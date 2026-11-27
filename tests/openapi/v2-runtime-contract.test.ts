@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { z } from 'zod';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
@@ -27,11 +28,27 @@ const ORIGIN = 'https://api.example.test';
 
 interface Operation {
   security: unknown[];
-  responses: Record<string, unknown>;
+  responses: Record<string, { content?: Record<string, { schema?: unknown }> }>;
 }
 const doc = JSON.parse(readFileSync(OPENAPI_PATH, 'utf8')) as {
   paths: Record<string, Record<string, Operation>>;
+  components: { schemas: Record<string, unknown> };
 };
+
+/** Inline `#/components/schemas/*` references of an emitted JSON Schema. */
+function inlineRefs(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(inlineRefs);
+  if (node && typeof node === 'object') {
+    const record = node as Record<string, unknown>;
+    const ref = record['$ref'];
+    if (typeof ref === 'string' && ref.startsWith('#/components/schemas/'))
+      return inlineRefs(doc.components.schemas[ref.split('/').pop()!]);
+    return Object.fromEntries(
+      Object.entries(record).map(([k, v]) => [k, inlineRefs(v)])
+    );
+  }
+  return node;
+}
 const operationFor = (method: string, template: string): Operation => {
   const op =
     doc.paths[template.replace(/:([A-Za-z0-9_]+)/g, '{$1}')]?.[
@@ -170,6 +187,24 @@ describe('V2 OpenAPI runtime contract', () => {
     expect(Object.keys(op.responses), `${method} ${template}`).toContain(
       String(res.status)
     );
+    // The emitted document, not only the source zod schema, must accept the
+    // live body (success and error alike) and name the real content type.
+    const emitted =
+      op.responses[String(res.status)]?.content?.['application/json']?.schema;
+    if (emitted) {
+      expect(
+        res.headers.get('content-type') ?? '',
+        `${method} ${template}`
+      ).toContain('application/json');
+      const body: unknown = await res.clone().json();
+      const parsed = z
+        .fromJSONSchema(inlineRefs(emitted) as never)
+        .safeParse(body);
+      expect(
+        parsed.success ? 'valid' : JSON.stringify(parsed.error.issues),
+        `${method} ${template} ${res.status} emitted schema`
+      ).toBe('valid');
+    }
     const schema = SCHEMA_MAP[`${method} ${template}`]?.response;
     if (schema && res.status >= 200 && res.status < 300) {
       const parsed = schema.safeParse(await res.json());
@@ -288,6 +323,7 @@ describe('V2 OpenAPI runtime contract', () => {
         const label = `${method.toUpperCase()} ${template}`;
         if (op.security.length > 0) expect(res.status, label).toBe(401);
         else expect(res.status, `${label} needs no session`).not.toBe(401);
+        expect(res.status, `${label} must not crash`).not.toBe(500);
         expect(Object.keys(op.responses), label).toContain(String(res.status));
         checked += 1;
       }

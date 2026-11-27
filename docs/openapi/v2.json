@@ -299,6 +299,9 @@
           "200": {
             "description": "OK"
           },
+          "206": {
+            "description": "Partial Content"
+          },
           "400": {
             "description": "Bad Request",
             "content": {
@@ -5683,6 +5686,9 @@
           "200": {
             "description": "OK"
           },
+          "206": {
+            "description": "Partial Content"
+          },
           "400": {
             "description": "Bad Request",
             "content": {
@@ -6256,7 +6262,7 @@
           }
         },
         "requestBody": {
-          "required": false,
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
@@ -7226,7 +7232,7 @@
           }
         },
         "requestBody": {
-          "required": false,
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
@@ -7904,7 +7910,7 @@
           }
         },
         "requestBody": {
-          "required": false,
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
@@ -9884,6 +9890,9 @@
         "responses": {
           "200": {
             "description": "OK"
+          },
+          "206": {
+            "description": "Partial Content"
           },
           "400": {
             "description": "Bad Request",
@@ -12508,6 +12517,9 @@
         "responses": {
           "200": {
             "description": "OK"
+          },
+          "206": {
+            "description": "Partial Content"
           },
           "400": {
             "description": "Bad Request",
@@ -20465,6 +20477,29 @@
           },
           "code": {
             "type": "string"
+          },
+          "details": {
+            "type": "object",
+            "properties": {
+              "fields": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": ["path", "message"],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": ["fields"],
+            "additionalProperties": false
           }
         },
         "required": ["error"],

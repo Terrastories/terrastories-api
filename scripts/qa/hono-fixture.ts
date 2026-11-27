@@ -2887,7 +2887,8 @@ export async function createFixture(
       headers.get('Accept-Ranges') === 'bytes' &&
       headers.get('Cache-Control') === 'no-store' &&
       headers.get('X-Content-Type-Options') === 'nosniff' &&
-      headers.get('Content-Security-Policy') === "default-src 'none'; sandbox";
+      headers.get('Content-Security-Policy') ===
+        "default-src 'none'; frame-ancestors 'none'; sandbox";
     const publicStoriesListCheck = (body: unknown): boolean => {
       const parsed = PublicStoriesListResponseSchema.safeParse(body);
       if (!parsed.success) return false;
@@ -9696,7 +9697,7 @@ export async function createFixture(
               headers.get('content-disposition') === 'attachment' &&
               headers.get('x-content-type-options') === 'nosniff' &&
               headers.get('content-security-policy') ===
-                "default-src 'none'; sandbox",
+                "default-src 'none'; frame-ancestors 'none'; sandbox",
             checkBytes: (bytes) =>
               bytes.byteLength === qaPolyglotBytes.byteLength &&
               bytes.every((b, i) => b === qaPolyglotBytes[i]),
@@ -10786,7 +10787,7 @@ export async function createFixture(
               headers.get('content-disposition') === 'attachment' &&
               headers.get('x-content-type-options') === 'nosniff' &&
               headers.get('content-security-policy') ===
-                "default-src 'none'; sandbox",
+                "default-src 'none'; frame-ancestors 'none'; sandbox",
           },
           {
             name: 'detach pdf story media',

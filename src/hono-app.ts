@@ -1,6 +1,7 @@
 import { CommunityErasureService } from './services/community-erasure.service.js';
 import type { ErasureRecordStore } from './services/erasure-record-store.js';
 import { sessionLifetime } from './shared/session-policy.js';
+import { withDeadline } from './shared/deadline.js';
 import { registerExploreAdapter } from './explore-adapter.js';
 import { ExploreAdapterRepository } from './repositories/explore-adapter.repository.js';
 import { CommunityReadsRepository } from './repositories/community-reads.repository.js';
@@ -35,7 +36,7 @@ import { AuthRecoveryService } from './services/auth-recovery.service.js';
 import { BootstrapRepository } from './repositories/bootstrap.repository.js';
 import { BootstrapService } from './services/bootstrap.service.js';
 import { MediaCleanupCoordinator } from './services/media-cleanup.service.js';
-import { Hono, type Context } from 'hono';
+import { Hono, type Context, type MiddlewareHandler } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { cors } from 'hono/cors';
 import { bodyLimit } from 'hono/body-limit';
@@ -65,6 +66,74 @@ import { HonoAuthRepository } from './repositories/hono-auth.repository.js';
 import { HonoAuthService } from './services/hono-auth.service.js';
 import { CONFLICT_BODY } from './services/community-writes.service.js';
 import type { WorkersPlan } from './config/v2-runtime.js';
+
+/** JSON API: nothing loads, nothing frames it, downloads are sandboxed. */
+const V2_CONTENT_SECURITY_POLICY =
+  "default-src 'none'; frame-ancestors 'none'; sandbox";
+/**
+ * Baseline security headers of every V2 response. Exported so the Workers
+ * entrypoint can put the same set on its own pre-app config refusal.
+ */
+export const V2_BASELINE_SECURITY_HEADERS: Readonly<Record<string, string>> = {
+  'X-Content-Type-Options': 'nosniff',
+  'Content-Security-Policy': V2_CONTENT_SECURITY_POLICY,
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'no-referrer',
+  'Cross-Origin-Resource-Policy': 'same-site',
+};
+/** The media byte routes a frontend embeds from another origin. */
+const MEDIA_EMBED_PATH =
+  /^\/(?:v2\/(?:media\/[^/]+|public\/communities\/[^/]+\/media\/[^/]+)|explore\/media\/[^/]+)$/;
+
+/**
+ * HSTS only over https: the local field kit may serve plain http, and
+ * browsers ignore the header there anyway. Behind a trusted proxy the
+ * forwarded proto must be exactly `https`: the proxy must overwrite it, so a
+ * multi-value (appended) list is ambiguous and ignored.
+ */
+export function v2HstsHeaders(
+  request: Request,
+  trustProxy?: boolean
+): Record<string, string> {
+  const secure =
+    new URL(request.url).protocol === 'https:' ||
+    (trustProxy === true &&
+      request.headers.get('x-forwarded-proto')?.trim() === 'https');
+  return secure ? { 'Strict-Transport-Security': 'max-age=31536000' } : {};
+}
+
+/**
+ * Security response headers on every V2 response, preflights and early
+ * refusals included (issue #138). Set after `next()` so a handler's own value
+ * never weakens the policy. Plain `c.header` only, so it runs unchanged on
+ * Node and Workers.
+ */
+export function v2SecurityHeaders(trustProxy?: boolean): MiddlewareHandler {
+  return async (c, next) => {
+    await next();
+    // Preflights are answered by cors() below, before the later no-store
+    // middleware runs, so no-store is also guaranteed here.
+    if (!c.res.headers.has('Cache-Control'))
+      c.header('Cache-Control', 'no-store');
+    for (const [name, value] of Object.entries(V2_BASELINE_SECURITY_HEADERS))
+      c.header(name, value);
+    // Media bytes are embedded by the allowed frontend origin (img/video/audio
+    // src) and so must not be blocked by CORP. Only a successful read
+    // (200/206 GET/HEAD) qualifies: denials, errors and mutations such as
+    // DELETE stay same-site.
+    if (
+      MEDIA_EMBED_PATH.test(c.req.path) &&
+      ['GET', 'HEAD'].includes(c.req.method) &&
+      [200, 206].includes(c.res.status)
+    )
+      c.header('Cross-Origin-Resource-Policy', 'cross-origin');
+    for (const [name, value] of Object.entries(
+      v2HstsHeaders(c.req.raw, trustProxy)
+    ))
+      c.header(name, value);
+    c.res.headers.delete('X-Powered-By');
+  };
+}
 
 export type RequestHandler = (request: Request) => Promise<Response>;
 export interface FoundationOptions {
@@ -118,6 +187,13 @@ export interface FoundationOptions {
   mapboxAccessToken?: string;
   /** Offline mode ignores Mapbox/Protomaps external provider credentials. */
   offlineMode?: boolean;
+  /** Deadline for the /ready database probe (default 3000 ms). */
+  readinessTimeoutMs?: number;
+  /**
+   * Register work that may outlive its request (e.g. past the /ready
+   * deadline) so a Node shutdown can await it before closing the database.
+   */
+  trackWork?: (work: Promise<unknown>) => void;
 }
 const preloginSchema = z
   .object({
@@ -248,6 +324,9 @@ export function createHonoApp(options: FoundationOptions) {
     )
       throw new Error('Invalid CORS origin');
   }
+  // Registered before CORS so a preflight that CORS answers itself still
+  // carries the headers.
+  app.use('*', v2SecurityHeaders(options.trustProxy));
   app.use(
     '*',
     cors({
@@ -296,8 +375,6 @@ export function createHonoApp(options: FoundationOptions) {
   );
   app.use('*', async (c, next) => {
     c.header('Cache-Control', 'no-store');
-    c.header('X-Content-Type-Options', 'nosniff');
-    c.header('Content-Security-Policy', "default-src 'none'; sandbox");
     if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) {
       const origin = c.req.header('Origin');
       if (
@@ -311,14 +388,21 @@ export function createHonoApp(options: FoundationOptions) {
     }
     // Resolve persisted notice deadlines before any public or authenticated read.
     // A bounded backlog fails closed until subsequent requests/ticks drain it.
+    // /ready bounds these calls too, so a stalled database cannot hang it.
+    const guard = <T>(work: Promise<T>) => {
+      if (c.req.path !== '/ready') return work;
+      // The deadline abandons the wait, not the work: keep it tracked.
+      options.trackWork?.(work);
+      return withDeadline(work, options.readinessTimeoutMs ?? 3000);
+    };
     if (
       c.req.path !== '/health' &&
-      !(await sovereigntyRepository.applyDueWithdrawals(now()))
+      !(await guard(sovereigntyRepository.applyDueWithdrawals(now())))
     )
       return c.json({ error: 'Service unavailable' }, 503);
     if (
       c.req.path !== '/health' &&
-      !(await sovereigntyRepository.activateDueErasures(now()))
+      !(await guard(sovereigntyRepository.activateDueErasures(now())))
     )
       return c.json({ error: 'Service unavailable' }, 503);
     await next();
@@ -332,7 +416,10 @@ export function createHonoApp(options: FoundationOptions) {
   app.notFound((c) => c.json({ error: 'Not found' }, 404));
   app.get('/health', (c) => c.json({ status: 'ok' }));
   app.get('/ready', async (c) => {
-    await options.repository.readiness();
+    await withDeadline(
+      options.repository.readiness(),
+      options.readinessTimeoutMs ?? 3000
+    );
     return c.json({ status: 'ready' });
   });
   app.post(

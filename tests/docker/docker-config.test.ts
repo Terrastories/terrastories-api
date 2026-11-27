@@ -305,7 +305,8 @@ describe('Docker Configuration Tests', () => {
 
       expect(content).toContain('X-Frame-Options');
       expect(content).toContain('X-Content-Type-Options');
-      expect(content).toContain('X-XSS-Protection');
+      // X-XSS-Protection is deprecated and intentionally not sent (#138).
+      expect(content).not.toContain('X-XSS-Protection');
       expect(content).toContain('Content-Security-Policy');
     });
 

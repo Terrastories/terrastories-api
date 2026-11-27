@@ -277,7 +277,7 @@ function expectSafeDownload(res: Response) {
   expect(res.headers.get('content-disposition')).toBe('attachment');
   expect(res.headers.get('x-content-type-options')).toBe('nosniff');
   expect(res.headers.get('content-security-policy')).toBe(
-    "default-src 'none'; sandbox"
+    "default-src 'none'; frame-ancestors 'none'; sandbox"
   );
   expect(res.headers.get('cache-control')).toBe('no-store');
   expectOnlySessionCookie(res);

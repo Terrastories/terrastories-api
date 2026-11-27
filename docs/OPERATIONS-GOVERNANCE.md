@@ -58,18 +58,21 @@ Each runbook ends with a verification step. "Automated" cites the test that prov
 **R1 — V2 sessions (revocation).** The account logs out, or calls revoke-all; a community admin revokes a member's device sessions by metadata; user/community authority changes delete sessions via database triggers (SPEC-V2 §6.8).
 _Verify (automated):_ `tests/hono/foundation.test.ts` and `tests/hono/worker.test.ts` prove the presented cookie stops authenticating immediately after logout/revoke, that login rotation binds a fresh row while the old token fails, and that requests fail closed when authoritative session state is unreadable. _Operator spot check:_ replay the old cookie — expect `401`.
 
-**R1a — V2 sessions (emergency global revocation, #137).** Use when session tokens may have leaked or a database copy has left custody. It revokes every session of every account at once; all users must log in again. There is no HTTP route and no session signing secret to rotate (tokens are random, stored only as SHA-256 digests), so this is an operator action. It deletes the session rows — the same effect as per-account revocation, so a presented cookie can never authenticate again — and writes one content-free `security.sessions.revoke_all` audit entry.
+**R1a — V2 sessions (emergency global revocation, #137).** Use when session tokens may have leaked or a database copy has left custody. There is no HTTP route and no session signing secret to rotate (tokens are random, stored only as SHA-256 digests), so this is an operator action. In one transaction it (1) deletes every session row — the same effect as per-account revocation, a presented cookie can never authenticate again; (2) supersedes every unconsumed login code (`recovery` and `admin_issued`) and every unconsumed claim token (`superseded_at`), so a leaked copy cannot mint new sessions through them; and (3) writes one content-free `security.sessions.revoke_all` audit entry. All users must log in again; admins must re-issue any outstanding codes or claim tokens.
 
-- Node (SQLite or PostgreSQL from `DATABASE_URL`): `npx tsx scripts/ops/revoke-all-sessions.ts` prints the session count (dry run); add `--confirm` to revoke.
-- Cloudflare D1: save the statements below as `revoke-all.sql` and run `wrangler d1 execute <DB_NAME> --remote --file revoke-all.sql` (the same SQL works on SQLite with `sqlite3`; on PostgreSQL use the script).
+- Node, production image (SQLite or PostgreSQL from `DATABASE_URL`, which must be set explicitly; the command refuses `:memory:` and `NODE_ENV=test`): `node dist/ops/revoke-all-sessions.js` prints what it would change (dry run); add `--confirm` to revoke. Source checkout: `npx tsx scripts/ops/revoke-all-sessions.ts [--confirm]`. A failure rolls back everything and prints only a short status, never driver text.
+- Cloudflare D1: save the statements below as `revoke-all.sql` and run `wrangler d1 execute <DB_NAME> --remote --file revoke-all.sql` (the same SQL works on SQLite with `sqlite3`; on PostgreSQL use the command above).
+- **After any restore** (§6.4 step 2): run this procedure before serving traffic. A backup taken before a revocation still holds the old session digests and unconsumed codes; restoring it would revive them.
 
 ```sql
 DELETE FROM sessions;
+UPDATE login_codes SET superseded_at = CAST(strftime('%s','now') AS INTEGER) * 1000 WHERE used_at IS NULL AND superseded_at IS NULL;
+UPDATE claim_tokens SET superseded_at = CAST(strftime('%s','now') AS INTEGER) * 1000 WHERE consumed_at IS NULL AND superseded_at IS NULL;
 INSERT INTO audit_entries (community_id, actor_id, action, resource_type, resource_ids, outcome, created_at)
 VALUES (NULL, NULL, 'security.sessions.revoke_all', NULL, '[]', 'success', CAST(strftime('%s','now') AS INTEGER) * 1000);
 ```
 
-_Verify (automated):_ `tests/hono/revoke-all-sessions.test.ts` proves every existing cookie answers `401` afterwards, new logins work, accounts are unchanged, and the audit entry is written (script and the SQL above). _Operator spot check:_ replay an old cookie — expect `401`.
+_Verify (automated):_ `tests/hono/revoke-all-sessions.test.ts` proves, for the command and for the SQL above, that every existing cookie, pre-existing recovery/admin-issued code and claim token stops working, that fresh logins, codes and tokens work, that accounts are unchanged, that the audit entry is written, that an audit failure rolls everything back, and that a restored pre-revocation backup is denied again after the purge. _Operator spot check:_ replay an old cookie — expect `401`.
 
 **Media storage on Node.** Local-disk media storage (`HONO_STORAGE_ROOT`, `Dockerfile` line 95) is the intended production configuration on Node; the runtime gate deliberately does not refuse it, and no in-memory media storage exists in the Hono app.
 
@@ -148,7 +151,7 @@ The restart-safe orphan sweeper (SPEC-V2 §6.7) deletes stored objects that no `
 Operator procedure for any restore (D1 Time Travel, retained D1 export, self-hosted/field-kit file backup):
 
 1. Set the hold _before_ touching the restore — `ORPHAN_SWEEP_PAUSED=true`, or create the marker (self-hosted Node: `touch <storage-root>/system/orphan-sweep-hold`; Workers: put an empty `system/orphan-sweep-hold` object in the MEDIA bucket through the pinned CLI: `npx wrangler r2 object put <bucket>/system/orphan-sweep-hold --file /dev/null --remote`). On the hosted profile the sweep runs **hourly** (`0 * * * *`), so the hold is the only thing closing the window between a D1 Time Travel restore landing and storage and the database agreeing — an unheld restore can lose restored bytes to the next hourly run.
-2. Restore, then verify the restored state against the out-of-band erasure records and the files table before serving (SPEC-V2 §7, "Backups" — restores may never target a point before a recorded erasure's completion; post-completion restores reconcile before serving again — applied in practice at this document's §5 and the Recover step of §6.1/§6.2).
+2. Restore, then run the R1a global session revocation (a restored backup can revive old session digests and unconsumed codes), then verify the restored state against the out-of-band erasure records and the files table before serving (SPEC-V2 §7, "Backups" — restores may never target a point before a recorded erasure's completion; post-completion restores reconcile before serving again — applied in practice at this document's §5 and the Recover step of §6.1/§6.2).
 3. Lift the hold only after verification — unset the flag or remove `system/orphan-sweep-hold`. The Node sweep additionally never runs at boot; its first run is delayed (named constant, default 1 hour) so a restore in flight at process start is not raced.
 
 Neither hold touches the database; lifting the hold never deletes anything by itself — it only re-enables the normal sweep, which still honors the grace window, the reference check and the resume cursor.

@@ -1,8 +1,10 @@
 /**
- * Emergency global session revocation (#137): scripts/ops/revoke-all-sessions.ts
- * and the equivalent D1/SQLite SQL documented in OPERATIONS-GOVERNANCE.md R1a.
+ * Emergency global session revocation (#137): src/ops/revoke-all-sessions.ts
+ * (also scripts/ops/revoke-all-sessions.ts) and the equivalent D1/SQLite SQL
+ * documented in OPERATIONS-GOVERNANCE.md R1a.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
@@ -12,18 +14,43 @@ import { sessionsSqlite } from '../../src/db/schema/sessions.js';
 import { auditEntriesSqlite } from '../../src/db/schema/audit_entries.js';
 import { communitiesSqlite } from '../../src/db/schema/communities.js';
 import { usersSqlite } from '../../src/db/schema/users.js';
+import {
+  claimTokensSqlite,
+  loginCodesSqlite,
+} from '../../src/db/schema/login_codes.js';
+import {
+  ADMIN_ISSUED_CODE_TTL_MS,
+  ARGON2ID_ALGORITHM,
+  ARGON2ID_PARAMS,
+} from '../../src/shared/auth-policy.js';
+import { sha256Hex, toBase64Url } from '../../src/shared/auth-crypto.js';
 import { normalizeSearchText } from '../../src/shared/utils/search-normalize.js';
-import { argon2Seed, makeDerivedKey } from './auth-test-utils.js';
+import {
+  argon2Seed,
+  makeDerivedKey,
+  makeVerifierSalt,
+} from './auth-test-utils.js';
 import {
   REVOKE_ALL_AUDIT_ACTION,
-  countSessions,
+  countAffected,
+  main,
   revokeAllSessions,
-} from '../../scripts/ops/revoke-all-sessions.js';
-import { readFileSync } from 'node:fs';
+  runCli,
+} from '../../src/ops/revoke-all-sessions.js';
+
+const ORIGIN = 'https://api.example.test';
+const rawToken = () => toBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+const passwordPayload = () => ({
+  algorithm: ARGON2ID_ALGORITHM,
+  salt: makeVerifierSalt(),
+  params: { ...ARGON2ID_PARAMS },
+  derivedKey: makeDerivedKey(),
+});
 
 describe('emergency global session revocation (#137)', () => {
   const openDbs: Sqlite.Database[] = [];
   afterEach(() => {
+    vi.unstubAllEnvs();
     while (openDbs.length > 0) openDbs.pop()?.close();
   });
 
@@ -44,107 +71,323 @@ describe('emergency global session revocation (#137)', () => {
     const key = makeDerivedKey();
     const seed = await argon2Seed(key);
     const emails = ['one@rev.example.test', 'two@rev.example.test'];
-    await db.insert(usersSqlite).values(
-      emails.map((email, i) => ({
-        ...seed,
-        passwordHash: 'legacy-hash',
-        firstName: 'Rev',
-        lastName: 'User',
-        isActive: true as const,
-        role: 'member' as const,
-        email,
-        emailNormalized: normalizeSearchText(email),
-        username: `rev_${i}`,
-        usernameNormalized: `rev_${i}`,
-        communityId: i === 0 ? alpha.id : beta.id,
-      }))
-    );
+    const users = await db
+      .insert(usersSqlite)
+      .values(
+        emails.map((email, i) => ({
+          ...seed,
+          passwordHash: 'legacy-hash',
+          firstName: 'Rev',
+          lastName: 'User',
+          isActive: true as const,
+          role: 'member' as const,
+          email,
+          emailNormalized: normalizeSearchText(email),
+          username: `rev_${i}`,
+          usernameNormalized: `rev_${i}`,
+          communityId: i === 0 ? alpha.id : beta.id,
+        }))
+      )
+      .returning();
     const app = createHonoApp({
       repository: new HonoFoundationRepository(db),
       storage: { read: async () => null },
       serverSecret: makeDerivedKey(),
       secureCookies: false,
+      publicOrigin: ORIGIN,
       trustProxy: true,
+      isWorkers: true,
     });
-    const login = async (identifier: string) => {
-      const response = await app.request('http://test/v2/auth/login', {
+    const post = (path: string, body: unknown) =>
+      app.request(`${ORIGIN}${path}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ identifier, derivedKey: key }),
+        headers: {
+          'content-type': 'application/json',
+          'cf-connecting-ip': '203.0.113.9',
+        },
+        body: JSON.stringify(body),
+      });
+    const login = async (identifier: string) => {
+      const response = await post('/v2/auth/login', {
+        identifier,
+        derivedKey: key,
       });
       expect(response.status).toBe(200);
       return (response.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
     };
     const me = (cookie: string) =>
-      app.request('http://test/v2/auth/me', { headers: { cookie } });
-    return { db, emails, login, me };
+      app.request(`${ORIGIN}/v2/auth/me`, { headers: { cookie } });
+    const insertCode = async (
+      userId: number,
+      communityId: number,
+      purpose: 'admin_issued' | 'recovery'
+    ) => {
+      const code = toBase64Url(crypto.getRandomValues(new Uint8Array(16)));
+      const createdAt = Date.now();
+      await db.insert(loginCodesSqlite).values({
+        userId,
+        communityId,
+        purpose,
+        codeHash: await sha256Hex(code),
+        createdBy: userId,
+        createdAt,
+        expiresAt:
+          purpose === 'admin_issued'
+            ? createdAt + ADMIN_ISSUED_CODE_TTL_MS
+            : null,
+      });
+      return code;
+    };
+    const insertClaim = async (communityId: number) => {
+      const raw = rawToken();
+      const createdAt = Date.now();
+      await db.insert(claimTokensSqlite).values({
+        communityId,
+        tokenHash: await sha256Hex(raw),
+        createdAt,
+        expiresAt: createdAt + 3_600_000,
+      });
+      return raw;
+    };
+    const claim = (token: string, name: string) =>
+      post('/v2/bootstrap/claim', {
+        token,
+        username: name,
+        email: `${name}@claim.example.test`,
+        password: passwordPayload(),
+      });
+    const emptyCommunity = async (slug: string) =>
+      (
+        await db
+          .insert(communitiesSqlite)
+          .values({ name: slug, slug, isActive: true })
+          .returning()
+      )[0] as { id: number };
+    const audit = async () =>
+      (await db.select().from(auditEntriesSqlite)).filter(
+        (row) => row.action === REVOKE_ALL_AUDIT_ACTION
+      );
+    return {
+      sqlite,
+      db,
+      users,
+      emails,
+      post,
+      login,
+      me,
+      insertCode,
+      insertClaim,
+      claim,
+      emptyCommunity,
+      audit,
+    };
   }
 
-  it('revokes every session: old cookies get 401, new logins work, data is untouched', async () => {
-    const { db, emails, login, me } = await setup();
-    const cookies = await Promise.all(emails.map(login));
-    const device = await login(emails[0] as string);
-    for (const cookie of [...cookies, device]) {
-      expect((await me(cookie)).status).toBe(200);
+  it('revokes sessions, recovery/admin codes and claim tokens; new logins work', async () => {
+    const s = await setup();
+    const { db, users, emails } = s;
+    const cookies = [await s.login(emails[0]!), await s.login(emails[1]!)];
+    const extra = await s.login(emails[0]!);
+    for (const cookie of [...cookies, extra]) {
+      expect((await s.me(cookie)).status).toBe(200);
     }
+    const recovery = await s.insertCode(
+      users[0]!.id,
+      users[0]!.communityId!,
+      'recovery'
+    );
+    const issued = await s.insertCode(
+      users[1]!.id,
+      users[1]!.communityId!,
+      'admin_issued'
+    );
+    const unclaimed = await s.emptyCommunity('rev-unclaimed');
+    const oldClaim = await s.insertClaim(unclaimed.id);
     const usersBefore = await db.select().from(usersSqlite);
-    expect(await countSessions(db)).toBe(3);
 
-    const result = await revokeAllSessions(db);
-    expect(result).toEqual({ revoked: 3 });
+    expect(await countAffected(db)).toEqual({
+      revoked: 3,
+      loginCodesSuperseded: 2,
+      claimTokensSuperseded: 1,
+    });
+    expect(await revokeAllSessions(db)).toEqual({
+      revoked: 3,
+      loginCodesSuperseded: 2,
+      claimTokensSuperseded: 1,
+    });
 
-    for (const cookie of [...cookies, device]) {
-      const denied = await me(cookie);
+    for (const cookie of [...cookies, extra]) {
+      const denied = await s.me(cookie);
       expect(denied.status).toBe(401);
       expect(JSON.stringify(await denied.json())).not.toContain('rev.example');
     }
     expect(await db.select().from(sessionsSqlite)).toHaveLength(0);
-    // Accounts are unchanged: revocation touches sessions only.
+    // Pre-existing recovery and admin-issued codes no longer work.
+    const redeemRecovery = await s.post('/v2/auth/recovery/redeem', {
+      code: recovery,
+      password: passwordPayload(),
+    });
+    const redeemIssued = await s.post('/v2/auth/recovery/redeem', {
+      code: issued,
+    });
+    expect(redeemRecovery.status).toBe(401);
+    expect(redeemIssued.status).toBe(401);
+    expect(redeemRecovery.headers.get('set-cookie')).toBeNull();
+    expect(redeemIssued.headers.get('set-cookie')).toBeNull();
+    // The pre-existing claim token no longer works and the community stays unclaimed.
+    const deniedClaim = await s.claim(oldClaim, 'old_claimer');
+    expect(deniedClaim.status).toBeGreaterThanOrEqual(400);
+    expect(deniedClaim.headers.get('set-cookie')).toBeNull();
+    expect(
+      (await db.select().from(usersSqlite)).filter(
+        (u) => u.communityId === unclaimed.id
+      )
+    ).toEqual([]);
+    for (const row of await db.select().from(loginCodesSqlite)) {
+      expect(row.supersededAt).not.toBeNull();
+      expect(row.usedAt).toBeNull();
+    }
+    for (const row of await db.select().from(claimTokensSqlite)) {
+      expect(row.supersededAt).not.toBeNull();
+    }
+    // Accounts are unchanged.
     expect(await db.select().from(usersSqlite)).toEqual(usersBefore);
-
-    const audit = (await db.select().from(auditEntriesSqlite)).filter(
-      (row) => row.action === REVOKE_ALL_AUDIT_ACTION
-    );
-    expect(audit).toHaveLength(1);
-    expect(audit[0]).toMatchObject({
+    expect(await s.audit()).toHaveLength(1);
+    expect((await s.audit())[0]).toMatchObject({
       outcome: 'success',
       communityId: null,
       actorId: null,
     });
 
-    // Fresh logins work; the revoked cookies stay dead.
-    const fresh = await login(emails[1] as string);
-    expect((await me(fresh)).status).toBe(200);
-    expect(fresh).not.toBe(cookies[1]);
-    for (const cookie of cookies) expect((await me(cookie)).status).toBe(401);
+    // Fresh credentials issued after the run work: logins, codes and tokens.
+    const fresh = await s.login(emails[1]!);
+    expect((await s.me(fresh)).status).toBe(200);
+    for (const cookie of cookies) expect((await s.me(cookie)).status).toBe(401);
+    const freshIssued = await s.insertCode(
+      users[1]!.id,
+      users[1]!.communityId!,
+      'admin_issued'
+    );
+    expect(
+      (await s.post('/v2/auth/recovery/redeem', { code: freshIssued })).status
+    ).toBe(200);
+    const freshClaim = await s.insertClaim(unclaimed.id);
+    expect((await s.claim(freshClaim, 'new_claimer')).status).toBe(201);
   });
 
-  it('is idempotent with no sessions and still audits the run', async () => {
-    const { db } = await setup();
-    expect(await revokeAllSessions(db)).toEqual({ revoked: 0 });
-    expect(await revokeAllSessions(db)).toEqual({ revoked: 0 });
-    const audit = (await db.select().from(auditEntriesSqlite)).filter(
-      (row) => row.action === REVOKE_ALL_AUDIT_ACTION
+  it('is atomic: an audit failure rolls back every revocation', async () => {
+    const s = await setup();
+    const cookie = await s.login(s.emails[0]!);
+    await s.insertCode(s.users[0]!.id, s.users[0]!.communityId!, 'recovery');
+    const community = await s.emptyCommunity('rev-atomic');
+    await s.insertClaim(community.id);
+    s.sqlite.exec(
+      `CREATE TRIGGER fail_audit BEFORE INSERT ON audit_entries BEGIN SELECT RAISE(ABORT, 'secret-driver-detail'); END`
     );
-    expect(audit).toHaveLength(2);
+    await expect(revokeAllSessions(s.db)).rejects.toThrow();
+    expect((await s.me(cookie)).status).toBe(200);
+    expect(await countAffected(s.db)).toEqual({
+      revoked: 1,
+      loginCodesSuperseded: 1,
+      claimTokensSuperseded: 1,
+    });
+  });
+
+  it('CLI: dry run changes nothing, --confirm is required, failures are sanitized', async () => {
+    const s = await setup();
+    const cookie = await s.login(s.emails[0]!);
+    const out: string[] = [];
+    const err: string[] = [];
+    const io = {
+      out: (l: string) => out.push(l),
+      err: (l: string) => err.push(l),
+    };
+
+    expect(await runCli([], s.db, io)).toBe(0);
+    expect(await runCli(['--other'], s.db, io)).toBe(0);
+    expect(out.join('\n')).toContain('Dry run: would revoke 1 session(s)');
+    expect((await s.me(cookie)).status).toBe(200);
+    expect(await s.audit()).toHaveLength(0);
+
+    s.sqlite.exec(
+      `CREATE TRIGGER fail_audit BEFORE INSERT ON audit_entries BEGIN SELECT RAISE(ABORT, 'secret-driver-detail'); END`
+    );
+    expect(await runCli(['--confirm'], s.db, io)).toBe(1);
+    expect(err.join('\n')).toContain('rolled back, nothing was changed');
+    expect(err.join('\n')).not.toContain('secret-driver-detail');
+    expect((await s.me(cookie)).status).toBe(200);
+
+    s.sqlite.exec('DROP TRIGGER fail_audit');
+    expect(await runCli(['--confirm'], s.db, io)).toBe(0);
+    expect(out.join('\n')).toContain('Revoked 1 session(s)');
+    expect((await s.me(cookie)).status).toBe(401);
+  });
+
+  it('refuses to run without an explicit DATABASE_URL, in :memory:, or under NODE_ENV=test', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      vi.stubEnv('NODE_ENV', 'test');
+      vi.stubEnv('DATABASE_URL', '/tmp/does-not-matter.db');
+      expect(await main(['--confirm'])).toBe(2);
+      vi.stubEnv('NODE_ENV', 'production');
+      vi.stubEnv('DATABASE_URL', ':memory:');
+      expect(await main(['--confirm'])).toBe(2);
+      vi.stubEnv('DATABASE_URL', '');
+      expect(await main(['--confirm'])).toBe(2);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('a restored pre-revocation backup is purged again before serving traffic', async () => {
+    const s = await setup();
+    const cookie = await s.login(s.emails[0]!);
+    const backup = await s.db.select().from(sessionsSqlite);
+    expect(backup).toHaveLength(1);
+    await revokeAllSessions(s.db);
+    expect((await s.me(cookie)).status).toBe(401);
+    // Restoring the backup brings the old session digest back to life ...
+    await s.db.insert(sessionsSqlite).values(backup);
+    expect((await s.me(cookie)).status).toBe(200);
+    // ... so the documented post-restore purge must deny it again.
+    await revokeAllSessions(s.db);
+    expect((await s.me(cookie)).status).toBe(401);
+    const fresh = await s.login(s.emails[0]!);
+    expect((await s.me(fresh)).status).toBe(200);
   });
 
   it('the documented D1/SQLite SQL has the same effect', async () => {
     const doc = readFileSync('docs/OPERATIONS-GOVERNANCE.md', 'utf8');
     const block = /```sql\n(DELETE FROM sessions;[\s\S]*?)```/.exec(doc)?.[1];
     expect(block, 'R1a SQL block present').toBeTruthy();
-    const { db, emails, login, me } = await setup();
-    const cookie = await login(emails[0] as string);
-    expect((await me(cookie)).status).toBe(200);
-    openDbs[0]?.exec(block as string);
-    expect((await me(cookie)).status).toBe(401);
-    expect(await db.select().from(sessionsSqlite)).toHaveLength(0);
-    const audit = (await db.select().from(auditEntriesSqlite)).filter(
-      (row) => row.action === REVOKE_ALL_AUDIT_ACTION
+    expect(block).toContain('UPDATE login_codes');
+    expect(block).toContain('UPDATE claim_tokens');
+    const s = await setup();
+    const cookie = await s.login(s.emails[0]!);
+    const recovery = await s.insertCode(
+      s.users[0]!.id,
+      s.users[0]!.communityId!,
+      'recovery'
     );
+    const community = await s.emptyCommunity('rev-sql');
+    const token = await s.insertClaim(community.id);
+    s.sqlite.exec(block as string);
+    expect((await s.me(cookie)).status).toBe(401);
+    expect(await s.db.select().from(sessionsSqlite)).toHaveLength(0);
+    expect(
+      (
+        await s.post('/v2/auth/recovery/redeem', {
+          code: recovery,
+          password: passwordPayload(),
+        })
+      ).status
+    ).toBe(401);
+    expect((await s.claim(token, 'sql_claimer')).status).toBeGreaterThanOrEqual(
+      400
+    );
+    const audit = await s.audit();
     expect(audit).toHaveLength(1);
     expect(audit[0]?.createdAt).toBeInstanceOf(Date);
-    const fresh = await login(emails[0] as string);
-    expect((await me(fresh)).status).toBe(200);
+    expect((await s.me(await s.login(s.emails[0]!))).status).toBe(200);
   });
 });

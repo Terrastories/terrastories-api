@@ -76,6 +76,7 @@ describe('POST /v2/auth/login for imported null-username accounts', () => {
       });
     const sessions = () => db.select().from(sessionsSqlite);
     return {
+      app,
       db,
       alpha,
       beta,
@@ -113,20 +114,40 @@ describe('POST /v2/auth/login for imported null-username accounts', () => {
     expect(await sessions()).toHaveLength(0);
   });
 
-  it('denies an email shared across communities without a slug, with no session', async () => {
-    const { postLogin, key, sharedEmail, sessions } = await setup();
-    const unknown = await postLogin({
-      identifier: 'nobody@null.example.test',
-      derivedKey: key,
-    });
-    const ambiguous = await postLogin({
-      identifier: sharedEmail,
-      derivedKey: key,
-    });
-    expect(ambiguous.status).toBe(401);
-    // Indistinguishable from an unknown account: no enumeration of the clash.
-    expect(await ambiguous.json()).toEqual(await unknown.json());
-    expect(ambiguous.headers.get('set-cookie')).toBeNull();
+  it('answers every denial with one identical contract and no session', async () => {
+    const { postLogin, key, sharedEmail, soloEmail, sessions } = await setup();
+    const denials = await Promise.all(
+      [
+        // unknown account
+        { identifier: 'nobody@null.example.test', derivedKey: key },
+        // email shared across communities, no slug
+        { identifier: sharedEmail, derivedKey: key },
+        // wrong password for a real null-username account
+        { identifier: soloEmail, derivedKey: makeDerivedKey() },
+        // slug of a community that does not hold the account
+        {
+          identifier: soloEmail,
+          derivedKey: key,
+          communitySlug: 'null-beta',
+        },
+      ].map(async (body) => {
+        const response = await postLogin(body);
+        return {
+          status: response.status,
+          type: response.headers.get('content-type'),
+          cookie: response.headers.get('set-cookie'),
+          body: await response.json(),
+        };
+      })
+    );
+    for (const denial of denials) {
+      expect(denial).toEqual({
+        status: 401,
+        type: denials[0]?.type,
+        cookie: null,
+        body: { error: 'Invalid credentials' },
+      });
+    }
     expect(await sessions()).toHaveLength(0);
   });
 
@@ -163,24 +184,28 @@ describe('POST /v2/auth/login for imported null-username accounts', () => {
     expect(await sessions()).toHaveLength(2);
   });
 
-  it('keeps a session in the database: deleting the row ends it on a fresh app', async () => {
-    const { db, postLogin, key, soloEmail } = await setup();
+  it('keeps a session in the database: deleting the row ends it on the same warmed instance', async () => {
+    const { db, app, postLogin, key, soloEmail } = await setup();
     const login = await postLogin({ identifier: soloEmail, derivedKey: key });
     const cookie = (login.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
-    const fresh = () =>
-      createHonoApp({
-        repository: new HonoFoundationRepository(db),
-        storage: { read: async () => null },
-        secureCookies: false,
-      });
-    const me = (app: ReturnType<typeof fresh>) =>
-      app.request('http://test/v2/auth/me', { headers: { cookie } });
-    // A second app instance over the same database accepts the cookie.
-    expect((await me(fresh())).status).toBe(200);
+    const me = (instance: typeof app) =>
+      instance.request('http://test/v2/auth/me', { headers: { cookie } });
+    // Warm the instance: it has accepted this cookie more than once.
+    expect((await me(app)).status).toBe(200);
+    expect((await me(app)).status).toBe(200);
+    // A second instance over the same database accepts it too.
+    const second = createHonoApp({
+      repository: new HonoFoundationRepository(db),
+      storage: { read: async () => null },
+      secureCookies: false,
+    });
+    expect((await me(second)).status).toBe(200);
     await db.delete(sessionsSqlite);
-    // No in-process cache: the same cookie dies the moment the row is gone.
-    const denied = await me(fresh());
-    expect(denied.status).toBe(401);
-    expect(JSON.stringify(await denied.json())).not.toContain(soloEmail);
+    // No in-process cache: both instances deny at once.
+    for (const instance of [app, second]) {
+      const denied = await me(instance);
+      expect(denied.status).toBe(401);
+      expect(JSON.stringify(await denied.json())).not.toContain(soloEmail);
+    }
   });
 });

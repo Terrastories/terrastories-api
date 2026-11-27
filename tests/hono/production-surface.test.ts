@@ -13,7 +13,9 @@ import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
 import { communitiesSqlite } from '../../src/db/schema/communities.js';
 import { usersSqlite } from '../../src/db/schema/users.js';
+import { normalizeSearchText } from '../../src/shared/utils/search-normalize.js';
 import { routeTableOf } from '../../scripts/qa/hono-fixture.js';
+import { argon2Seed, makeDerivedKey } from './auth-test-utils.js';
 
 describe('Hono production surface (#146 / #137)', () => {
   const openDbs: Sqlite.Database[] = [];
@@ -21,12 +23,30 @@ describe('Hono production surface (#146 / #137)', () => {
     while (openDbs.length > 0) openDbs.pop()?.close();
   });
 
-  function setup() {
+  async function setup() {
     const sqlite = new Sqlite(':memory:');
     sqlite.pragma('foreign_keys = ON');
     openDbs.push(sqlite);
     const db = drizzle(sqlite);
     migrate(db, { migrationsFolder: 'src/db/migrations' });
+    const [community] = await db
+      .insert(communitiesSqlite)
+      .values({ name: 'Surface', slug: 'surface', isActive: true })
+      .returning();
+    const key = makeDerivedKey();
+    await db.insert(usersSqlite).values({
+      ...(await argon2Seed(key)),
+      passwordHash: 'legacy-hash',
+      firstName: 'Surface',
+      lastName: 'Editor',
+      isActive: true,
+      role: 'editor',
+      email: 'editor@surface.example.test',
+      emailNormalized: normalizeSearchText('editor@surface.example.test'),
+      username: 'surface_editor',
+      usernameNormalized: 'surface_editor',
+      communityId: community!.id,
+    });
     // Production-like options: deployed https origin, secure cookies.
     const app = createHonoApp({
       repository: new HonoFoundationRepository(db),
@@ -34,8 +54,27 @@ describe('Hono production surface (#146 / #137)', () => {
       serverSecret: 'p'.repeat(48),
       publicOrigin: 'https://api.example.test',
       secureCookies: true,
+      isWorkers: true,
     });
-    return { app, db };
+    const login = async () => {
+      const response = await app.request(
+        'https://api.example.test/v2/auth/login',
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'cf-connecting-ip': '203.0.113.7',
+          },
+          body: JSON.stringify({
+            identifier: 'surface_editor',
+            derivedKey: key,
+          }),
+        }
+      );
+      expect(response.status).toBe(200);
+      return (response.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
+    };
+    return { app, db, login };
   }
 
   const tableCounts = async (db: ReturnType<typeof drizzle>) => ({
@@ -44,20 +83,27 @@ describe('Hono production surface (#146 / #137)', () => {
     users: (await db.select({ n: count() }).from(usersSqlite))[0]?.n,
   });
 
-  it('has no /dev path in the route table', () => {
-    const { app } = setup();
-    const paths = routeTableOf(app).map((route) => route.path);
-    expect(paths.length).toBeGreaterThan(10);
-    expect(paths.filter((path) => /(^|\/)dev(\/|$)/.test(path))).toEqual([]);
+  // routeTableOf skips ALL registrations; this includes them.
+  const registeredPaths = (app: ReturnType<typeof createHonoApp>) =>
+    app.routes.map((route) => `${route.method} ${route.path}`);
+
+  it('has no /dev path in the route table (any method, ALL included)', async () => {
+    const { app } = await setup();
+    expect(routeTableOf(app).length).toBeGreaterThan(10);
+    expect(
+      registeredPaths(app).filter((entry) => /\s\/dev(\/|\*|$)/.test(entry))
+    ).toEqual([]);
   });
 
   it.each(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'])(
     '%s /dev/* answers 404 and changes no data',
     async (method) => {
-      const { app, db } = setup();
+      const { app, db } = await setup();
       const before = await tableCounts(db);
       for (const path of ['/dev', '/dev/', '/dev/seed', '/dev/anything/else']) {
-        const response = await app.request(`http://test${path}`, { method });
+        const response = await app.request(`https://api.example.test${path}`, {
+          method,
+        });
         expect(response.status, `${method} ${path}`).toBe(404);
         if (method !== 'HEAD') {
           expect(await response.json()).toEqual({ error: 'Not found' });
@@ -68,28 +114,34 @@ describe('Hono production surface (#146 / #137)', () => {
     }
   );
 
-  it('registers no deferred routes: /v2/community/themes (§6.6) and /v2/media/:id/copy (§6.7)', async () => {
-    const { app } = setup();
-    const table = routeTableOf(app);
-    expect(table.filter((r) => /\/v2\/community\/themes/.test(r.path))).toEqual(
-      []
-    );
-    expect(table.filter((r) => /\/copy$/.test(r.path))).toEqual([]);
+  it('deferred routes /v2/community/themes (§6.6) and /v2/media/:id/copy (§6.7) have no handler, even for a signed-in editor', async () => {
+    const { app, login, db } = await setup();
+    // No registration under any method, ALL included.
+    expect(
+      registeredPaths(app).filter((entry) =>
+        /\/v2\/community\/themes|\/copy(\/|$)/.test(entry)
+      )
+    ).toEqual([]);
+    const cookie = await login();
+    const before = await tableCounts(db);
     for (const [method, path] of [
       ['GET', '/v2/community/themes'],
+      ['PUT', '/v2/community/themes'],
       ['POST', '/v2/media/1/copy'],
     ] as const) {
-      const response = await app.request(`http://test${path}`, { method });
-      // Never a handler answer: unauthenticated callers get 401 or 404.
-      expect([401, 404], `${method} ${path}`).toContain(response.status);
+      const response = await app.request(`https://api.example.test${path}`, {
+        method,
+        headers: { cookie, 'content-type': 'application/json' },
+        body: method === 'GET' ? undefined : '{}',
+      });
+      expect(response.status, `${method} ${path}`).toBe(404);
     }
+    expect(await tableCounts(db)).toEqual(before);
   });
 
-  describe('production entrypoints', () => {
+  describe('production entrypoints (source guard)', () => {
     const read = (path: string) => readFileSync(path, 'utf8');
-    const entrypoints = ['src/hono-server.ts', 'src/worker.ts'];
-
-    it.each(entrypoints)(
+    it.each(['src/hono-server.ts', 'src/worker.ts'])(
       '%s authenticates sessions through the DB repository, never memory/KV',
       (path) => {
         const source = read(path);
@@ -99,7 +151,6 @@ describe('Hono production surface (#146 / #137)', () => {
         );
       }
     );
-
     it('wrangler config binds no KV namespace', () => {
       expect(read('wrangler.jsonc')).not.toMatch(/kv_namespaces/);
     });

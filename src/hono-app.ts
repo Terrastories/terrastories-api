@@ -121,6 +121,11 @@ export interface FoundationOptions {
   offlineMode?: boolean;
   /** Deadline for the /ready database probe (default 3000 ms). */
   readinessTimeoutMs?: number;
+  /**
+   * Register work that may outlive its request (e.g. past the /ready
+   * deadline) so a Node shutdown can await it before closing the database.
+   */
+  trackWork?: (work: Promise<unknown>) => void;
 }
 const preloginSchema = z
   .object({
@@ -315,10 +320,12 @@ export function createHonoApp(options: FoundationOptions) {
     // Resolve persisted notice deadlines before any public or authenticated read.
     // A bounded backlog fails closed until subsequent requests/ticks drain it.
     // /ready bounds these calls too, so a stalled database cannot hang it.
-    const guard = <T>(work: Promise<T>) =>
-      c.req.path === '/ready'
-        ? withDeadline(work, options.readinessTimeoutMs ?? 3000)
-        : work;
+    const guard = <T>(work: Promise<T>) => {
+      if (c.req.path !== '/ready') return work;
+      // The deadline abandons the wait, not the work: keep it tracked.
+      options.trackWork?.(work);
+      return withDeadline(work, options.readinessTimeoutMs ?? 3000);
+    };
     if (
       c.req.path !== '/health' &&
       !(await guard(sovereigntyRepository.applyDueWithdrawals(now())))

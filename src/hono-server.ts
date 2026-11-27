@@ -78,6 +78,7 @@ const app = createHonoApp({
   erasureStore,
   repository,
   readinessTimeoutMs,
+  trackWork: (work) => void trackInFlight(inFlight, work),
   // Prelogin HMAC key (SPEC-V2 §7 step 1). Validated by the runtime gate in
   // production-like modes; prelogin fails closed when absent.
   serverSecret: runtimeConfig.serverSecret,

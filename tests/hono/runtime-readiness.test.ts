@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -99,17 +105,59 @@ describe('readiness', () => {
 });
 
 describe('readiness: earlier middleware', () => {
-  it('returns 503 within the deadline when the sovereignty step stalls', async () => {
+  it.each(['applyDueWithdrawals', 'activateDueErasures'] as const)(
+    'returns 503 within the deadline when %s stalls',
+    async (method) => {
+      const spy = vi
+        .spyOn(CommunitySovereigntyRepository.prototype, method)
+        .mockImplementation(() => new Promise(() => {}));
+      try {
+        const { app } = appWithProbe(async () => undefined, 100);
+        const started = Date.now();
+        const res = await app.request('/ready');
+        expect(spy).toHaveBeenCalled();
+        expect(res.status).toBe(503);
+        expect(Date.now() - started).toBeLessThan(2000);
+      } finally {
+        spy.mockRestore();
+      }
+    }
+  );
+
+  it('keeps abandoned sovereignty work tracked so shutdown waits before closeDb', async () => {
+    let finish: () => void = () => undefined;
     const spy = vi
       .spyOn(CommunitySovereigntyRepository.prototype, 'applyDueWithdrawals')
-      .mockImplementation(() => new Promise(() => {}));
+      .mockImplementation(
+        () => new Promise<boolean>((resolve) => (finish = () => resolve(true)))
+      );
     try {
-      const { app } = appWithProbe(async () => undefined, 100);
-      const started = Date.now();
-      const res = await app.request('/ready');
-      expect(spy).toHaveBeenCalled();
-      expect(res.status).toBe(503);
-      expect(Date.now() - started).toBeLessThan(2000);
+      const { db } = migratedDb();
+      const inFlight = new Set<Promise<void>>();
+      const app = createHonoApp({
+        repository: new HonoFoundationRepository(db),
+        storage,
+        readinessTimeoutMs: 50,
+        trackWork: (work) => void trackInFlight(inFlight, work),
+      });
+      expect((await app.request('/ready')).status).toBe(503);
+      expect(inFlight.size).toBe(1); // deadline fired, work still tracked
+      const events: string[] = [];
+      let closeCb: () => void = () => undefined;
+      createShutdown({
+        server: { close: (cb) => void (closeCb = cb) },
+        inFlight,
+        closeDb: async () => void events.push('closeDb'),
+        stopTimers: () => undefined,
+        drainMs: 5000,
+        exit: (code) => void events.push(`exit ${code}`),
+        log: () => undefined,
+      })();
+      closeCb();
+      await new Promise((r) => setTimeout(r, 100));
+      expect(events).toEqual([]);
+      finish();
+      await vi.waitFor(() => expect(events).toEqual(['closeDb', 'exit 0']));
     } finally {
       spy.mockRestore();
     }
@@ -295,11 +343,15 @@ describe('Node server process', () => {
       HONO_STORAGE_ROOT: path.join(path.dirname(dbFile), 'uploads'),
     };
   };
-  const start = (env: NodeJS.ProcessEnv) => {
-    const child = spawn('node_modules/.bin/tsx', ['src/hono-server.ts'], {
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+  const start = (env: NodeJS.ProcessEnv, preload: string[] = []) => {
+    const child = spawn(
+      'node_modules/.bin/tsx',
+      [...preload, 'src/hono-server.ts'],
+      {
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    );
     children.push(child);
     let output = '';
     child.stdout?.on('data', (d) => (output += d));
@@ -381,6 +433,33 @@ describe('Node server process', () => {
     expect(outputAtResponse).not.toContain('database closed');
     expect(await exited).toBe(0);
     expect(output()).toContain('shutdown: database closed');
+  }, 120_000);
+
+  it('production entrypoint tracks requests: DB closes only after a handler that outlived its socket', async () => {
+    const port = await freePort();
+    const dbFile = migratedDbFile();
+    const armFile = path.join(path.dirname(dbFile), 'arm-slow');
+    const { child, exited, output } = start(
+      { ...baseEnv(dbFile, port), SLOW_ARM_FILE: armFile },
+      ['--import', './tests/hono/fixtures/slow-sovereignty-preload.ts']
+    );
+    await waitReady(port);
+    const socket = net.connect(port, '127.0.0.1');
+    socket.on('error', () => undefined);
+    await new Promise<void>((r) => socket.on('connect', r));
+    writeFileSync(armFile, '1');
+    socket.write('GET /x HTTP/1.1\r\nHost: x\r\n\r\n');
+    await vi.waitFor(() => expect(output()).toContain('slow handler entered'), {
+      timeout: 15_000,
+    });
+    child.kill('SIGTERM');
+    socket.destroy(); // socket gone, handler still running
+    expect(await exited).toBe(0);
+    const out = output();
+    expect(out).toContain('slow handler done');
+    expect(out.indexOf('slow handler done')).toBeLessThan(
+      out.indexOf('shutdown: database closed')
+    );
   }, 120_000);
 
   it('force-exits 1 after the drain deadline when a request never finishes', async () => {

@@ -308,6 +308,33 @@ describe('createShutdown', () => {
     expect(events).toEqual(['stopTimers', 'handler done', 'closeDb', 'exit 0']);
   });
 
+  it('waits for work registered while draining (second snapshot)', async () => {
+    const { events, inFlight, shutdown, closeServer } = setup();
+    let finishFirst: () => void = () => undefined;
+    let finishSecond: () => void = () => undefined;
+    trackInFlight(
+      inFlight,
+      new Promise<void>((resolve) => (finishFirst = resolve)).then(() => {
+        // The first step completes and starts the next one after shutdown began.
+        trackInFlight(
+          inFlight,
+          new Promise<void>((resolve) => (finishSecond = resolve)).then(() => {
+            events.push('second done');
+          })
+        );
+      })
+    );
+    shutdown();
+    closeServer();
+    finishFirst();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(events).toEqual(['stopTimers']);
+    finishSecond();
+    await vi.waitFor(() =>
+      expect(events).toEqual(['stopTimers', 'second done', 'closeDb', 'exit 0'])
+    );
+  });
+
   it('exits 1 without closing the DB when a handler never finishes', async () => {
     const { events, inFlight, shutdown, closeServer } = setup();
     trackInFlight(inFlight, new Promise<void>(() => {}));

@@ -56,7 +56,14 @@ export function createShutdown(deps: ShutdownDeps): () => void {
       deps.exit(1);
     }, deps.drainMs);
     deps.server.close(() => {
-      void Promise.allSettled([...deps.inFlight])
+      // Work can register more work while draining (a handler moving to its
+      // next step), so wait until the set is empty, not just one snapshot.
+      const drain = async () => {
+        while (deps.inFlight.size > 0) {
+          await Promise.allSettled([...deps.inFlight]);
+        }
+      };
+      void drain()
         .then(() => deps.closeDb())
         .then(() => {
           clearTimeout(deadline);

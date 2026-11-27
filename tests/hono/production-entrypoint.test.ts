@@ -1,5 +1,5 @@
 /**
- * The real Node production entrypoint (src/hono-server.ts) running as a
+ * The real Node production entrypoint (src/hono-server.ts) running in production mode as a
  * process over a SQLite file (#146, #137): no /dev surface, no deferred
  * routes, and sessions live only in the database — deleting the row denies a
  * cookie that the same running instance accepted a moment earlier.
@@ -70,7 +70,12 @@ beforeAll(async () => {
       env: {
         PATH: process.env.PATH,
         HOME: process.env.HOME,
-        NODE_ENV: 'development',
+        NODE_ENV: 'production',
+        HONO_PUBLIC_ORIGIN: 'https://api.terrastories.org',
+        BOOTSTRAP_SECRET: 'b'.repeat(48),
+        // Legacy config schema still read by getDb() in production mode.
+        JWT_SECRET: 'j'.repeat(48),
+        SESSION_SECRET: 's'.repeat(48),
         DATABASE_URL: dbPath,
         HONO_PORT: String(port),
         HONO_STORAGE_ROOT: join(dir, 'uploads'),

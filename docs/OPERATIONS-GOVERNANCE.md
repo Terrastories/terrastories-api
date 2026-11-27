@@ -61,8 +61,7 @@ _Verify (automated):_ `tests/hono/foundation.test.ts` and `tests/hono/worker.tes
 **R1a — V2 sessions (emergency global revocation, #137).** Use when session tokens may have leaked or a database copy has left custody. There is no HTTP route and no session signing secret to rotate (tokens are random, stored only as SHA-256 digests), so this is an operator action. In one transaction it (1) deletes every session row — the same effect as per-account revocation, a presented cookie can never authenticate again; (2) supersedes every unconsumed login code (`recovery` and `admin_issued`) and every unconsumed claim token (`superseded_at`), so a leaked copy cannot mint new sessions through them; and (3) writes one content-free `security.sessions.revoke_all` audit entry. All users must log in again; admins must re-issue any outstanding codes or claim tokens.
 
 - Node, production image (SQLite or PostgreSQL from `DATABASE_URL`, which must be set explicitly; the command refuses `:memory:` and `NODE_ENV=test`): `node dist/ops/revoke-all-sessions.js` prints what it would change (dry run); add `--confirm` to revoke. Source checkout: `npx tsx scripts/ops/revoke-all-sessions.ts [--confirm]`. A failure rolls back everything and prints only a short status, never driver text.
-- Cloudflare D1: save the statements below as `revoke-all.sql` and run `wrangler d1 execute <DB_NAME> --remote --file revoke-all.sql` (the same SQL works on SQLite with `sqlite3`; on PostgreSQL use the command above).
-- **After any restore** (§6.4 step 2): run this procedure before serving traffic. A backup taken before a revocation still holds the old session digests and unconsumed codes; restoring it would revive them.
+- Cloudflare D1: save the statements below as `revoke-all.sql` and run `wrangler d1 execute <DB_NAME> --remote --file revoke-all.sql`. Do not add `BEGIN`/`COMMIT` (D1 rejects them). Every statement is idempotent, so if the run fails part-way (for example the audit insert), re-run the whole file and then check that `SELECT count(*) FROM sessions` is `0` and the audit entry exists. This path is not executed against real D1 by the test suite; the statements are tested on SQLite.
 
 ```sql
 DELETE FROM sessions;
@@ -72,7 +71,21 @@ INSERT INTO audit_entries (community_id, actor_id, action, resource_type, resour
 VALUES (NULL, NULL, 'security.sessions.revoke_all', NULL, '[]', 'success', CAST(strftime('%s','now') AS INTEGER) * 1000);
 ```
 
-_Verify (automated):_ `tests/hono/revoke-all-sessions.test.ts` proves, for the command and for the SQL above, that every existing cookie, pre-existing recovery/admin-issued code and claim token stops working, that fresh logins, codes and tokens work, that accounts are unchanged, that the audit entry is written, that an audit failure rolls everything back, and that a restored pre-revocation backup is denied again after the purge. _Operator spot check:_ replay an old cookie — expect `401`.
+- Plain SQLite (`sqlite3 -bail <db> < revoke-all-sqlite.sql`): the same statements inside one transaction, so a failure leaves nothing changed.
+
+```sql
+BEGIN IMMEDIATE;
+DELETE FROM sessions;
+UPDATE login_codes SET superseded_at = CAST(strftime('%s','now') AS INTEGER) * 1000 WHERE used_at IS NULL AND superseded_at IS NULL;
+UPDATE claim_tokens SET superseded_at = CAST(strftime('%s','now') AS INTEGER) * 1000 WHERE consumed_at IS NULL AND superseded_at IS NULL;
+INSERT INTO audit_entries (community_id, actor_id, action, resource_type, resource_ids, outcome, created_at)
+VALUES (NULL, NULL, 'security.sessions.revoke_all', NULL, '[]', 'success', CAST(strftime('%s','now') AS INTEGER) * 1000);
+COMMIT;
+```
+
+- PostgreSQL: use the command above (its transaction is exercised only by code review; no PostgreSQL run is part of the test suite).
+
+_Verify (automated):_ `tests/hono/revoke-all-sessions.test.ts` proves, for the command (including the real `tsx` process, `--confirm` parsing and exit codes) and for the SQLite SQL above (incl. rollback of the transaction form), that every existing cookie, pre-existing recovery/admin-issued code and claim token stops working, that fresh logins, codes and tokens work, that accounts are unchanged, that the audit entry is written, that an audit failure rolls everything back, and that a restored pre-revocation backup is denied again after the purge. _Operator spot check:_ replay an old cookie — expect `401`.
 
 **Media storage on Node.** Local-disk media storage (`HONO_STORAGE_ROOT`, `Dockerfile` line 95) is the intended production configuration on Node; the runtime gate deliberately does not refuse it, and no in-memory media storage exists in the Hono app.
 

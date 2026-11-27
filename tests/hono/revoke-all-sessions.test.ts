@@ -3,7 +3,12 @@
  * (also scripts/ops/revoke-all-sessions.ts) and the equivalent D1/SQLite SQL
  * documented in OPERATIONS-GOVERNANCE.md R1a.
  */
+import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
@@ -38,6 +43,7 @@ import {
   runCli,
 } from '../../src/ops/revoke-all-sessions.js';
 
+const execFileAsync = promisify(execFile);
 const ORIGIN = 'https://api.example.test';
 const rawToken = () => toBase64Url(crypto.getRandomValues(new Uint8Array(32)));
 const passwordPayload = () => ({
@@ -356,38 +362,144 @@ describe('emergency global session revocation (#137)', () => {
     expect((await s.me(fresh)).status).toBe(200);
   });
 
-  it('the documented D1/SQLite SQL has the same effect', async () => {
+  const sqlBlocks = () => {
     const doc = readFileSync('docs/OPERATIONS-GOVERNANCE.md', 'utf8');
-    const block = /```sql\n(DELETE FROM sessions;[\s\S]*?)```/.exec(doc)?.[1];
-    expect(block, 'R1a SQL block present').toBeTruthy();
-    expect(block).toContain('UPDATE login_codes');
-    expect(block).toContain('UPDATE claim_tokens');
+    const blocks = [...doc.matchAll(/```sql\n([\s\S]*?)```/g)].map(
+      (m) => m[1]!
+    );
+    const d1 = blocks.find((b) => b.startsWith('DELETE FROM sessions;'));
+    const sqlite = blocks.find((b) => b.startsWith('BEGIN IMMEDIATE;'));
+    expect(d1, 'D1 SQL block present').toBeTruthy();
+    expect(sqlite, 'SQLite transaction block present').toBeTruthy();
+    expect(d1).not.toMatch(/BEGIN|COMMIT/);
+    return { d1: d1!, sqlite: sqlite! };
+  };
+
+  it.each(['d1', 'sqlite'] as const)(
+    'the documented %s SQL has the same effect',
+    async (which) => {
+      const block = sqlBlocks()[which];
+      expect(block).toContain('UPDATE login_codes');
+      expect(block).toContain('UPDATE claim_tokens');
+      const s = await setup();
+      const cookie = await s.login(s.emails[0]!);
+      const recovery = await s.insertCode(
+        s.users[0]!.id,
+        s.users[0]!.communityId!,
+        'recovery'
+      );
+      const community = await s.emptyCommunity('rev-sql');
+      const token = await s.insertClaim(community.id);
+      s.sqlite.exec(block);
+      expect((await s.me(cookie)).status).toBe(401);
+      expect(await s.db.select().from(sessionsSqlite)).toHaveLength(0);
+      expect(
+        (
+          await s.post('/v2/auth/recovery/redeem', {
+            code: recovery,
+            password: passwordPayload(),
+          })
+        ).status
+      ).toBe(401);
+      expect(
+        (await s.claim(token, 'sql_claimer')).status
+      ).toBeGreaterThanOrEqual(400);
+      const audit = await s.audit();
+      expect(audit).toHaveLength(1);
+      expect(audit[0]?.createdAt).toBeInstanceOf(Date);
+      expect((await s.me(await s.login(s.emails[0]!))).status).toBe(200);
+    }
+  );
+
+  it('the documented SQLite transaction leaves nothing changed when the audit insert fails', async () => {
     const s = await setup();
     const cookie = await s.login(s.emails[0]!);
-    const recovery = await s.insertCode(
-      s.users[0]!.id,
-      s.users[0]!.communityId!,
-      'recovery'
+    await s.insertCode(s.users[0]!.id, s.users[0]!.communityId!, 'recovery');
+    s.sqlite.exec(
+      `CREATE TRIGGER fail_audit BEFORE INSERT ON audit_entries BEGIN SELECT RAISE(ABORT, 'x'); END`
     );
-    const community = await s.emptyCommunity('rev-sql');
-    const token = await s.insertClaim(community.id);
-    s.sqlite.exec(block as string);
-    expect((await s.me(cookie)).status).toBe(401);
-    expect(await s.db.select().from(sessionsSqlite)).toHaveLength(0);
-    expect(
-      (
-        await s.post('/v2/auth/recovery/redeem', {
-          code: recovery,
-          password: passwordPayload(),
-        })
-      ).status
-    ).toBe(401);
-    expect((await s.claim(token, 'sql_claimer')).status).toBeGreaterThanOrEqual(
-      400
-    );
-    const audit = await s.audit();
-    expect(audit).toHaveLength(1);
-    expect(audit[0]?.createdAt).toBeInstanceOf(Date);
-    expect((await s.me(await s.login(s.emails[0]!))).status).toBe(200);
+    // sqlite3 -bail stops at the failing statement and closes, discarding the open transaction.
+    expect(() => s.sqlite.exec(sqlBlocks().sqlite)).toThrow();
+    s.sqlite.exec('ROLLBACK');
+    expect((await s.me(cookie)).status).toBe(200);
+    expect(await countAffected(s.db)).toEqual({
+      revoked: 1,
+      loginCodesSuperseded: 1,
+      claimTokensSuperseded: 0,
+    });
   });
+
+  it('the real process: dry run, --confirm and exit codes against a SQLite file', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'revoke-cli-'));
+    const path = join(dir, 'app.db');
+    const file = new Sqlite(path);
+    const fdb = drizzle(file);
+    migrate(fdb, { migrationsFolder: 'src/db/migrations' });
+    const [community] = await fdb
+      .insert(communitiesSqlite)
+      .values({ name: 'Cli', slug: 'cli', isActive: true })
+      .returning();
+    const [user] = await fdb
+      .insert(usersSqlite)
+      .values({
+        ...(await argon2Seed(makeDerivedKey())),
+        passwordHash: 'legacy-hash',
+        firstName: 'Cli',
+        lastName: 'User',
+        isActive: true,
+        role: 'member',
+        email: 'cli@rev.example.test',
+        emailNormalized: 'cli@rev.example.test',
+        username: 'cli_user',
+        usernameNormalized: 'cli_user',
+        communityId: community!.id,
+      })
+      .returning();
+    await fdb.insert(sessionsSqlite).values({
+      id: 'cli-session',
+      tokenHash: 'f'.repeat(64),
+      userId: user!.id,
+      expiresAt: Date.now() + 60_000,
+    });
+    file.close();
+    const run = (args: string[], env: Record<string, string>) =>
+      execFileAsync(
+        process.execPath,
+        [
+          'node_modules/tsx/dist/cli.mjs',
+          'scripts/ops/revoke-all-sessions.ts',
+          ...args,
+        ],
+        { env: { PATH: process.env.PATH, HOME: process.env.HOME, ...env } }
+      ).then(
+        (r) => ({ code: 0, out: r.stdout + r.stderr }),
+        (e: { code?: number; stdout?: string; stderr?: string }) => ({
+          code: e.code ?? 1,
+          out: (e.stdout ?? '') + (e.stderr ?? ''),
+        })
+      );
+    const count = () => {
+      const c = new Sqlite(path, { readonly: true });
+      try {
+        return (
+          c.prepare('SELECT count(*) AS n FROM sessions').get() as { n: number }
+        ).n;
+      } finally {
+        c.close();
+      }
+    };
+    const env = { NODE_ENV: 'development', DATABASE_URL: path };
+    const dry = await run([], env);
+    expect(dry.code).toBe(0);
+    expect(dry.out).toContain('Dry run: would revoke 1 session(s)');
+    expect(count()).toBe(1);
+    // Refused under NODE_ENV=test even with a real file.
+    const refused = await run(['--confirm'], { ...env, NODE_ENV: 'test' });
+    expect(refused.code).toBe(2);
+    expect(count()).toBe(1);
+    const done = await run(['--confirm'], env);
+    expect(done.code).toBe(0);
+    expect(done.out).toContain('Revoked 1 session(s)');
+    expect(count()).toBe(0);
+  }, 60_000);
 });

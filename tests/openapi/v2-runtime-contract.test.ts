@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
+import { createHash } from 'node:crypto';
+import { MediaCleanupCoordinator } from '../../src/services/media-cleanup.service.js';
+import {
+  StorageChecksumMismatchError,
+  type FoundationStorage,
+} from '../../src/services/hono-foundation.service.js';
+import { DirectUploadSessionResponseSchema } from '../../src/shared/schemas/media-uploads-v2.js';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
@@ -26,6 +33,8 @@ import {
  * operation against the live session gate.
  */
 const ORIGIN = 'https://api.example.test';
+const sha256Of = (bytes: Uint8Array): string =>
+  createHash('sha256').update(bytes).digest('hex');
 
 interface Operation {
   security: unknown[];
@@ -95,23 +104,36 @@ describe('V2 OpenAPI runtime contract', () => {
       communityId: community!.id,
       isActive: true,
     });
+    const objects = new Map<string, Uint8Array>();
+    const storage: FoundationStorage = {
+      fenceCommunity: async () => {},
+      read: async (key, range) => {
+        const bytes = objects.get(key);
+        if (!bytes) return null;
+        return {
+          size: bytes.byteLength,
+          body: range ? bytes.subarray(range.start, range.end + 1) : bytes,
+        };
+      },
+      delete: async (key) => {
+        objects.delete(key);
+      },
+      put: async (key, body, options) => {
+        const bytes =
+          body instanceof Uint8Array
+            ? body
+            : new Uint8Array(await new Response(body).arrayBuffer());
+        if (options?.sha256 && sha256Of(bytes) !== options.sha256)
+          throw new StorageChecksumMismatchError();
+        objects.set(key, bytes);
+        return { size: bytes.byteLength };
+      },
+      list: async () => ({ entries: [], truncated: false }),
+    };
     const app = createHonoApp({
       repository: new HonoFoundationRepository(db),
-      storage: {
-        fenceCommunity: async () => {},
-        read: async () => null,
-        delete: async () => {},
-        put: async (
-          _key: string,
-          body: Uint8Array | ReadableStream<Uint8Array>
-        ) => ({
-          size:
-            body instanceof Uint8Array
-              ? body.byteLength
-              : (await new Response(body).arrayBuffer()).byteLength,
-        }),
-        list: async () => ({ entries: [], truncated: false }),
-      },
+      storage,
+      mediaCleanup: new MediaCleanupCoordinator(db, storage),
       erasureStore: { list: async () => [], write: async () => {} },
       serverSecret: makeServerSecret(),
       secureCookies: false,
@@ -173,7 +195,7 @@ describe('V2 OpenAPI runtime contract', () => {
         cookie: `ts_session=${token![1]}`,
       };
     };
-    return { call, derivedKey, login, addMember };
+    return { app, call, derivedKey, login, addMember };
   }
 
   /** Assert the status is documented and a mapped schema accepts the body. */
@@ -318,6 +340,53 @@ describe('V2 OpenAPI runtime contract', () => {
     expect(statuses).toContain(429);
   });
 
+  it('direct upload completion answers 201 as documented', async () => {
+    const { app, call, login } = await setup();
+    const cookie = await login();
+    const bytes = new Uint8Array(1024);
+    bytes.set(
+      [0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d],
+      0
+    );
+    const sha256 = sha256Of(bytes);
+    const created = await call('POST', '/v2/media/uploads', {
+      cookie,
+      body: {
+        filename: 'clip.mp4',
+        contentType: 'video/mp4',
+        size: bytes.byteLength,
+        sha256,
+        partSha256: [sha256],
+      },
+    });
+    await check(created.clone(), 'POST', '/v2/media/uploads', 201);
+    const session = DirectUploadSessionResponseSchema.parse(
+      await created.json()
+    ).data;
+    const target = session.parts[0]!;
+    const put = await app.request(target.url, {
+      method: 'PUT',
+      headers: {
+        ...target.headers,
+        cookie,
+        'content-length': String(bytes.byteLength),
+      },
+      body: bytes,
+    });
+    expect(put.status).toBe(200);
+    const etag = put.headers.get('etag')!.replace(/"/g, '');
+    const t = '/v2/media/uploads/:id/complete';
+    const done = await call(
+      'POST',
+      `/v2/media/uploads/${session.id}/complete`,
+      {
+        cookie,
+        body: { parts: [{ partNumber: 1, etag }] },
+      }
+    );
+    await check(done, 'POST', t, 201);
+  });
+
   it('documents request body requirement and 206 ranges', () => {
     const body = (method: string, template: string) =>
       (
@@ -330,6 +399,17 @@ describe('V2 OpenAPI runtime contract', () => {
     expect(
       Object.keys(operationFor('GET', '/v2/media/:id').responses)
     ).toContain('206');
+    // Range failures (media-stream-response.ts, community-export.service.ts)
+    // carry no body, so no content is documented for 416.
+    for (const route of [
+      '/v2/media/:id',
+      '/v2/community/export/download/:token',
+    ]) {
+      const responses = operationFor('GET', route).responses;
+      expect(responses['416'], route).toBeDefined();
+      expect(responses['416']?.content, route).toBeUndefined();
+      expect(responses['206']?.content, route).toBeUndefined();
+    }
     const mounted = new Set(mountedRouteKeys());
     for (const key of OPTIONAL_BODY)
       expect(mounted.has(key), `${key} is not mounted`).toBe(true);

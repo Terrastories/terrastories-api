@@ -1,4 +1,10 @@
 import { z } from 'zod';
+import { MediaUploadResponseSchema } from '../../src/shared/schemas/media-v2.js';
+import {
+  CompleteDirectUploadRequestSchema,
+  CreateDirectUploadRequestSchema,
+  DirectUploadSessionResponseSchema,
+} from '../../src/shared/schemas/media-uploads-v2.js';
 import {
   AdminAuditEntryListResponseSchema,
   AdminCommunityListResponseSchema,
@@ -102,6 +108,14 @@ const LoginResponseSchema = z.object({
 
 export const SCHEMA_MAP: Record<string, RouteSchemas> = {
   'POST /v2/auth/login': { response: LoginResponseSchema },
+  'POST /v2/media/uploads': {
+    request: CreateDirectUploadRequestSchema,
+    response: DirectUploadSessionResponseSchema,
+  },
+  'POST /v2/media/uploads/:id/complete': {
+    request: CompleteDirectUploadRequestSchema,
+    response: MediaUploadResponseSchema,
+  },
   'POST /v2/auth/recovery-codes': {
     request: RecoveryCodesRequestSchema,
     response: RecoveryCodesResponseSchema,

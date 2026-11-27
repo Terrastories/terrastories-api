@@ -32,6 +32,9 @@ const NO_INPUT = new Set([
   'GET /v2/bootstrap',
 ]);
 
+/** Error statuses answered without a body (range failures). */
+const BODYLESS_STATUSES = new Set([416]);
+
 /** Routes whose handler accepts an absent or empty JSON body. */
 export const OPTIONAL_BODY = new Set([
   'POST /v2/admin/communities/:id/claim-tokens',
@@ -60,6 +63,7 @@ const SUCCESS_STATUSES: Record<string, number[]> = {
   'POST /v2/users/:id/login-codes': [201],
   'POST /v2/media': [201],
   'POST /v2/media/uploads': [201],
+  'POST /v2/media/uploads/:id/complete': [201],
   'POST /v2/attachments': [201],
   'POST /v2/imports/preview': [201],
   'POST /v2/community/export': [201],
@@ -230,7 +234,7 @@ export function buildOpenApiDocument(): Json {
             schema: jsonSchemaOf(mapped.response, 'output'),
           },
         };
-      } else if (code >= 400) {
+      } else if (code >= 400 && !BODYLESS_STATUSES.has(code)) {
         response['content'] = {
           'application/json': {
             schema: { $ref: '#/components/schemas/V2Error' },

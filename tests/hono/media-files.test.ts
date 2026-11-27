@@ -440,7 +440,7 @@ describe('Slice 9 media upload, metadata, ranged serving, and deletion (#140)', 
     expect(fullRes.status).toBe(200);
     expect(fullRes.headers.get('accept-ranges')).toBe('bytes');
     expect(fullRes.headers.get('content-security-policy')).toBe(
-      "default-src 'none'; sandbox"
+      "default-src 'none'; frame-ancestors 'none'; sandbox"
     );
     expect(fullRes.headers.get('x-content-type-options')).toBe('nosniff');
     expect(fullRes.headers.get('cache-control')).toBe('no-store');
@@ -789,7 +789,7 @@ describe('Slice 9 media upload, metadata, ranged serving, and deletion (#140)', 
       expect(served.headers.get('content-disposition')).toBe('attachment');
       expect(served.headers.get('x-content-type-options')).toBe('nosniff');
       expect(served.headers.get('content-security-policy')).toBe(
-        "default-src 'none'; sandbox"
+        "default-src 'none'; frame-ancestors 'none'; sandbox"
       );
       expect(new Uint8Array(await served.arrayBuffer())).toEqual(bytes);
     }

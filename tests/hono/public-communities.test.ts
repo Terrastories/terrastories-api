@@ -629,7 +629,7 @@ describe('V2 public community endpoints (#145)', () => {
     expect(res.headers.get('Cache-Control')).toBe('no-store');
     expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff');
     expect(res.headers.get('Content-Security-Policy')).toBe(
-      "default-src 'none'; sandbox"
+      "default-src 'none'; frame-ancestors 'none'; sandbox"
     );
 
     const parsed = PublicCommunitiesListResponseSchema.parse(res.json);
@@ -839,7 +839,7 @@ describe('V2 public community endpoints (#145)', () => {
     expect(res.headers.get('Cache-Control')).toBe('no-store');
     expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff');
     expect(res.headers.get('Content-Security-Policy')).toBe(
-      "default-src 'none'; sandbox"
+      "default-src 'none'; frame-ancestors 'none'; sandbox"
     );
 
     const parsed = PublicCommunityDetailResponseSchema.parse(res.json);

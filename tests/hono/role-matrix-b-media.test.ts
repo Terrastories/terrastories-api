@@ -6,10 +6,11 @@
  * filename, file, session, attachment or story id. Allowed cells read back the
  * stored effect of the write.
  */
-import { describe, expect, it, afterEach } from 'vitest';
+import { describe, expect, it, afterEach, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { rawUploadRequest } from '../helpers/raw-upload.js';
 import {
+  API,
   MP4,
   PNG,
   sha,
@@ -19,12 +20,16 @@ import {
   type Role,
 } from './role-matrix-media-fixture.js';
 
+const HOUR_MS = 60 * 60 * 1000;
+const TTL_MS = 2 * HOUR_MS;
+
 type P = {
   id?: string;
   sessionId?: string;
   ids?: number[];
   storyId?: number;
   beforeKeys?: string[];
+  t0?: number;
 };
 /** Approved denial payloads, by status. */
 const DENIED_BODY: Record<number, unknown> = {
@@ -206,16 +211,45 @@ const ROUTES: Route[] = [
       super_admin: 404,
       foreign_admin: 404,
     },
-    prepare: async (ctx) => ({
-      sessionId: await newSession(ctx, await owner(ctx)),
-    }),
-    send: (ctx, _r, cookie, p) => presign(ctx, cookie, p.sessionId!),
-    verify: async (_ctx, _p, res) => {
+    prepare: async (ctx) => {
+      // Fake only Date: the app's direct-upload service reads the real clock.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      const t0 = Date.now();
+      return { sessionId: await newSession(ctx, await owner(ctx)), t0 };
+    },
+    send: (ctx, _r, cookie, p) => {
+      // Re-issue one hour after creation, so the refreshed expiry is observable.
+      vi.setSystemTime(p.t0! + HOUR_MS);
+      return presign(ctx, cookie, p.sessionId!);
+    },
+    verify: async (ctx, p, res) => {
+      const sid = p.sessionId!;
       const data = (await json(res)).data as {
-        parts: Array<{ url: string; partNumber: number }>;
+        expiresAt: string;
+        parts: unknown[];
       };
-      expect(data.parts.map((x) => x.partNumber)).toEqual([1]);
-      expect(data.parts[0]?.url).toEqual(expect.any(String));
+      const sha256Base64 = Buffer.from(sha(MP4), 'hex').toString('base64');
+      expect(data.parts).toEqual([
+        {
+          partNumber: 1,
+          method: 'PUT',
+          url: `${API}/v2/media/uploads/${sid}/parts/1`,
+          headers: { 'x-amz-checksum-sha256': sha256Base64 },
+          size: MP4.byteLength,
+        },
+      ]);
+      // The journal is the session's stored JSON, keyed by its id.
+      const journal = keysWith(ctx, sid).filter((k) =>
+        k.endsWith(`/.multipart/${sid}.json`)
+      );
+      expect(journal).toHaveLength(1);
+      const stored = JSON.parse(
+        new TextDecoder().decode(bodyOf(ctx, journal[0]!)!)
+      ) as { expiresAt: number };
+      // Creation expiry was t0 + 2h; the presign at t0 + 1h refreshes it to t0 + 3h.
+      expect(stored.expiresAt).toBe(p.t0! + HOUR_MS + TTL_MS);
+      expect(stored.expiresAt).toBeGreaterThan(p.t0! + TTL_MS);
+      expect(data.expiresAt).toBe(new Date(stored.expiresAt).toISOString());
     },
   },
   {
@@ -457,7 +491,10 @@ const MATRIX = ROUTES.flatMap((route) =>
 );
 
 describe('role matrix B: media, upload sessions and attachments', () => {
-  afterEach(() => closeDbs());
+  afterEach(() => {
+    vi.useRealTimers();
+    closeDbs();
+  });
 
   it.each(MATRIX.map((c) => [`${c.route.name} as ${c.role}`, c] as const))(
     '%s',
@@ -494,7 +531,10 @@ describe('role matrix B: media, upload sessions and attachments', () => {
 });
 
 describe('role matrix B: public media visibility boundaries', () => {
-  afterEach(() => closeDbs());
+  afterEach(() => {
+    vi.useRealTimers();
+    closeDbs();
+  });
 
   it('public media is 404 for a file that is not attached', async () => {
     const ctx = await setupMedia();

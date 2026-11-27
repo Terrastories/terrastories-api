@@ -194,16 +194,23 @@ export class HonoFoundationService {
    */
   async actor(
     token: string | undefined,
-    now: Date
+    now: Date,
+    withGates = false
   ): Promise<{
     user: FoundationUser;
     kind: SessionKind;
     absoluteExpiresAt: number | null;
     tokenHash: string;
+    gates?: { erasurePending: boolean; recoveryCodesActive: boolean };
   } | null> {
     if (!token || !/^[a-f0-9]{64}$/.test(token)) return null;
     const tokenHash = await tokenDigest(token);
-    const context = await this.repository.sessionContext(tokenHash, now);
+    const context = await this.repository.sessionContext(
+      tokenHash,
+      now,
+      true,
+      withGates
+    );
     return context && parseV2Role(context.user.role)
       ? { ...context, tokenHash }
       : null;

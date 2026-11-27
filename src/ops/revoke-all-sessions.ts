@@ -15,6 +15,7 @@
  * be set explicitly. Cloudflare D1: see docs/OPERATIONS-GOVERNANCE.md (R1a).
  */
 /* eslint-disable no-console -- operator CLI: stdout/stderr is its interface */
+import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { and, count, isNull } from 'drizzle-orm';
 import { dialectOf, tablesFor } from '../db/dialect.js';
@@ -22,7 +23,12 @@ import { buildAuditEntryInsert } from '../repositories/audit-entry.repository.js
 
 export const REVOKE_ALL_AUDIT_ACTION = 'security.sessions.revoke_all';
 
+/** Opaque run id: lets an operator tell this run's audit entry from any other. */
+export const RUN_ID_PATTERN = /^[a-zA-Z0-9_-]{8,64}$/;
+
 export interface RevokeAllResult {
+  /** Unique id of this run; stored in the audit entry's resource ids. */
+  runId: string;
   /** Session rows deleted. */
   revoked: number;
   loginCodesSuperseded: number;
@@ -33,8 +39,10 @@ export interface RevokeAllResult {
 export async function revokeAllSessions(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   db: any,
-  now: Date = new Date()
+  now: Date = new Date(),
+  runId: string = randomUUID()
 ): Promise<RevokeAllResult> {
+  if (!RUN_ID_PATTERN.test(runId)) throw new Error('Invalid run id');
   const { sessions, loginCodes, claimTokens } = tablesFor(db);
   const at = now.getTime();
   const supersedeCodes = (
@@ -63,7 +71,12 @@ export async function revokeAllSessions(
   ) =>
     buildAuditEntryInsert(
       tx,
-      { action: REVOKE_ALL_AUDIT_ACTION, outcome: 'success' },
+      {
+        action: REVOKE_ALL_AUDIT_ACTION,
+        outcome: 'success',
+        resourceType: 'system',
+        resourceIds: [runId],
+      },
       now
     );
 
@@ -79,6 +92,7 @@ export async function revokeAllSessions(
       const tokens = supersedeTokens(tx).all() as unknown[];
       audit(tx).run();
       return {
+        runId,
         revoked: deleted.length,
         loginCodesSuperseded: codes.length,
         claimTokensSuperseded: tokens.length,
@@ -94,6 +108,7 @@ export async function revokeAllSessions(
     const tokens = (await supersedeTokens(tx)) as unknown[];
     await audit(tx);
     return {
+      runId,
       revoked: deleted.length,
       loginCodesSuperseded: codes.length,
       claimTokensSuperseded: tokens.length,
@@ -105,7 +120,7 @@ export async function revokeAllSessions(
 export async function countAffected(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   db: any
-): Promise<RevokeAllResult> {
+): Promise<Omit<RevokeAllResult, 'runId'>> {
   const { sessions, loginCodes, claimTokens } = tablesFor(db);
   const n = async (
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -130,7 +145,7 @@ export async function countAffected(
   };
 }
 
-const summary = (r: RevokeAllResult) =>
+const summary = (r: Omit<RevokeAllResult, 'runId'>) =>
   `${r.revoked} session(s), ${r.loginCodesSuperseded} unconsumed login code(s), ${r.claimTokensSuperseded} unconsumed claim token(s)`;
 
 /** Only a short upper-case driver code is safe to print; never a message. */
@@ -159,7 +174,9 @@ export async function runCli(
       return 0;
     }
     const result = await revokeAllSessions(db);
-    io.out(`Revoked ${summary(result)}; every user must log in again.`);
+    io.out(
+      `Revoked ${summary(result)}; every user must log in again. Run id: ${result.runId}`
+    );
     return 0;
   } catch (error) {
     io.err(

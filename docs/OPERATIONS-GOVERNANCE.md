@@ -61,17 +61,18 @@ _Verify (automated):_ `tests/hono/foundation.test.ts` and `tests/hono/worker.tes
 **R1a — V2 sessions (emergency global revocation, #137).** Use when session tokens may have leaked or a database copy has left custody. There is no HTTP route and no session signing secret to rotate (tokens are random, stored only as SHA-256 digests), so this is an operator action. In one transaction it (1) deletes every session row — the same effect as per-account revocation, a presented cookie can never authenticate again; (2) supersedes every unconsumed login code (`recovery` and `admin_issued`) and every unconsumed claim token (`superseded_at`), so a leaked copy cannot mint new sessions through them; and (3) writes one content-free `security.sessions.revoke_all` audit entry. All users must log in again; admins must re-issue any outstanding codes or claim tokens.
 
 - Node, production image (SQLite or PostgreSQL from `DATABASE_URL`, which must be set explicitly; the command refuses `:memory:` and `NODE_ENV=test`): `node dist/ops/revoke-all-sessions.js` prints what it would change (dry run); add `--confirm` to revoke. Source checkout: `npx tsx scripts/ops/revoke-all-sessions.ts [--confirm]`. A failure rolls back everything and prints only a short status, never driver text.
-- Cloudflare D1: save the statements below as `revoke-all.sql` and run `wrangler d1 execute <DB_NAME> --remote --file revoke-all.sql`. Do not add `BEGIN`/`COMMIT` (D1 rejects them). The `DELETE` and `UPDATE` statements are idempotent, but the audit `INSERT` is not: if the response is lost or the run fails part-way, first check `SELECT count(*) FROM sessions` and `SELECT created_at FROM audit_entries WHERE action = 'security.sessions.revoke_all' ORDER BY id DESC LIMIT 1`, then re-run the whole file if needed. A duplicate audit row is harmless; judge by `created_at` whether the latest entry belongs to this run. This path is not executed against real D1 by the test suite; the statements are tested on SQLite.
+- Every run carries a unique run id, stored in its audit entry (`resource_ids`). The Node command generates one and prints it (`Run id: …`). For the SQL procedures, set it once: `RUN_ID=$(uuidgen)`, write it down, and substitute it into the saved SQL: `sed "s/@RUN_ID@/$RUN_ID/g" revoke-all.sql > run.sql`.
+- Cloudflare D1: save the first SQL block below as `revoke-all.sql`, substitute the run id, and run `wrangler d1 execute <DB_NAME> --remote --file run.sql`. Do not add `BEGIN`/`COMMIT` (D1 rejects them). The `DELETE` and `UPDATE` statements are idempotent, but the audit `INSERT` is not. If the response is lost or the run fails part-way, check `SELECT count(*) FROM audit_entries WHERE action = 'security.sessions.revoke_all' AND resource_ids = '["<RUN_ID>"]'`: `1` means this attempt completed (do not re-run); `0` means it did not, so re-run the same `run.sql` (same run id) and check again. Then confirm `SELECT count(*) FROM sessions` is `0`. This path is not executed against real D1 by the test suite; the statements are tested on SQLite.
 
 ```sql
 DELETE FROM sessions;
 UPDATE login_codes SET superseded_at = CAST(strftime('%s','now') AS INTEGER) * 1000 WHERE used_at IS NULL AND superseded_at IS NULL;
 UPDATE claim_tokens SET superseded_at = CAST(strftime('%s','now') AS INTEGER) * 1000 WHERE consumed_at IS NULL AND superseded_at IS NULL;
 INSERT INTO audit_entries (community_id, actor_id, action, resource_type, resource_ids, outcome, created_at)
-VALUES (NULL, NULL, 'security.sessions.revoke_all', NULL, '[]', 'success', CAST(strftime('%s','now') AS INTEGER) * 1000);
+VALUES (NULL, NULL, 'security.sessions.revoke_all', 'system', '["@RUN_ID@"]', 'success', CAST(strftime('%s','now') AS INTEGER) * 1000);
 ```
 
-- Plain SQLite (`sqlite3 -bail <db> < revoke-all-sqlite.sql`): the same statements inside one transaction, so a failure leaves nothing changed.
+- Plain SQLite (substitute the run id the same way, then `sqlite3 -bail <db> < run.sql`): the same statements inside one transaction, so a failure leaves nothing changed.
 
 ```sql
 BEGIN IMMEDIATE;
@@ -79,7 +80,7 @@ DELETE FROM sessions;
 UPDATE login_codes SET superseded_at = CAST(strftime('%s','now') AS INTEGER) * 1000 WHERE used_at IS NULL AND superseded_at IS NULL;
 UPDATE claim_tokens SET superseded_at = CAST(strftime('%s','now') AS INTEGER) * 1000 WHERE consumed_at IS NULL AND superseded_at IS NULL;
 INSERT INTO audit_entries (community_id, actor_id, action, resource_type, resource_ids, outcome, created_at)
-VALUES (NULL, NULL, 'security.sessions.revoke_all', NULL, '[]', 'success', CAST(strftime('%s','now') AS INTEGER) * 1000);
+VALUES (NULL, NULL, 'security.sessions.revoke_all', 'system', '["@RUN_ID@"]', 'success', CAST(strftime('%s','now') AS INTEGER) * 1000);
 COMMIT;
 ```
 

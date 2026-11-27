@@ -3,6 +3,7 @@
  * (also scripts/ops/revoke-all-sessions.ts) and the equivalent D1/SQLite SQL
  * documented in OPERATIONS-GOVERNANCE.md R1a.
  */
+import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { mkdtemp } from 'node:fs/promises';
@@ -37,6 +38,7 @@ import {
 } from './auth-test-utils.js';
 import {
   REVOKE_ALL_AUDIT_ACTION,
+  RUN_ID_PATTERN,
   countAffected,
   main,
   revokeAllSessions,
@@ -217,6 +219,7 @@ describe('emergency global session revocation (#137)', () => {
       claimTokensSuperseded: 1,
     });
     expect(await revokeAllSessions(db)).toEqual({
+      runId: expect.stringMatching(RUN_ID_PATTERN),
       revoked: 3,
       loginCodesSuperseded: 2,
       claimTokensSuperseded: 1,
@@ -260,6 +263,7 @@ describe('emergency global session revocation (#137)', () => {
     expect(await db.select().from(usersSqlite)).toEqual(usersBefore);
     expect(await s.audit()).toHaveLength(1);
     expect((await s.audit())[0]).toMatchObject({
+      resourceType: 'system',
       outcome: 'success',
       communityId: null,
       actorId: null,
@@ -390,7 +394,9 @@ describe('emergency global session revocation (#137)', () => {
       );
       const community = await s.emptyCommunity('rev-sql');
       const token = await s.insertClaim(community.id);
-      s.sqlite.exec(block);
+      const runId = randomUUID();
+      expect(block).toContain('@RUN_ID@');
+      s.sqlite.exec(block.replaceAll('@RUN_ID@', runId));
       expect((await s.me(cookie)).status).toBe(401);
       expect(await s.db.select().from(sessionsSqlite)).toHaveLength(0);
       expect(
@@ -407,6 +413,15 @@ describe('emergency global session revocation (#137)', () => {
       const audit = await s.audit();
       expect(audit).toHaveLength(1);
       expect(audit[0]?.createdAt).toBeInstanceOf(Date);
+      // The documented retry check finds exactly this run.
+      expect(audit[0]?.resourceIds).toEqual([runId]);
+      expect(
+        s.sqlite
+          .prepare(
+            "SELECT count(*) AS n FROM audit_entries WHERE action = 'security.sessions.revoke_all' AND resource_ids = ?"
+          )
+          .get(JSON.stringify([runId]))
+      ).toEqual({ n: 1 });
       expect((await s.me(await s.login(s.emails[0]!))).status).toBe(200);
     }
   );
@@ -419,7 +434,9 @@ describe('emergency global session revocation (#137)', () => {
       `CREATE TRIGGER fail_audit BEFORE INSERT ON audit_entries BEGIN SELECT RAISE(ABORT, 'x'); END`
     );
     // sqlite3 -bail stops at the failing statement and closes, discarding the open transaction.
-    expect(() => s.sqlite.exec(sqlBlocks().sqlite)).toThrow();
+    expect(() =>
+      s.sqlite.exec(sqlBlocks().sqlite.replaceAll('@RUN_ID@', randomUUID()))
+    ).toThrow();
     s.sqlite.exec('ROLLBACK');
     expect((await s.me(cookie)).status).toBe(200);
     expect(await countAffected(s.db)).toEqual({
@@ -500,6 +517,21 @@ describe('emergency global session revocation (#137)', () => {
     const done = await run(['--confirm'], env);
     expect(done.code).toBe(0);
     expect(done.out).toContain('Revoked 1 session(s)');
+    const printed = /Run id: (\S+)/.exec(done.out)?.[1];
+    expect(printed).toMatch(RUN_ID_PATTERN);
     expect(count()).toBe(0);
+    // The printed run id is the one recorded in the audit entry.
+    const c = new Sqlite(path, { readonly: true });
+    try {
+      expect(
+        c
+          .prepare(
+            "SELECT count(*) AS n FROM audit_entries WHERE action = 'security.sessions.revoke_all' AND resource_ids = ?"
+          )
+          .get(JSON.stringify([printed]))
+      ).toEqual({ n: 1 });
+    } finally {
+      c.close();
+    }
   }, 60_000);
 });

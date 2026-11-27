@@ -10,6 +10,8 @@ import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { createHonoApp } from '../../src/hono-app.js';
 import { tablesFor } from '../../src/db/dialect.js';
+import { CommunityErasureService } from '../../src/services/community-erasure.service.js';
+import { CommunitySovereigntyRepository } from '../../src/repositories/community-sovereignty.repository.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
 import { communitiesSqlite } from '../../src/db/schema/communities.js';
 import { usersSqlite } from '../../src/db/schema/users.js';
@@ -234,6 +236,8 @@ async function setup() {
     });
 
   return {
+    storage,
+    erasureStore,
     objects,
     fenced,
     db,
@@ -656,28 +660,59 @@ describe('role matrix B: foreign admin acts only on own community', () => {
   });
 });
 
-describe('role matrix B: known erasure gap', () => {
-  // Open bug: the sweep deletes objects and fences the community but leaves
-  // relational content (stories) in place. src/services/community-erasure.service.ts:171.
-  // it.fails keeps the gap visible; it turns red when the purge is fixed.
-  it.fails(
-    'admin erasure purges alpha stories (open: stories survive the sweep)',
-    async () => {
-      const ctx = await setup();
-      await seedThenSteward(ctx);
-      const res = await ctx.call(
-        'POST',
-        '/v2/community/erasure',
-        await ctx.loginCookie('admin'),
-        {
-          confirmFinality: true,
-          currentDerivedKey: ctx.people.admin.creds.derivedKey,
-        }
-      );
-      expect(res.status).toBe(202);
-      expect(await alphaStories(ctx)).toHaveLength(0);
-    }
-  );
+describe('role matrix B: erasure completes on the cron pass', () => {
+  it('admin erasure: the inline pass deletes objects, a second pass purges rows and completes the record', async () => {
+    const ctx = await setup();
+    await seedThenSteward(ctx);
+    const res = await ctx.call(
+      'POST',
+      '/v2/community/erasure',
+      await ctx.loginCookie('admin'),
+      {
+        confirmFinality: true,
+        currentDerivedKey: ctx.people.admin.creds.derivedKey,
+      }
+    );
+    expect(res.status).toBe(202);
+    // Inline pass after the 202 only deletes objects; rows wait for a fresh empty listing.
+    expect(await alphaStories(ctx)).toHaveLength(1);
+
+    // The cron pass: the same service, run a second time.
+    const now = new Date('2026-11-21T10:00:00.000Z');
+    const erasure = new CommunityErasureService(
+      new CommunitySovereigntyRepository(ctx.db),
+      ctx.storage as never,
+      ctx.erasureStore as never,
+      () => now
+    );
+    await erasure.sweep(now);
+
+    expect(await alphaStories(ctx)).toHaveLength(0);
+    expect(
+      (await ctx.db.select().from(communitiesSqlite)).some(
+        (c) => c.id === ctx.alpha.id
+      )
+    ).toBe(false);
+    expect(
+      [...ctx.objects.keys()].filter((k) =>
+        k.startsWith(`communities/${ctx.alpha.id}/`)
+      )
+    ).toHaveLength(0);
+    // Foreign data stays intact.
+    expect(
+      [...ctx.objects.keys()].filter((k) =>
+        k.startsWith(`communities/${ctx.foreign.id}/`)
+      )
+    ).toHaveLength(1);
+    expect(
+      (await ctx.db.select().from(communitiesSqlite)).some(
+        (c) => c.id === ctx.foreign.id
+      )
+    ).toBe(true);
+    expect(ctx.records.get(ctx.alpha.id)).toMatchObject({
+      outcome: 'completed',
+    });
+  });
 });
 
 describe('role matrix B: super_admin erasure listing', () => {

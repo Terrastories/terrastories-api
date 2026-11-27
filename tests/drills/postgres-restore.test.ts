@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import type postgres from 'postgres';
+import { applyPostRestorePostgres } from '../../scripts/ops/post-restore.js';
 import { createPostgresClient } from '../../src/db/index.js';
 import {
   OWNERSHIP_INVARIANTS,
@@ -59,6 +60,16 @@ async function snapshotPostgres(client: postgres.Sql): Promise<Snapshot> {
   return out;
 }
 
+// CI sets DRILL_REQUIRE_POSTGRES=true: missing prerequisites fail the job
+// instead of silently skipping the PostgreSQL drill.
+if (reason && process.env.DRILL_REQUIRE_POSTGRES === 'true') {
+  describe('PostgreSQL restore drill prerequisites (required in CI)', () => {
+    it('are present', () => {
+      throw new Error(`PostgreSQL restore drill cannot run: ${reason}`);
+    });
+  });
+}
+
 describe.skipIf(Boolean(reason))(
   `PostgreSQL pg_dump/pg_restore drill (#136)${reason ? ` [skipped: ${reason}]` : ''}`,
   () => {
@@ -68,6 +79,16 @@ describe.skipIf(Boolean(reason))(
       const restoreName = `${sourceName}_restore_drill`;
       const restoreUrl = new URL(url!);
       restoreUrl.pathname = `/${restoreName}`;
+      // No password in subprocess arguments: it travels as PGPASSWORD.
+      const toolEnv = {
+        ...process.env,
+        PGPASSWORD: decodeURIComponent(sourceUrl.password),
+      };
+      const bare = (u: URL) => {
+        const copy = new URL(u.toString());
+        copy.password = '';
+        return copy.toString();
+      };
 
       const source = createPostgresClient(sourceUrl.toString(), { max: 2 });
       let target: postgres.Sql | undefined;
@@ -96,9 +117,9 @@ describe.skipIf(Boolean(reason))(
             '--no-owner',
             '--no-privileges',
             `--file=${dumpFile}`,
-            `--dbname=${sourceUrl.toString()}`,
+            `--dbname=${bare(sourceUrl)}`,
           ],
-          { encoding: 'utf8' }
+          { encoding: 'utf8', env: toolEnv }
         );
         expect(dump.stderr).toBe('');
         expect(dump.status).toBe(0);
@@ -111,10 +132,10 @@ describe.skipIf(Boolean(reason))(
             '--no-owner',
             '--no-privileges',
             '--exit-on-error',
-            `--dbname=${restoreUrl.toString()}`,
+            `--dbname=${bare(restoreUrl)}`,
             dumpFile,
           ],
-          { encoding: 'utf8' }
+          { encoding: 'utf8', env: toolEnv }
         );
         expect(restore.stderr).toBe('');
         expect(restore.status).toBe(0);
@@ -135,6 +156,22 @@ describe.skipIf(Boolean(reason))(
           });
         }
 
+        // Post-restore step: sessions gone, codes and claim tokens superseded.
+        const fixed = await applyPostRestorePostgres(target);
+        expect(fixed.sessionsDeleted).toBeGreaterThan(0);
+        expect(fixed.loginCodesSuperseded).toBeGreaterThan(0);
+        expect(fixed.claimTokensSuperseded).toBeGreaterThan(0);
+        expect(
+          (await target.unsafe('SELECT count(*)::int AS n FROM sessions'))[0]!.n
+        ).toBe(0);
+        expect(
+          (
+            await target.unsafe(
+              'SELECT count(*)::int AS n FROM login_codes WHERE superseded_at IS NULL'
+            )
+          )[0]!.n
+        ).toBe(0);
+
         // Sequences come back with the data: the next community id is fresh.
         const [{ n }] = await target.unsafe(
           'SELECT count(*)::int AS n FROM communities'
@@ -144,14 +181,18 @@ describe.skipIf(Boolean(reason))(
         );
         expect(row!.id).toBeGreaterThan(n);
 
-        writeDrillReport('postgres', {
-          backup: 'pg_dump --format=custom / pg_restore',
-          schema: migrationVersion('postgresql'),
-          serverVersion: (await source.unsafe('SHOW server_version'))[0]!
-            .server_version,
-          tables: after,
-          timingsMs: { dumpAndRestore: elapsedMs },
-        });
+        writeDrillReport(
+          'postgres',
+          {
+            backup: 'pg_dump --format=custom / pg_restore',
+            schema: migrationVersion('postgresql'),
+            serverVersion: (await source.unsafe('SHOW server_version'))[0]!
+              .server_version,
+            tables: after,
+            timingsMs: { dumpAndRestore: elapsedMs },
+          },
+          [decodeURIComponent(sourceUrl.password)]
+        );
       } finally {
         await target?.end();
         await source.unsafe(`DROP DATABASE IF EXISTS "${restoreName}"`);

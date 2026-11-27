@@ -195,6 +195,8 @@ jobs:
       DRILL_POSTGRES_URL: postgresql://terrastories:terrastories-test@localhost:5432/terrastories_test
       ALLOW_POSTGRES_TEST_RESET: 'true'
       DRILL_REPORT_DIR: ${{ github.workspace }}/drill-reports
+      # Fail (never skip) when the PostgreSQL drill cannot run in CI.
+      DRILL_REQUIRE_POSTGRES: 'true'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -213,6 +215,14 @@ jobs:
           pg_dump --version
       - name: Run restore drills
         run: npm run test:drills
+      - name: Require all three drill reports
+        run: |
+          for profile in sqlite d1 postgres; do
+            test -s "drill-reports/restore-drill-$profile.json" || {
+              echo "missing restore drill report: $profile" >&2
+              exit 1
+            }
+          done
       - name: Upload restore drill reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

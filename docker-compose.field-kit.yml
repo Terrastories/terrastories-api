@@ -11,6 +11,8 @@ services:
   api:
     build:
       target: production
+    # Named so the backup service below runs the same image (node + sqlite).
+    image: terrastories-api:field-kit
     environment:
       - NODE_ENV=field-kit
       # V2 (Hono) runtime gate. field-kit mode requires https unless the
@@ -200,15 +202,24 @@ services:
 
   # Backup service optimized for field conditions
   field-backup:
-    image: alpine:3.18
+    # The app image (Alpine, BusyBox sh, node + better-sqlite3): the script is
+    # POSIX sh and takes a consistent online copy of the live database.
+    image: terrastories-api:field-kit
+    user: root # crond needs root; the data and upload mounts are read-only
+    entrypoint: []
+    working_dir: /app
+    depends_on:
+      - api
     volumes:
       - field_kit_data:/data:ro
       - uploads_data:/uploads:ro
       - field_kit_backups:/backups
       - ./scripts/field-kit-backup.sh:/backup.sh:ro
+      - ./scripts/ops/sqlite-backup.mjs:/app/sqlite-backup.mjs:ro
     environment:
       - BACKUP_RETENTION_DAYS=3 # Limited storage in field
       - BACKUP_COMPRESSION=true
+      - SQLITE_BACKUP_HELPER=/app/sqlite-backup.mjs
     # Run backup twice daily due to limited connectivity windows
     command: >
       sh -c "

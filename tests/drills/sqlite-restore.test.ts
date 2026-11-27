@@ -16,6 +16,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  statSync,
   utimesSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -29,10 +30,15 @@ import { createLocalStorage } from '../../src/node-storage.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
 import { MediaCleanupCoordinator } from '../../src/services/media-cleanup.service.js';
 import { makeServerSecret } from '../hono/auth-test-utils.js';
+import {
+  applyPostRestoreSqlite,
+  replayAccountChanges,
+} from '../../scripts/ops/post-restore.js';
 import { rawUploadRequest } from '../helpers/raw-upload.js';
 import {
   DRILL_ACCOUNTS,
   DRILL_KEY,
+  DRILL_VIEWER_CODE,
   OWNERSHIP_INVARIANTS,
   diffSnapshots,
   migrationVersion,
@@ -45,6 +51,7 @@ import {
 
 const ORIGIN = 'https://drill.example.test';
 const SCRIPT = path.join(process.cwd(), 'scripts/field-kit-backup.sh');
+const HELPER = path.join(process.cwd(), 'scripts/ops/sqlite-backup.mjs');
 const PNG = Uint8Array.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49,
   0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06,
@@ -72,6 +79,7 @@ let before: Snapshot;
 const media: { recent?: string; aged?: string } = {};
 const cookies: Record<string, string> = {};
 let archiveName = '';
+let auditMarker = 0;
 let backupMs = 0;
 let restoreMs = 0;
 const openApps: Sqlite.Database[] = [];
@@ -169,9 +177,18 @@ beforeAll(async () => {
 
   // Real backup procedure (live, database open and idle).
   const started = Date.now();
-  execFileSync('bash', [SCRIPT], {
+  // Run under sh (dash here, BusyBox ash in the container), not bash.
+  auditMarker = (
+    live
+      .prepare('SELECT coalesce(max(id), 0) AS m FROM audit_entries')
+      .get() as {
+      m: number;
+    }
+  ).m;
+  execFileSync('sh', [SCRIPT], {
     env: {
       ...process.env,
+      SQLITE_BACKUP_HELPER: HELPER,
       BACKUP_DIR: backups,
       DATA_DIR: liveData,
       UPLOADS_DIR: liveUploads,
@@ -190,6 +207,58 @@ beforeAll(async () => {
     headers: { cookie: cookies.editor!, origin: ORIGIN },
   });
   expect([200, 204]).toContain(logout.status);
+  // Live revocation is real before any restore is judged.
+  expect((await get(liveApp, '/v2/auth/me', cookies.editor)).status).toBe(401);
+
+  // Credentials consumed or changed after the backup: the viewer redeems its
+  // login code, a claim token is consumed, and an administrator disables the
+  // viewer (audited as user.update).
+  const redeem = await liveApp.request(`${ORIGIN}/v2/auth/recovery/redeem`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      code: DRILL_VIEWER_CODE,
+      identifier: DRILL_ACCOUNTS.viewerAlpha,
+      communitySlug: 'drill-alpha',
+    }),
+  });
+  expect(redeem.status).toBe(200);
+  live
+    .prepare(
+      'UPDATE claim_tokens SET consumed_at = ? WHERE consumed_at IS NULL'
+    )
+    .run(Date.now());
+  const adminCookie = await login(
+    liveApp,
+    DRILL_ACCOUNTS.adminAlpha,
+    'drill-alpha'
+  );
+  const disable = await liveApp.request(
+    `${ORIGIN}/v2/users/${ids.viewerAlpha}`,
+    {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        cookie: adminCookie,
+        origin: ORIGIN,
+      },
+      body: JSON.stringify({ status: 'disabled' }),
+    }
+  );
+  expect(disable.status).toBe(200);
+  expect(
+    (
+      await liveApp.request(`${ORIGIN}/v2/auth/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          identifier: DRILL_ACCOUNTS.viewerAlpha,
+          derivedKey: DRILL_KEY,
+          communitySlug: 'drill-alpha',
+        }),
+      })
+    ).status
+  ).toBe(401);
 }, 120_000);
 
 afterAll(() => {
@@ -198,7 +267,7 @@ afterAll(() => {
 });
 
 /** Restore: extract the archive and copy the database into a fresh file. */
-function restore(label: string, purgeSessions: boolean) {
+function restore(label: string, postRestore: boolean) {
   const started = Date.now();
   const dir = path.join(restoreRoot, label);
   mkdirSync(dir, { recursive: true });
@@ -209,8 +278,8 @@ function restore(label: string, purgeSessions: boolean) {
   const db = new Sqlite(dbFile);
   openApps.push(db);
   db.pragma('foreign_keys = ON');
-  // Operator step (governance 6.5): a restore never revives revoked sessions.
-  if (purgeSessions) db.prepare('DELETE FROM sessions').run();
+  // Operator step (governance 6.5): a restore never revives revoked credentials.
+  if (postRestore) applyPostRestoreSqlite(db);
   restoreMs = Date.now() - started;
   // cp --parents keeps the absolute source path under the archive root.
   return { db, uploads: path.join(base, liveUploads), base };
@@ -313,14 +382,27 @@ describe('SQLite field-kit restore drill (#136)', () => {
     expect(publicText).not.toContain('Beta Public Story');
   });
 
-  it('does not revive sessions revoked after the backup once the restore purges sessions', async () => {
-    // The backup holds the editor session; the live system then revoked it.
+  it('does not revive sessions, consumed login codes or claim tokens revoked after the backup once post-restore runs', async () => {
+    // The backup holds the editor session, an unconsumed viewer login code and
+    // an unconsumed claim token; the live system then revoked/consumed them.
     const hazard = restore('hazard', false);
     const hazardApp = await buildApp(hazard.db, hazard.uploads);
     const revived = await get(hazardApp, '/v2/auth/me', cookies.editor);
-    // Documents why the purge step is mandatory: without it the restored file
-    // authenticates a token the community already revoked.
+    // Documents why the post-restore step is mandatory: without it the restored
+    // file authenticates a token the community already revoked.
     expect(revived.status).toBe(200);
+    const redeemBody = JSON.stringify({
+      code: DRILL_VIEWER_CODE,
+      identifier: DRILL_ACCOUNTS.viewerAlpha,
+      communitySlug: 'drill-alpha',
+    });
+    const redeemRequest = (app: ReturnType<typeof createHonoApp>) =>
+      app.request(`${ORIGIN}/v2/auth/recovery/redeem`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: redeemBody,
+      });
+    expect((await redeemRequest(hazardApp)).status).toBe(200);
 
     const purged = restore('purged', true);
     const purgedApp = await buildApp(purged.db, purged.uploads);
@@ -337,6 +419,43 @@ describe('SQLite field-kit restore drill (#136)', () => {
         }
       ).n
     ).toBe(0);
+    expect((await redeemRequest(purgedApp)).status).toBe(401);
+    const claim = purged.db
+      .prepare('SELECT consumed_at, superseded_at FROM claim_tokens')
+      .get() as { consumed_at: number | null; superseded_at: number | null };
+    expect(claim.superseded_at).not.toBeNull();
+  });
+
+  it('reverts account changes to backup time and replays them from the frozen database audit log', async () => {
+    const { db, uploads } = restore('replay', true);
+    const app = await buildApp(db, uploads);
+    const loginViewer = () =>
+      app.request(`${ORIGIN}/v2/auth/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          identifier: DRILL_ACCOUNTS.viewerAlpha,
+          derivedKey: DRILL_KEY,
+          communitySlug: 'drill-alpha',
+        }),
+      });
+    // The viewer was disabled after the backup; the restore reverts that.
+    expect((await loginViewer()).status).toBe(200);
+    db.prepare('DELETE FROM sessions').run();
+    // Runbook step: replay account changes from the frozen pre-restore database.
+    const replayed = replayAccountChanges(live, db, auditMarker);
+    expect(replayed).toContain(ids.viewerAlpha);
+    expect((await loginViewer()).status).toBe(401);
+  });
+
+  it('writes the archive owner-only and reports hold no secrets', () => {
+    expect(statSync(path.join(backups, archiveName)).mode & 0o777).toBe(0o600);
+    const report = writeDrillReport('sqlite-secret-check', {
+      schema: migrationVersion('sqlite'),
+    });
+    const text = readFileSync(report, 'utf8');
+    for (const secret of [DRILL_KEY, DRILL_VIEWER_CODE])
+      expect(text).not.toContain(secret);
   });
 
   it('restores media older than 7 days byte-identical and every manifest entry exists', () => {

@@ -6,7 +6,7 @@
  * pg_dump/pg_restore against the CI PostgreSQL 13 service. Each drill writes a
  * JSON report that records the schema/migration version it exercised.
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -19,6 +19,9 @@ import { argon2Seed, makeDerivedKey } from '../hono/auth-test-utils.js';
 export type DrillDb = any;
 
 export const DRILL_KEY = makeDerivedKey();
+/** Runtime-built secrets (never literals); reports must never contain them. */
+export const DRILL_VIEWER_CODE = randomBytes(16).toString('base64url');
+export const DRILL_CLAIM_TOKEN = randomBytes(16).toString('base64url');
 export const DRILL_T0 = new Date('2026-11-20T12:00:00.000Z');
 
 export const FILE_IDS = {
@@ -232,6 +235,28 @@ export async function seedDrillDataset(db: DrillDb): Promise<DrillIds> {
     createdAt: DRILL_T0.getTime(),
   });
 
+  // Credentials a restore could revive: an unconsumed admin-issued login code
+  // for the viewer and an unconsumed claim token.
+  const nowMs = Date.now();
+  const sha = (value: string) =>
+    createHash('sha256').update(value).digest('hex');
+  await db.insert(t.loginCodes).values({
+    userId: viewerAlpha,
+    communityId: alpha,
+    purpose: 'admin_issued',
+    codeHash: sha(DRILL_VIEWER_CODE),
+    createdBy: adminAlpha,
+    createdAt: nowMs,
+    expiresAt: nowMs + 3600_000,
+  });
+  await db.insert(t.claimTokens).values({
+    communityId: alpha,
+    tokenHash: sha(DRILL_CLAIM_TOKEN),
+    issuedBy: adminAlpha,
+    createdAt: nowMs,
+    expiresAt: nowMs + 3600_000,
+  });
+
   return {
     alpha,
     beta,
@@ -369,20 +394,28 @@ export function migrationVersion(
 /** Write the drill report (CI uploads DRILL_REPORT_DIR) and echo it. */
 export function writeDrillReport(
   profile: string,
-  report: Record<string, unknown>
+  report: Record<string, unknown>,
+  extraSecrets: string[] = []
 ): string {
   const dir =
     process.env.DRILL_REPORT_DIR ?? mkdtempSync(path.join(tmpdir(), 'drill-'));
   mkdirSync(dir, { recursive: true });
   const file = path.join(dir, `restore-drill-${profile}.json`);
-  writeFileSync(
-    file,
-    JSON.stringify(
-      { profile, recordedAt: new Date().toISOString(), ...report },
-      null,
-      2
-    )
+  const body = JSON.stringify(
+    { profile, recordedAt: new Date().toISOString(), ...report },
+    null,
+    2
   );
+  // Secret sentinels: reports carry counts and digests only.
+  for (const secret of [
+    DRILL_KEY,
+    DRILL_VIEWER_CODE,
+    DRILL_CLAIM_TOKEN,
+    ...extraSecrets,
+  ].filter(Boolean))
+    if (body.includes(secret))
+      throw new Error(`drill report ${profile} contains a secret sentinel`);
+  writeFileSync(file, body);
   console.info(`[restore-drill:${profile}] report ${file}`);
   return file;
 }

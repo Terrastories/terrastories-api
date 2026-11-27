@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
+import { applyPostRestoreSqlite } from '../../scripts/ops/post-restore.js';
 import {
   OWNERSHIP_INVARIANTS,
   diffSnapshots,
@@ -57,6 +58,16 @@ function exportD1Sql(sqlite: Sqlite.Database): string {
       .all() as Array<{ stmt: string }>;
     for (const r of rows) out.push(r.stmt);
   }
+  // Autoincrement high-water marks (as sqlite's .dump does): a deleted highest
+  // id must never be reused after the restore.
+  const seq = sqlite
+    .prepare('SELECT name, seq FROM sqlite_sequence')
+    .all() as Array<{ name: string; seq: number }>;
+  out.push('DELETE FROM sqlite_sequence;');
+  for (const s of seq)
+    out.push(
+      `INSERT INTO sqlite_sequence VALUES('${s.name.replace(/'/g, "''")}',${s.seq});`
+    );
   for (const o of objects.filter(
     (x) => x.type === 'trigger' || x.type === 'view'
   ))
@@ -84,6 +95,13 @@ describe('D1 export/import restore drill (#136)', () => {
     const orm = drizzle(source);
     migrate(orm, { migrationsFolder: 'src/db/migrations' });
     await seedDrillDataset(orm);
+    // High-water mark above the highest live id: create then delete community 3.
+    source
+      .prepare(
+        "INSERT INTO communities (name, slug, locale, public_stories, is_active, created_at, updated_at) VALUES ('Gone', 'gone', 'en', 0, 1, 1, 1)"
+      )
+      .run();
+    source.prepare("DELETE FROM communities WHERE slug = 'gone'").run();
     const before = snapshotSqlite(source);
 
     const started = Date.now();
@@ -93,7 +111,9 @@ describe('D1 export/import restore drill (#136)', () => {
 
     // Shape of the export: header first, schema before data, no internal tables.
     expect(dump.startsWith('PRAGMA defer_foreign_keys=TRUE;')).toBe(true);
-    expect(dump).not.toMatch(/sqlite_sequence/);
+    expect(dump).toMatch(
+      /INSERT INTO sqlite_sequence VALUES\('communities',3\)/
+    );
     expect(dump.indexOf('CREATE TABLE')).toBeLessThan(
       dump.indexOf('INSERT INTO')
     );
@@ -122,13 +142,27 @@ describe('D1 export/import restore drill (#136)', () => {
       .run();
     expect(count(restored, 'SELECT count(*) AS n FROM sessions')).toBe(0);
 
-    // Autoincrement counters come back with the data: the next id is fresh.
+    // Post-restore step on a fresh import: sessions gone, codes/tokens superseded.
+    const second = importD1Sql(dump);
+    const fixed = applyPostRestoreSqlite(second);
+    expect(fixed.sessionsDeleted).toBeGreaterThan(0);
+    expect(fixed.loginCodesSuperseded).toBeGreaterThan(0);
+    expect(fixed.claimTokensSuperseded).toBeGreaterThan(0);
+    expect(count(second, 'SELECT count(*) AS n FROM sessions')).toBe(0);
+    expect(
+      count(
+        second,
+        'SELECT count(*) AS n FROM login_codes WHERE superseded_at IS NULL'
+      )
+    ).toBe(0);
+
+    // The deleted high-water id is never reused: the next id follows it.
     const next = restored
       .prepare(
         "INSERT INTO communities (name, slug, locale, public_stories, is_active, created_at, updated_at) VALUES ('Next', 'next', 'en', 0, 1, 1, 1)"
       )
       .run();
-    expect(Number(next.lastInsertRowid)).toBe(before.communities!.count + 1);
+    expect(Number(next.lastInsertRowid)).toBe(4);
 
     writeDrillReport('d1', {
       backup: 'wrangler d1 export (SQL text, offline stand-in)',

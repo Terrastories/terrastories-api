@@ -188,6 +188,14 @@ Read-only, Rails-shaped public projections for the existing `explore-terrastorie
 
 ---
 
+## Contract change policy
+
+The registry tables are machine-read: `tests/openapi/v2-contract-drift.test.ts` fails when the routes the Hono app mounts differ from the rows below (status other than `deferred` or `optional adapter`), and when the generated OpenAPI 3.1 document `docs/openapi/v2.json` is stale. Regenerate it with `npm run openapi:generate`.
+
+- **Breaking changes to released routes need a new route or a new version.** Removing or renaming a route, field or enum value, tightening validation, or changing a status code or auth requirement counts as breaking. Record released-V2 breaking changes as described in [`CONTRACTS.md`](CONTRACTS.md).
+- **Additive changes are fine.** New routes, optional request fields, new response fields and new status codes do not need a new version.
+- **Update the drift test inputs in the same PR.** Add or edit the registry row, regenerate `docs/openapi/v2.json` and, for a route with a zod schema, map it in `scripts/openapi/schema-map.ts`. A PR that changes mounted routes without these updates fails CI.
+
 ## Open questions
 
 ### From `SPEC-V2.md` (§6.10, §7)

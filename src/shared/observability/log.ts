@@ -6,10 +6,13 @@
  * credentials and identifiers are never passed in by callers, and anything
  * that does reach a log line is scrubbed here.
  *
- * Exception messages are never logged, not even redacted: a Drizzle query
- * error embeds the bound SQL parameters (story titles, bodies, URLs) in its
- * message, so an `Error` is reduced to its class name, a safe machine-readable
- * code and stack frames without the message line.
+ * Exception messages and stack text are never logged, not even redacted: a
+ * Drizzle query error embeds the bound SQL parameters (story titles, bodies,
+ * URLs) in its message, and V8 may cache a stack before `error.message`
+ * changes, so frames cannot be filtered safely. An `Error` is reduced to its
+ * class name, a safe machine-readable code and the caller's `errorId`; operators
+ * correlate a report with `X-Error-Id`/`requestId` and reproduce it from the
+ * route.
  *
  * Node-only and Workers-only APIs are deliberately absent; `console` and the
  * standard `Date`/`JSON` globals exist in both runtimes.
@@ -85,25 +88,14 @@ const VALUE_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
 const SAFE_ERROR_NAME = /^[A-Za-z_$][A-Za-z0-9_$.]{0,79}$/;
 /** Machine-readable codes only: SQLSTATE, SQLite/D1 kind, Node errno. */
 const SAFE_ERROR_CODE = /^[A-Za-z0-9_.-]{1,40}$/;
-const MAX_STACK_FRAMES = 10;
-const MAX_FRAME_LENGTH = 200;
-
-/**
- * Strict V8 frame: `at fn (file:line:col)` or `at file:line:col`, with a URL,
- * node builtin, absolute/Windows path, eval or anonymous location and nothing
- * after the location.
- */
-const STACK_FRAME =
-  /^at (?:[^()]+ \()?(?:file:\/\/|node:|\/|[A-Za-z]:\\|\[eval\]|<anonymous>)[^()]*:\d+:\d+\)?$/;
 
 /**
  * The only error shape a log line may carry. Deliberately has no `message`,
- * `stack`, `query`, `params` or `cause` field.
+ * `stack`, `frames`, `query`, `params` or `cause` field.
  */
 export interface SafeError {
   name: string;
   code?: string;
-  frames?: string[];
 }
 
 /** First safe machine code in the `cause` chain (D1 nests its code there). */
@@ -127,52 +119,17 @@ export function safeErrorCode(error: unknown): string | undefined {
 }
 
 /**
- * Keep only strict stack frames (`at function (file:line:col)`). V8 starts the
- * stack with `${name}: ${message}`, and a Drizzle message embeds its bound
- * parameters, so that prefix is removed by length — never searched for — and a
- * stack that does not start with the reported header is discarded whole. That
- * also removes a message line shaped like a frame, and every `Caused by`
- * caption, before any line is considered.
+ * Class name and safe code of an exception; never its message, stack or frames.
+ * Stack frames are omitted entirely: V8 may cache `error.stack` before
+ * `error.message` changes, so a frame-shaped line from the original message can
+ * pass any header or regex check.
  */
-export function errorStackFrames(
-  stack: string | undefined,
-  header?: string
-): string[] {
-  if (!stack || !header || !stack.startsWith(header)) return [];
-  const frames: string[] = [];
-  for (const line of stack.slice(header.length).split('\n')) {
-    const frame = line.trim();
-    if (!STACK_FRAME.test(frame)) continue;
-    frames.push(redactString(frame).slice(0, MAX_FRAME_LENGTH));
-    if (frames.length >= MAX_STACK_FRAMES) break;
-  }
-  return frames;
-}
-
-/** The first line V8 writes into `error.stack`, for the length strip above. */
-function errorStackHeader(error: Error): string | undefined {
-  try {
-    const name = String(error.name);
-    const message = String(error.message ?? '');
-    return message.length > 0 ? `${name}: ${message}` : name;
-  } catch {
-    // A throwing name/message getter must drop the stack, never the log line.
-    return undefined;
-  }
-}
-
-/** Class name, safe code and frames of an exception; never its message. */
 export function describeError(error: unknown): SafeError {
   const name = errorClassName(error);
   const code = safeErrorCode(error);
-  const frames =
-    error instanceof Error
-      ? errorStackFrames(error.stack, errorStackHeader(error))
-      : [];
   return {
     name,
     ...(code === undefined ? {} : { code }),
-    ...(frames.length === 0 ? {} : { frames }),
   };
 }
 
@@ -255,8 +212,8 @@ function redactValue(
  * The single redaction function every log line passes through. Returns a
  * JSON-safe copy: sensitive keys become `[REDACTED]`, known credential shapes
  * inside strings are scrubbed, cycles/depth/entry counts are bounded, and
- * `Error` objects keep only class name, safe code and stack frames — never
- * the message (see `describeError`).
+ * `Error` objects keep only class name and safe code — never the message or
+ * stack (see `describeError`).
  */
 export function redact(value: unknown): unknown {
   // The body is a plain object here, so the cycle tracker only needs to span

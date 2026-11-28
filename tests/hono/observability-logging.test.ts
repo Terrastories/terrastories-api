@@ -22,7 +22,6 @@ import { parseJsonc } from '../../scripts/staging/guards.js';
 import {
   createJsonLogger,
   describeError,
-  errorStackFrames,
   parseLogLevel,
   redact,
   REDACTED,
@@ -101,7 +100,7 @@ describe('central redaction (#143)', () => {
     expect(line).toContain(REDACTED);
   });
 
-  it('keeps only class name, safe code and frames — never the message or stack text', () => {
+  it('keeps only class name and safe code — never the message, stack or frames', () => {
     const error = new Error(
       'STORY-TITLE-MARKER failed with Authorization: Bearer stack-secret-123 ts_session=stack-cookie-456'
     );
@@ -113,13 +112,12 @@ describe('central redaction (#143)', () => {
     expect(output).not.toContain('Error:');
     const safe = describeError(error);
     expect(safe.name).toBe('Error');
-    expect(safe.frames?.length).toBeGreaterThan(0);
-    expect(safe.frames?.every((frame) => frame.startsWith('at '))).toBe(true);
+    expect(safe).not.toHaveProperty('frames');
     expect(safe).not.toHaveProperty('message');
     expect(safe).not.toHaveProperty('stack');
   });
 
-  it('drops message text that looks like a stack frame', () => {
+  it('logs no frames when a message contains stack-shaped lines', () => {
     const { lines, logger } = capture();
     logger.error(
       'newline message',
@@ -131,36 +129,42 @@ describe('central redaction (#143)', () => {
       {},
       new Error('insert failed\n    at evil (/x.js:1:1) SECRETMARK')
     );
+    logger.error(
+      'frame-only message',
+      {},
+      new Error('    at evil (/x.js:1:1) SECRETMARK')
+    );
 
-    expect(lines).toHaveLength(2);
+    expect(lines).toHaveLength(3);
     for (const { line } of lines) {
       expect(line).not.toContain('SECRETMARK');
       expect(line).not.toContain('the river');
       expect(line).not.toContain('evil');
     }
     for (const entry of parsed(lines)) {
-      expect(
-        entry.error.frames.every((frame: string) => frame.startsWith('at '))
-      ).toBe(true);
+      expect(entry.error).not.toHaveProperty('frames');
+      expect(entry.error).not.toHaveProperty('stack');
     }
   });
 
-  it('drops a stack without the reported header and caps frames', () => {
-    expect(
-      errorStackFrames('Error: real\n    at /app/x.js:1:1', 'Other: header')
-    ).toEqual([]);
-    expect(
-      errorStackFrames('Error: real\n    at /app/x.js:1:1', 'Error: real')
-    ).toEqual(['at /app/x.js:1:1']);
+  it('never logs a message V8 cached before the message changed', () => {
+    const error = new Error('insert failed at the river SECRETMARK');
+    // Reading `.stack` first lets V8 render and cache a stack that still holds
+    // the original message, so frame extraction cannot be trusted afterwards.
+    expect(error.stack).toContain('SECRETMARK');
+    error.message = 'Error: safe prefix';
+    const { lines, logger } = capture();
+    logger.error('cached stack', {}, error);
 
-    const stack = [
-      'Error: too many',
-      ...Array.from(
-        { length: 25 },
-        (_, index) => `    at fn${index} (/app/x.js:${index + 1}:1)`
-      ),
-    ].join('\n');
-    expect(errorStackFrames(stack, 'Error: too many')).toHaveLength(10);
+    expect(lines).toHaveLength(1);
+    const entry = parsed(lines)[0];
+    expect(entry.error).toEqual({ name: 'Error' });
+    expect(entry.error).not.toHaveProperty('frames');
+    expect(entry.error).not.toHaveProperty('stack');
+    expect(entry.error).not.toHaveProperty('message');
+    expect(lines[0].line).not.toContain('SECRETMARK');
+    expect(lines[0].line).not.toContain('the river');
+    expect(lines[0].line).not.toContain('safe prefix');
   });
 
   it('extracts only a safe machine code, including from a nested cause', () => {
@@ -394,7 +398,7 @@ describe('structured request logs (#143)', () => {
     });
     expect(entry.error).toMatchObject({ name: 'DrizzleQueryError' });
     expect(entry.error.code).toBe('SQLITE_CONSTRAINT_FOREIGNKEY');
-    expect(entry.error.frames.length).toBeGreaterThan(0);
+    expect(entry.error).not.toHaveProperty('frames');
     expect(entry.error.message).toBeUndefined();
     expect(entry.error.stack).toBeUndefined();
     expect(entry.error.params).toBeUndefined();

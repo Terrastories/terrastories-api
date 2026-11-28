@@ -437,9 +437,9 @@ export function createHonoApp(options: FoundationOptions) {
     const requestId = c.get('requestId');
     const startedAt = c.get('requestStartedAt');
     // A server-side id joins the response to exactly this line. The error
-    // object is reduced by the logger to class name, safe code and stack
-    // frames: messages (Drizzle embeds bound parameters) and raw stacks never
-    // reach a log sink.
+    // object is reduced by the logger to class name and safe code: messages
+    // (Drizzle embeds bound parameters), stacks and frames never reach a log
+    // sink.
     const errorId = crypto.randomUUID();
     logger.error(
       'http.error',

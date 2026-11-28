@@ -66,6 +66,14 @@ import { HonoAuthRepository } from './repositories/hono-auth.repository.js';
 import { HonoAuthService } from './services/hono-auth.service.js';
 import { CONFLICT_BODY } from './services/community-writes.service.js';
 import type { WorkersPlan } from './config/v2-runtime.js';
+import { createJsonLogger, type Logger } from './shared/observability/log.js';
+import {
+  CLIENT_REQUEST_ID_HEADER,
+  ERROR_ID_HEADER,
+  REQUEST_ID_HEADER,
+  requestLog,
+  requestRoute,
+} from './shared/observability/request-log.js';
 
 /** JSON API: nothing loads, nothing frames it, downloads are sandboxed. */
 const V2_CONTENT_SECURITY_POLICY =
@@ -194,6 +202,12 @@ export interface FoundationOptions {
    * deadline) so a Node shutdown can await it before closing the database.
    */
   trackWork?: (work: Promise<unknown>) => void;
+  /**
+   * Structured logger (#143). Every line goes through the single redaction
+   * pass in `shared/observability/log.ts`; the Node entrypoint supplies
+   * `LOG_LEVEL`, Workers use the content-free default.
+   */
+  logger?: Logger;
 }
 const preloginSchema = z
   .object({
@@ -274,11 +288,14 @@ export type FoundationHonoEnv = {
     actor: FoundationUser;
     sessionKind: SessionKind;
     sessionTokenHash: string;
+    requestId: string;
+    requestStartedAt: number;
   };
 };
 
 export function createHonoApp(options: FoundationOptions) {
   const app = new Hono<FoundationHonoEnv>();
+  const logger = options.logger ?? createJsonLogger();
   const service = new HonoFoundationService(
     options.repository,
     options.storage
@@ -324,6 +341,9 @@ export function createHonoApp(options: FoundationOptions) {
     )
       throw new Error('Invalid CORS origin');
   }
+  // Registered first so every response — including early refusals, error
+  // responses and CORS preflights — carries the correlation id and one line.
+  app.use('*', requestLog(logger));
   // Registered before CORS so a preflight that CORS answers itself still
   // carries the headers.
   app.use('*', v2SecurityHeaders(options.trustProxy));
@@ -338,8 +358,14 @@ export function createHonoApp(options: FoundationOptions) {
         'x-content-sha256',
         'x-amz-checksum-sha256',
         'x-amz-content-sha256',
+        'x-request-id',
       ],
-      exposeHeaders: ['ETag'],
+      exposeHeaders: [
+        'ETag',
+        REQUEST_ID_HEADER,
+        CLIENT_REQUEST_ID_HEADER,
+        ERROR_ID_HEADER,
+      ],
     })
   );
   const cookie = {
@@ -407,12 +433,35 @@ export function createHonoApp(options: FoundationOptions) {
       return c.json({ error: 'Service unavailable' }, 503);
     await next();
   });
-  app.onError(() =>
-    Response.json(
+  app.onError((error, c) => {
+    const requestId = c.get('requestId');
+    const startedAt = c.get('requestStartedAt');
+    // A server-side id joins the response to exactly this line. The error
+    // object is reduced by the logger to class name and safe code: messages
+    // (Drizzle embeds bound parameters), stacks and frames never reach a log
+    // sink.
+    const errorId = crypto.randomUUID();
+    logger.error(
+      'http.error',
+      {
+        requestId,
+        errorId,
+        method: c.req.method,
+        route: requestRoute(c),
+        status: 503,
+        durationMs:
+          typeof startedAt === 'number' ? Date.now() - startedAt : undefined,
+      },
+      error
+    );
+    const headers: Record<string, string> = { 'Cache-Control': 'no-store' };
+    if (requestId) headers[REQUEST_ID_HEADER] = requestId;
+    headers[ERROR_ID_HEADER] = errorId;
+    return Response.json(
       { error: 'Service unavailable' },
-      { status: 503, headers: { 'Cache-Control': 'no-store' } }
-    )
-  );
+      { status: 503, headers }
+    );
+  });
   app.notFound((c) => c.json({ error: 'Not found' }, 404));
   app.get('/health', (c) => c.json({ status: 'ok' }));
   app.get('/ready', async (c) => {

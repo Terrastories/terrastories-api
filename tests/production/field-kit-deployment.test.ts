@@ -163,7 +163,8 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
       expect(envContent).toContain('OFFLINE_MODE=true');
       expect(envContent).toContain('SYNC_ENABLED=true');
       expect(envContent).toContain('CACHE_STRATEGY=aggressive');
-      expect(envContent).toContain('LOG_LEVEL=error'); // Minimize resource usage
+      // info keeps the request records the 5xx-rate alert is computed from.
+      expect(envContent).toContain('LOG_LEVEL=info');
 
       // Should use SQLite for portability
       expect(envContent).toContain('DATABASE_URL=./field-kit-data.db');

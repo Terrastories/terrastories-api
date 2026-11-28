@@ -31,6 +31,7 @@ import {
   validateNodeV2Runtime,
   v2RuntimeModeNotice,
 } from './config/v2-runtime.js';
+import { createJsonLogger, parseLogLevel } from './shared/observability/log.js';
 
 // #150: refuse to start on insecure/default production configuration before
 // any adapter or database is opened. Messages name settings, never values.
@@ -78,6 +79,7 @@ const app = createHonoApp({
   erasureStore,
   repository,
   readinessTimeoutMs,
+  logger: createJsonLogger({ level: parseLogLevel(process.env.LOG_LEVEL) }),
   trackWork: (work) => void trackInFlight(inFlight, work),
   // Prelogin HMAC key (SPEC-V2 §7 step 1). Validated by the runtime gate in
   // production-like modes; prelogin fails closed when absent.

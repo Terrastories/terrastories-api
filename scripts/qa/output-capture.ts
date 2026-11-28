@@ -5,10 +5,10 @@ import { runJourneys } from './runner.js';
  * #191: run the persona journeys with every output channel captured, so the
  * wrapper's assertion can prove cultural content (seeded story titles,
  * descriptions, place and speaker names) never reaches log output. The Hono
- * app has no logging seam — `src/hono-app.ts` answers errors without logging
- * anything and the Explore adapter logs nothing — and this keeps that true
- * against both console calls and direct stream writes: standard Node/server
- * loggers (pino and friends) write to `process.stdout`/`process.stderr` and
+ * app emits structured request lines (#143) that carry only method, route
+ * shape, status, duration and a correlation id — never bodies or content —
+ * and this keeps that guarantee true against both console calls and direct
+ * stream writes: standard Node/server loggers (pino and friends) write to `process.stdout`/`process.stderr` and
  * bypass `console` entirely. Captured writes are not forwarded while the
  * journeys run (the window belongs to the assertion, not the terminal), and
  * every original — console methods and stream writes alike, restored with

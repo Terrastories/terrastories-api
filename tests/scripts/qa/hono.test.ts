@@ -42,8 +42,9 @@ describe('Hono V2 persona acceptance', () => {
         'legacy-v1': { passed: 0, failed: 0 },
       });
       // #191: no cultural content may appear in any console or stream line
-      // the app emitted while serving the journeys (empty today: the app
-      // logs nothing, which this assertion keeps true).
+      // the app emitted while serving the journeys. The V2 app now emits one
+      // structured request line per request (#143), so this keeps the
+      // content-free guarantee true rather than relying on silence.
       expect(
         lines.filter((line) =>
           HONO_PERSONA_CULTURAL_STRINGS.some((text) => line.includes(text))

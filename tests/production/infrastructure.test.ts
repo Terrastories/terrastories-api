@@ -278,7 +278,8 @@ describe('Production Infrastructure Validation - Phase 1', () => {
       const prodCompose = await fs.readFile('docker-compose.prod.yml', 'utf-8');
 
       expect(prodCompose).toContain('NODE_ENV=production');
-      expect(prodCompose).toContain('LOG_LEVEL=warn');
+      // info keeps the request records the 5xx-rate alert is computed from.
+      expect(prodCompose).toContain('LOG_LEVEL=info');
       expect(prodCompose).toContain('HOT_RELOAD=false');
     });
   });

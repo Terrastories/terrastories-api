@@ -429,6 +429,13 @@ export function replayAccountChanges(
           name: string;
         }>
       ).map((c) => c.name);
+    const communityIdsNow = new Set(
+      (
+        restored.prepare('SELECT id FROM communities').all() as Array<{
+          id: number;
+        }>
+      ).map((r) => Number(r.id))
+    );
     for (const spec of RECONCILED_TABLES) {
       if (!hasTable(frozen, spec.name) || !hasTable(restored, spec.name))
         continue;
@@ -444,10 +451,19 @@ export function replayAccountChanges(
       );
       const tally = { copied: 0, skipped: 0 };
       for (const r of rowsF) {
-        const dangling = spec.userColumns.some(
-          (c) =>
-            r[c] !== null && r[c] !== undefined && !userIdsNow.has(Number(r[c]))
-        );
+        // Skip (and count) rows naming a user or a community that has no
+        // restored row (created after the backup): inserting them would fail
+        // the foreign key and roll back the whole replay.
+        const dangling =
+          spec.userColumns.some(
+            (c) =>
+              r[c] !== null &&
+              r[c] !== undefined &&
+              !userIdsNow.has(Number(r[c]))
+          ) ||
+          (r.community_id !== null &&
+            r.community_id !== undefined &&
+            !communityIdsNow.has(Number(r.community_id)));
         if (dangling) tally.skipped++;
         else {
           insert.run(r);

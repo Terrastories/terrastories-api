@@ -219,6 +219,37 @@ Restores are rehearsed in CI, offline, by `tests/drills/*.test.ts` (`npm run tes
 
 Replaced-table rows that name a user with no restored row (created after the backup) are skipped and counted in the output. There are no other membership, role, API-key or recovery-code tables; content tables (stories, places, files, `export_jobs`, `import_manifests`, map configs) are not authority state and are not reconciled. On PostgreSQL the same rules are applied by hand from the frozen database.
 
+**PostgreSQL: the same rules by hand.** Expose the frozen database's tables to the restored database as schema `frozen` (for example `postgres_fdw` with `IMPORT FOREIGN SCHEMA public LIMIT TO (communities, community_stewards, community_sovereignty_requests, community_archive_custody, installation_bootstrap, auth_throttle) FROM SERVER frozen INTO frozen`), then in one transaction, after the account replay: skip, never fail on, rows naming a community or user the restored database does not have.
+
+```sql
+BEGIN;
+DELETE FROM community_stewards;
+INSERT INTO community_stewards SELECT f.* FROM frozen.community_stewards f
+  WHERE f.community_id IN (SELECT id FROM communities) AND f.user_id IN (SELECT id FROM users)
+    AND (f.designated_by IS NULL OR f.designated_by IN (SELECT id FROM users));
+DELETE FROM community_sovereignty_requests;
+INSERT INTO community_sovereignty_requests SELECT f.* FROM frozen.community_sovereignty_requests f
+  WHERE f.community_id IN (SELECT id FROM communities)
+    AND (f.initiated_by IS NULL OR f.initiated_by IN (SELECT id FROM users))
+    AND (f.cancelled_by IS NULL OR f.cancelled_by IN (SELECT id FROM users));
+DELETE FROM community_archive_custody;
+INSERT INTO community_archive_custody SELECT f.* FROM frozen.community_archive_custody f
+  WHERE f.community_id IN (SELECT id FROM communities)
+    AND (f.custodian_user_id IS NULL OR f.custodian_user_id IN (SELECT id FROM users));
+DELETE FROM installation_bootstrap;
+INSERT INTO installation_bootstrap SELECT f.* FROM frozen.installation_bootstrap f
+  WHERE (f.community_id IS NULL OR f.community_id IN (SELECT id FROM communities))
+    AND (f.admin_user_id IS NULL OR f.admin_user_id IN (SELECT id FROM users));
+DELETE FROM auth_throttle;
+INSERT INTO auth_throttle SELECT f.* FROM frozen.auth_throttle f
+  WHERE f.community_id IS NULL OR f.community_id IN (SELECT id FROM communities);
+UPDATE communities c SET is_active = f.is_active, deprovisioned_at = f.deprovisioned_at,
+  public_stories = f.public_stories, beta = f.beta FROM frozen.communities f WHERE f.id = c.id;
+COMMIT;
+```
+
+Then run the `postgres` post-restore step (it purges credentials). Count the skipped rows (`SELECT count(*) FROM frozen.<table>` minus the restored count) and report them.
+
 **Not yet drilled (follow-ups, out of scope for #136's first delivery).** Restored-app media access on the D1 and PostgreSQL profiles (the SQLite drill covers it), and traffic-switch rollback around a restore. Erasure refusal and post-restore reconciliation are covered by `tests/hono/community-erasure-restore.test.ts` (#306), not by these drills.
 
 **Field-kit uploads.** `field-kit-backup.sh` copies every upload regardless of age and writes a manifest of all files; the drill ages a file past 7 days and asserts it restores byte-identical and that every manifest entry exists in the archive. Backup size grows with the media volume, so size the backup volume for a full copy per retained backup (`BACKUP_RETENTION_DAYS`). The script is POSIX sh (the backup service runs the app image, Alpine/BusyBox), takes a consistent online copy of every SQLite database (`scripts/ops/sqlite-backup.mjs`, never a raw file copy), fails the whole backup on any failed copy, and writes the archive mode 0600. After the uploads are copied it verifies that every active `files.storage_key` the backed-up database references exists in the archive (a file deleted between the database snapshot and the copy fails the backup); the archive is built under a hidden `.partial-` name and renamed only when complete. The backup service mounts `./tiles` at `/tiles`. The check runs whenever a database is backed up, even if the uploads directory is absent, and a query error fails the backup. One active `files` row whose bytes are permanently gone therefore blocks every later backup (the error names the key): resolve it by restoring the bytes from an earlier archive, or by deactivating or deleting that row through the application (never by editing the database by hand), then re-run the backup. Hidden `.partial-` leftovers of a killed run are removed by the same retention pass. Treat archives as content-bearing: they hold community content and password verifiers.

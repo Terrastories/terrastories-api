@@ -1074,4 +1074,74 @@ describe('SQLite field-kit restore drill (#136)', () => {
         .get(ids.viewerAlpha)
     ).toEqual({ t: null, r: null });
   });
+
+  it('skips authority rows of a community created after the backup instead of failing the replay', () => {
+    const { db } = restore('late-community', true);
+    const now = Date.now();
+    const lateId = Number(
+      live
+        .prepare(
+          "INSERT INTO communities (name, slug, locale, public_stories, is_active, created_at, updated_at) VALUES ('Late', 'late-community', 'en', 0, 1, ?, ?)"
+        )
+        .run(now, now).lastInsertRowid
+    );
+    live
+      .prepare(
+        'INSERT INTO community_stewards (community_id, user_id, designated_by, designated_at, updated_at) VALUES (?, ?, ?, ?, ?)'
+      )
+      .run(lateId, ids.viewerAlpha, ids.adminAlpha, now, now);
+    live
+      .prepare(
+        "INSERT INTO community_sovereignty_requests (id, community_id, kind, state, initiated_by, initiated_by_role, requested_at, notice_ends_at, updated_at) VALUES ('req-late', ?, 'withdrawal', 'notice', ?, 'admin', ?, ?, ?)"
+      )
+      .run(lateId, ids.adminAlpha, now, now + 86_400_000, now);
+    live
+      .prepare(
+        "INSERT INTO community_archive_custody (community_id, custodian_type, custodian_user_id, status, retention_until, created_at, updated_at) VALUES (?, 'steward', ?, 'held', ?, ?, ?)"
+      )
+      .run(lateId, ids.viewerAlpha, now + 86_400_000, now, now);
+    live
+      .prepare(
+        "INSERT INTO auth_throttle (key, kind, community_id, failures, window_started_at) VALUES ('late-throttle', 'account', ?, 1, ?)"
+      )
+      .run(lateId, now);
+    try {
+      const result = replayAccountChanges(live, db, auditMarker);
+      expect(result.reconciled.community_stewards).toEqual({
+        copied: 0,
+        skipped: 1,
+      });
+      expect(result.reconciled.community_sovereignty_requests).toEqual({
+        copied: 1,
+        skipped: 1,
+      });
+      expect(result.reconciled.community_archive_custody).toEqual({
+        copied: 1,
+        skipped: 1,
+      });
+      expect(result.reconciled.auth_throttle.skipped).toBe(1);
+      // The replay still applied the account changes (the viewer is disabled again).
+      expect(
+        db
+          .prepare('SELECT is_active FROM users WHERE id = ?')
+          .get(ids.viewerAlpha)
+      ).toEqual({ is_active: 0 });
+    } finally {
+      live
+        .prepare('DELETE FROM community_stewards WHERE community_id = ?')
+        .run(lateId);
+      live
+        .prepare(
+          'DELETE FROM community_sovereignty_requests WHERE community_id = ?'
+        )
+        .run(lateId);
+      live
+        .prepare('DELETE FROM community_archive_custody WHERE community_id = ?')
+        .run(lateId);
+      live
+        .prepare('DELETE FROM auth_throttle WHERE community_id = ?')
+        .run(lateId);
+      live.prepare('DELETE FROM communities WHERE id = ?').run(lateId);
+    }
+  });
 });

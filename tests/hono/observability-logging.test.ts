@@ -22,6 +22,7 @@ import { parseJsonc } from '../../scripts/staging/guards.js';
 import {
   createJsonLogger,
   describeError,
+  errorStackFrames,
   parseLogLevel,
   redact,
   REDACTED,
@@ -77,6 +78,7 @@ describe('central redaction (#143)', () => {
       'AKIAEXAMPLE',
       'derived-key-material',
       'verifier-salt-material',
+      'password-salt-material',
     ];
     const output = redact({
       password: 'hunter2-password',
@@ -90,6 +92,7 @@ describe('central redaction (#143)', () => {
       nested: {
         derivedKey: 'derived-key-material',
         salt: 'verifier-salt-material',
+        passwordSalt: 'password-salt-material',
       },
       note: 'sent Authorization: Bearer Bearer-credential-abc; cookie ts_session=ts_session-cookie-value',
     });
@@ -114,6 +117,50 @@ describe('central redaction (#143)', () => {
     expect(safe.frames?.every((frame) => frame.startsWith('at '))).toBe(true);
     expect(safe).not.toHaveProperty('message');
     expect(safe).not.toHaveProperty('stack');
+  });
+
+  it('drops message text that looks like a stack frame', () => {
+    const { lines, logger } = capture();
+    logger.error(
+      'newline message',
+      {},
+      new Error('insert failed\nat the river elders sang SECRETMARK')
+    );
+    logger.error(
+      'fake frame message',
+      {},
+      new Error('insert failed\n    at evil (/x.js:1:1) SECRETMARK')
+    );
+
+    expect(lines).toHaveLength(2);
+    for (const { line } of lines) {
+      expect(line).not.toContain('SECRETMARK');
+      expect(line).not.toContain('the river');
+      expect(line).not.toContain('evil');
+    }
+    for (const entry of parsed(lines)) {
+      expect(
+        entry.error.frames.every((frame: string) => frame.startsWith('at '))
+      ).toBe(true);
+    }
+  });
+
+  it('drops a stack without the reported header and caps frames', () => {
+    expect(
+      errorStackFrames('Error: real\n    at /app/x.js:1:1', 'Other: header')
+    ).toEqual([]);
+    expect(
+      errorStackFrames('Error: real\n    at /app/x.js:1:1', 'Error: real')
+    ).toEqual(['at /app/x.js:1:1']);
+
+    const stack = [
+      'Error: too many',
+      ...Array.from(
+        { length: 25 },
+        (_, index) => `    at fn${index} (/app/x.js:${index + 1}:1)`
+      ),
+    ].join('\n');
+    expect(errorStackFrames(stack, 'Error: too many')).toHaveLength(10);
   });
 
   it('extracts only a safe machine code, including from a nested cause', () => {
@@ -392,8 +439,17 @@ describe('structured request logs (#143)', () => {
 });
 
 describe('Workers invocation logs stay off (#143)', () => {
+  interface WranglerLogs {
+    enabled?: boolean;
+    invocation_logs?: boolean;
+  }
   interface WranglerScope {
-    observability?: { enabled?: boolean; traces?: { enabled?: boolean } };
+    observability?: {
+      enabled?: boolean;
+      traces?: { enabled?: boolean };
+      logs?: WranglerLogs;
+    };
+    // Legacy pre-`observability.logs` placement; Wrangler would ignore it.
     logs?: unknown;
   }
   const config = parseJsonc(
@@ -408,8 +464,15 @@ describe('Workers invocation logs stay off (#143)', () => {
     for (const scope of scopes) {
       expect(scope.observability?.enabled).toBe(false);
       expect(scope.observability?.traces?.enabled).toBe(false);
-      // Invocation logs include raw URLs and bypass application redaction.
       expect(scope.logs).toBeUndefined();
+      // Workers Logs are `observability.logs`, and invocation logs would
+      // record raw URLs outside the application's redaction pass. Whenever a
+      // scope turns them on, `invocation_logs` must be explicitly false.
+      const logs = scope.observability?.logs;
+      expect(logs?.invocation_logs).not.toBe(true);
+      if (scope.observability?.enabled || logs?.enabled) {
+        expect(logs?.invocation_logs).toBe(false);
+      }
     }
   });
 });

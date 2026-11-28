@@ -33,9 +33,10 @@ const MAX_STRING_LENGTH = 2048;
 
 /**
  * Sensitive object keys, matched after lowercasing and removing `-`, `_`, `.`
- * so `derivedKey`, `derived-key` and `derived_key` all match. Exact matches
- * (`code`, `salt`, `cookie`) are listed separately because broad substring
- * matching would redact ordinary fields (for example `statusCode`).
+ * so `derivedKey`, `derived-key` and `derived_key` all match; `salt` also
+ * covers `passwordSalt` and `verifierSalt`. Exact matches (`code`, `cookie`)
+ * are listed separately because broad substring matching would redact
+ * ordinary fields (for example `statusCode`).
  */
 const SENSITIVE_KEY_PARTS: readonly string[] = [
   'password',
@@ -46,6 +47,7 @@ const SENSITIVE_KEY_PARTS: readonly string[] = [
   'cookie',
   'credential',
   'derivedkey',
+  'salt',
   'signature',
   'apikey',
   'privatekey',
@@ -58,7 +60,6 @@ const SENSITIVE_KEY_PARTS: readonly string[] = [
 
 const SENSITIVE_EXACT_KEYS = new Set([
   'code',
-  'salt',
   'cookie',
   'authorization',
   'auth',
@@ -84,8 +85,16 @@ const VALUE_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
 const SAFE_ERROR_NAME = /^[A-Za-z_$][A-Za-z0-9_$.]{0,79}$/;
 /** Machine-readable codes only: SQLSTATE, SQLite/D1 kind, Node errno. */
 const SAFE_ERROR_CODE = /^[A-Za-z0-9_.-]{1,40}$/;
-const MAX_STACK_FRAMES = 20;
+const MAX_STACK_FRAMES = 10;
 const MAX_FRAME_LENGTH = 200;
+
+/**
+ * Strict V8 frame: `at fn (file:line:col)` or `at file:line:col`, with a URL,
+ * node builtin, absolute/Windows path, eval or anonymous location and nothing
+ * after the location.
+ */
+const STACK_FRAME =
+  /^at (?:[^()]+ \()?(?:file:\/\/|node:|\/|[A-Za-z]:\\|\[eval\]|<anonymous>)[^()]*:\d+:\d+\)?$/;
 
 /**
  * The only error shape a log line may carry. Deliberately has no `message`,
@@ -118,28 +127,48 @@ export function safeErrorCode(error: unknown): string | undefined {
 }
 
 /**
- * Keep only stack frames (`at function (file:line:col)`). The message line
- * that starts a V8 stack — and every `Caused by` caption — is dropped.
+ * Keep only strict stack frames (`at function (file:line:col)`). V8 starts the
+ * stack with `${name}: ${message}`, and a Drizzle message embeds its bound
+ * parameters, so that prefix is removed by length — never searched for — and a
+ * stack that does not start with the reported header is discarded whole. That
+ * also removes a message line shaped like a frame, and every `Caused by`
+ * caption, before any line is considered.
  */
-export function errorStackFrames(stack: string | undefined): string[] {
-  if (!stack) return [];
+export function errorStackFrames(
+  stack: string | undefined,
+  header?: string
+): string[] {
+  if (!stack || !header || !stack.startsWith(header)) return [];
   const frames: string[] = [];
-  for (const line of stack.split('\n')) {
+  for (const line of stack.slice(header.length).split('\n')) {
     const frame = line.trim();
-    if (!frame.startsWith('at ')) continue;
+    if (!STACK_FRAME.test(frame)) continue;
     frames.push(redactString(frame).slice(0, MAX_FRAME_LENGTH));
     if (frames.length >= MAX_STACK_FRAMES) break;
   }
   return frames;
 }
 
+/** The first line V8 writes into `error.stack`, for the length strip above. */
+function errorStackHeader(error: Error): string | undefined {
+  try {
+    const name = String(error.name);
+    const message = String(error.message ?? '');
+    return message.length > 0 ? `${name}: ${message}` : name;
+  } catch {
+    // A throwing name/message getter must drop the stack, never the log line.
+    return undefined;
+  }
+}
+
 /** Class name, safe code and frames of an exception; never its message. */
 export function describeError(error: unknown): SafeError {
   const name = errorClassName(error);
   const code = safeErrorCode(error);
-  const frames = errorStackFrames(
-    error instanceof Error ? error.stack : undefined
-  );
+  const frames =
+    error instanceof Error
+      ? errorStackFrames(error.stack, errorStackHeader(error))
+      : [];
   return {
     name,
     ...(code === undefined ? {} : { code }),

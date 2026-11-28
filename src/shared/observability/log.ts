@@ -6,6 +6,11 @@
  * credentials and identifiers are never passed in by callers, and anything
  * that does reach a log line is scrubbed here.
  *
+ * Exception messages are never logged, not even redacted: a Drizzle query
+ * error embeds the bound SQL parameters (story titles, bodies, URLs) in its
+ * message, so an `Error` is reduced to its class name, a safe machine-readable
+ * code and stack frames without the message line.
+ *
  * Node-only and Workers-only APIs are deliberately absent; `console` and the
  * standard `Date`/`JSON` globals exist in both runtimes.
  */
@@ -72,6 +77,92 @@ const VALUE_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/(\/export\/download\/)[A-Za-z0-9_-]{16,}/gi, `$1${REDACTED}`],
 ];
 
+/**
+ * Error class names are identifiers; anything else (for example a custom
+ * `name` built from user input) is replaced with `Error`.
+ */
+const SAFE_ERROR_NAME = /^[A-Za-z_$][A-Za-z0-9_$.]{0,79}$/;
+/** Machine-readable codes only: SQLSTATE, SQLite/D1 kind, Node errno. */
+const SAFE_ERROR_CODE = /^[A-Za-z0-9_.-]{1,40}$/;
+const MAX_STACK_FRAMES = 20;
+const MAX_FRAME_LENGTH = 200;
+
+/**
+ * The only error shape a log line may carry. Deliberately has no `message`,
+ * `stack`, `query`, `params` or `cause` field.
+ */
+export interface SafeError {
+  name: string;
+  code?: string;
+  frames?: string[];
+}
+
+/** First safe machine code in the `cause` chain (D1 nests its code there). */
+export function safeErrorCode(error: unknown): string | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (current === null || typeof current !== 'object') return undefined;
+    const record = current as {
+      code?: unknown;
+      errno?: unknown;
+      cause?: unknown;
+    };
+    const candidate = record.code ?? record.errno;
+    if (typeof candidate === 'number' && Number.isFinite(candidate))
+      return String(candidate);
+    if (typeof candidate === 'string' && SAFE_ERROR_CODE.test(candidate.trim()))
+      return candidate.trim();
+    current = record.cause;
+  }
+  return undefined;
+}
+
+/**
+ * Keep only stack frames (`at function (file:line:col)`). The message line
+ * that starts a V8 stack — and every `Caused by` caption — is dropped.
+ */
+export function errorStackFrames(stack: string | undefined): string[] {
+  if (!stack) return [];
+  const frames: string[] = [];
+  for (const line of stack.split('\n')) {
+    const frame = line.trim();
+    if (!frame.startsWith('at ')) continue;
+    frames.push(redactString(frame).slice(0, MAX_FRAME_LENGTH));
+    if (frames.length >= MAX_STACK_FRAMES) break;
+  }
+  return frames;
+}
+
+/** Class name, safe code and frames of an exception; never its message. */
+export function describeError(error: unknown): SafeError {
+  const name = errorClassName(error);
+  const code = safeErrorCode(error);
+  const frames = errorStackFrames(
+    error instanceof Error ? error.stack : undefined
+  );
+  return {
+    name,
+    ...(code === undefined ? {} : { code }),
+    ...(frames.length === 0 ? {} : { frames }),
+  };
+}
+
+/**
+ * Prefer the class name set by the code (a driver sets `name`, Drizzle leaves
+ * it as `Error`), never a value derived from request text.
+ */
+function errorClassName(error: unknown): string {
+  if (!(error instanceof Error)) return 'Error';
+  if (error.name !== 'Error' && SAFE_ERROR_NAME.test(error.name))
+    return error.name;
+  const constructorName = error.constructor?.name;
+  return constructorName &&
+    constructorName !== 'Object' &&
+    SAFE_ERROR_NAME.test(constructorName)
+    ? constructorName
+    : 'Error';
+}
+
 function isSensitiveKey(key: string): boolean {
   const normalized = key.toLowerCase().replace(/[-_.\s]/g, '');
   if (SENSITIVE_EXACT_KEYS.has(normalized)) return true;
@@ -89,19 +180,8 @@ export function redactString(value: string): string {
     : result;
 }
 
-function redactError(
-  error: Error,
-  seen: WeakSet<object>,
-  depth: number
-): Record<string, unknown> {
-  const record: Record<string, unknown> = {
-    name: redactValue(error.name, seen, depth + 1),
-    message: redactValue(error.message, seen, depth + 1),
-  };
-  if (typeof error.stack === 'string') {
-    record.stack = redactValue(error.stack, seen, depth + 1);
-  }
-  return record;
+function redactError(error: Error): SafeError {
+  return describeError(error);
 }
 
 function redactValue(
@@ -122,7 +202,7 @@ function redactValue(
     case 'symbol':
       return '[unserializable]';
   }
-  if (value instanceof Error) return redactError(value, seen, depth);
+  if (value instanceof Error) return redactError(value);
   if (value instanceof Date)
     return Number.isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString();
   if (depth >= MAX_DEPTH) return '[max depth]';
@@ -146,7 +226,8 @@ function redactValue(
  * The single redaction function every log line passes through. Returns a
  * JSON-safe copy: sensitive keys become `[REDACTED]`, known credential shapes
  * inside strings are scrubbed, cycles/depth/entry counts are bounded, and
- * `Error` objects keep only name/message/stack (all scrubbed).
+ * `Error` objects keep only class name, safe code and stack frames — never
+ * the message (see `describeError`).
  */
 export function redact(value: unknown): unknown {
   // The body is a plain object here, so the cycle tracker only needs to span

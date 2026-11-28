@@ -38,7 +38,10 @@ services:
       # Shared legacy config loader (src/shared/config) still requires these.
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
       - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET is required}
-      - LOG_LEVEL=warn
+      # info keeps the per-request `http.request` lines the 5xx-rate alert is
+      # computed from (docs/OPERATIONS-GOVERNANCE.md 9.4); warn/error would
+      # suppress them and the rate could not be computed.
+      - LOG_LEVEL=info
       - HOT_RELOAD=false
       # Use PostgreSQL for production
       - DATABASE_URL=${DATABASE_URL_PROD:-postgresql://terrastories:${POSTGRES_PASSWORD}@db:5432/terrastories}

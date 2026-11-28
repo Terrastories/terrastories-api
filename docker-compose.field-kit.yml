@@ -36,7 +36,10 @@ services:
       # Shared legacy config loader (src/shared/config) still requires these.
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
       - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET is required}
-      - LOG_LEVEL=warn
+      # info keeps the per-request `http.request` lines the 5xx-rate alert is
+      # computed from (docs/OPERATIONS-GOVERNANCE.md 9.4); request lines are
+      # one small JSON object each.
+      - LOG_LEVEL=info
       - HOT_RELOAD=false
       # Enable offline mode
       - OFFLINE_MODE=true

@@ -99,13 +99,16 @@ const isDirectUploadId = (value: string): boolean =>
   DIRECT_UPLOAD_ID_PATTERN.test(value);
 
 /** Stable, distinct File id for replay lookup after the journal is removed. */
-async function deriveDirectUploadFileId(uploadId: string): Promise<string> {
+export async function deriveDirectUploadFileId(
+  uploadId: string
+): Promise<string> {
   const input = new TextEncoder().encode(
     `terrastories:direct-upload-file:v1:${uploadId}`
   );
   const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', input));
-  // RFC 9562 version 8: a custom, name-derived UUID with deterministic layout.
-  bytes[6] = (bytes[6]! & 0x0f) | 0x80;
+  // Name-derived UUID stamped as version 5 (RFC 9562 variant bits), so every
+  // existing v1-5 UUID check (e.g. CSV import media ids) accepts it.
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = Array.from(bytes, (byte) =>
     byte.toString(16).padStart(2, '0')

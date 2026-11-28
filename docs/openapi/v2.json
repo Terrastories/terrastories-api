@@ -12472,7 +12472,7 @@
       "post": {
         "operationId": "post_v2_media_uploads_By_id_complete",
         "summary": "Complete the upload",
-        "description": "Complete the upload: body `{ parts: [{ partNumber, etag }] }`. Assembles the object (R2 `CompleteMultipartUpload` through the binding, or streamed concatenation on Node), verifies stored size against the session and the first 8 KiB type signature, re-runs authorization, applies the §6.7 reuse rule and creates the `File` row (and `user_photo` binding) exactly like `POST /v2/media` (`checksum` is verified on Node and null on Workers); response is the `POST /v2/media` `201` body. `400` missing/mismatched parts or signature, `404` unknown/other-tenant/finished session, `409` row already exists, `410` expired session, `422` size or (Node) whole-file digest mismatch; every failure removes the staged object",
+        "description": "Complete the upload: body `{ parts: [{ partNumber, etag }] }`. Assembles the object (R2 `CompleteMultipartUpload` through the binding, or streamed concatenation on Node), verifies stored size against the session and the first 8 KiB type signature, re-runs authorization, applies the §6.7 reuse rule and creates the `File` row (and `user_photo` binding) exactly like `POST /v2/media` (`checksum` is verified on Node and null on Workers); response is the `POST /v2/media` `201` body. `400` missing/mismatched parts or signature, `404` unknown/other-tenant session or a replay by anyone other than the uploader, `409` the upload is already assembled (concurrent or sequential replay, with a bounded re-read of a racing Workers completion; a same-tenant file row is honored only for its uploader), `503 upload_completion_pending` with `Retry-After` when R2 reports the upload already completed but the winner's `File` row is not yet visible, `410` expired session, `422` size or (Node) whole-file digest mismatch; every failure removes the staged object",
         "tags": ["media"],
         "security": [
           {
@@ -12819,7 +12819,7 @@
             "cookieAuth": []
           }
         ],
-        "x-registry-caller": "Session owner (the uploader) or `own-admin`",
+        "x-registry-caller": "Session owner (the uploader) only; `own-admin` may abort but never send parts",
         "responses": {
           "200": {
             "description": "OK"

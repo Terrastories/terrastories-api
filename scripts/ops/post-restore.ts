@@ -126,7 +126,10 @@ export interface ReplayResult {
   /** 'verified': the restored backup is an ancestor of the frozen DB; 'skipped': --allow-unrelated-lineage. */
   lineage: 'verified' | 'skipped';
   /** Authority tables replaced from the frozen database: rows copied / skipped (they reference users with no restored row). */
-  reconciled: Record<string, { copied: number; skipped: number }>;
+  reconciled: Record<
+    string,
+    { copied: number; skipped: number; actorsNulled: number }
+  >;
   /** Communities whose enable/withdrawal flags were copied from the frozen database. */
   communitiesUpdated: number[];
 }
@@ -139,25 +142,42 @@ export interface ReplayResult {
  * export_tokens, users reset/remember tokens) are purged instead, never
  * reconciled. See docs/OPERATIONS-GOVERNANCE.md 6.5 for the full rule list.
  */
-export const RECONCILED_TABLES: Array<{ name: string; userColumns: string[] }> =
-  [
-    // A removed steward must not regain withdrawal/erasure authority.
-    { name: 'community_stewards', userColumns: ['user_id', 'designated_by'] },
-    // Withdrawal/erasure notices and their cancellation/completion state.
-    {
-      name: 'community_sovereignty_requests',
-      userColumns: ['initiated_by', 'cancelled_by'],
-    },
-    // Archive custody holder and destruction state.
-    {
-      name: 'community_archive_custody',
-      userColumns: ['custodian_user_id'],
-    },
-    // Installation bootstrap (setup done, first administrator).
-    { name: 'installation_bootstrap', userColumns: ['admin_user_id'] },
-    // Brute-force counters and blocks must not reset on restore.
-    { name: 'auth_throttle', userColumns: [] },
-  ];
+export const RECONCILED_TABLES: Array<{
+  name: string;
+  /** User references that must exist, else the row is skipped. */
+  userColumns: string[];
+  /** Nullable actor references set to NULL when the user has no restored row. */
+  nullableUserColumns?: string[];
+}> = [
+  // A removed steward must not regain withdrawal/erasure authority.
+  {
+    name: 'community_stewards',
+    userColumns: ['user_id'],
+    nullableUserColumns: ['designated_by'],
+  },
+  // Withdrawal/erasure notices and their cancellation/completion state.
+  {
+    name: 'community_sovereignty_requests',
+    userColumns: [],
+    // A pending request must survive even when its initiator/canceller was
+    // created after the backup: keep the request, drop the actor reference.
+    nullableUserColumns: ['initiated_by', 'cancelled_by'],
+  },
+  // Archive custody holder and destruction state.
+  {
+    name: 'community_archive_custody',
+    userColumns: [],
+    nullableUserColumns: ['custodian_user_id'],
+  },
+  // Installation bootstrap (setup done, first administrator).
+  {
+    name: 'installation_bootstrap',
+    userColumns: [],
+    nullableUserColumns: ['admin_user_id'],
+  },
+  // Brute-force counters and blocks must not reset on restore.
+  { name: 'auth_throttle', userColumns: [] },
+];
 
 /** Community flags that enable, hide or withdraw a community. */
 export const COMMUNITY_AUTHORITY_COLUMNS = [
@@ -449,7 +469,7 @@ export function replayAccountChanges(
       const insert = restored.prepare(
         `INSERT INTO ${spec.name} (${shared.join(', ')}) VALUES (${shared.map((c) => '@' + c).join(', ')})`
       );
-      const tally = { copied: 0, skipped: 0 };
+      const tally = { copied: 0, skipped: 0, actorsNulled: 0 };
       for (const r of rowsF) {
         // Skip (and count) rows naming a user or a community that has no
         // restored row (created after the backup): inserting them would fail
@@ -466,11 +486,88 @@ export function replayAccountChanges(
             !communityIdsNow.has(Number(r.community_id)));
         if (dangling) tally.skipped++;
         else {
+          for (const c of spec.nullableUserColumns ?? [])
+            if (
+              r[c] !== null &&
+              r[c] !== undefined &&
+              !userIdsNow.has(Number(r[c]))
+            ) {
+              r[c] = null;
+              tally.actorsNulled++;
+            }
           insert.run(r);
           tally.copied++;
         }
       }
       result.reconciled[spec.name] = tally;
+    }
+    // Claim history: bootstrap.repository.ts (communityUnclaimedAndEmptySql)
+    // treats a consumed claim token or a successful claim audit entry as proof
+    // a community was claimed. Copy the frozen consumed/superseded tokens and
+    // the successful-claim audit evidence for restored communities, or a
+    // community claimed after the backup becomes claimable again.
+    if (
+      hasTable(frozen, 'claim_tokens') &&
+      hasTable(restored, 'claim_tokens')
+    ) {
+      const tokenCols = [
+        'id',
+        'community_id',
+        'token_hash',
+        'issued_by',
+        'created_at',
+        'expires_at',
+        'consumed_at',
+        'consumed_by',
+        'superseded_at',
+      ];
+      const upsertToken = restored.prepare(
+        `INSERT INTO claim_tokens (${tokenCols.join(', ')}) VALUES (${tokenCols.map((c) => '@' + c).join(', ')})
+         ON CONFLICT(id) DO UPDATE SET consumed_at = excluded.consumed_at, consumed_by = excluded.consumed_by, superseded_at = excluded.superseded_at`
+      );
+      let copied = 0;
+      let skipped = 0;
+      for (const r of frozen
+        .prepare(
+          `SELECT ${tokenCols.join(', ')} FROM claim_tokens WHERE consumed_at IS NOT NULL OR superseded_at IS NOT NULL`
+        )
+        .all() as Array<Record<string, unknown>>) {
+        if (!communityIdsNow.has(Number(r.community_id))) {
+          skipped++;
+          continue;
+        }
+        for (const c of ['issued_by', 'consumed_by'])
+          if (r[c] !== null && !userIdsNow.has(Number(r[c]))) r[c] = null;
+        upsertToken.run(r);
+        copied++;
+      }
+      result.reconciled.claim_tokens = { copied, skipped, actorsNulled: 0 };
+    }
+    if (hasTable(frozen, 'audit_entries')) {
+      const maxRestoredAudit = (
+        restored
+          .prepare('SELECT coalesce(max(id), 0) AS m FROM audit_entries')
+          .get() as { m: number }
+      ).m;
+      const auditCols = columnsOf(restored, 'audit_entries').filter((c) =>
+        columnsOf(frozen, 'audit_entries').includes(c)
+      );
+      const putAudit = restored.prepare(
+        `INSERT INTO audit_entries (${auditCols.join(', ')}) VALUES (${auditCols.map((c) => '@' + c).join(', ')})`
+      );
+      let copied = 0;
+      for (const r of frozen
+        .prepare(
+          `SELECT ${auditCols.join(', ')} FROM audit_entries WHERE id > ? AND action = 'claim_token.consume' AND outcome = 'success'`
+        )
+        .all(maxRestoredAudit) as Array<Record<string, unknown>>) {
+        if (!communityIdsNow.has(Number(r.community_id))) continue;
+        if (r.actor_id !== null && !userIdsNow.has(Number(r.actor_id)))
+          r.actor_id = null;
+        putAudit.run(r);
+        copied++;
+      }
+      result.reconciled.claim_audit = { copied, skipped: 0, actorsNulled: 0 };
     }
     // Community enable/withdrawal flags.
     const cc = COMMUNITY_AUTHORITY_COLUMNS.join(', ');
@@ -540,6 +637,14 @@ function parseArgs(argv: string[]): {
   const [profile, ...rest] = argv;
   if (profile === 'postgres') {
     // The credential must never ride in argv (process list, shell history).
+    if (
+      rest.some(
+        (a) => a.startsWith('--replay-from') || a === '--after-audit-id'
+      )
+    )
+      throw new Error(
+        'post-restore: automated account/authority replay is SQLite-only; on PostgreSQL only the credential purge runs. Keep the restored database out of service and follow the manual review checklist in docs/OPERATIONS-GOVERNANCE.md 6.5 (follow-up: "PG post-restore replay").'
+      );
     if (rest.length > 0)
       throw new Error(
         'postgres takes no arguments: set DATABASE_URL in the environment'

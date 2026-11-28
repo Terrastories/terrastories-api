@@ -26,6 +26,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
+import { sql } from 'drizzle-orm';
+import { communityUnclaimedAndEmptySql } from '../../src/repositories/bootstrap.repository.js';
 import { CommunitySovereigntyRepository } from '../../src/repositories/community-sovereignty.repository.js';
 import { createHonoApp } from '../../src/hono-app.js';
 import { createLocalStorage } from '../../src/node-storage.js';
@@ -995,7 +997,7 @@ describe('SQLite field-kit restore drill (#136)', () => {
       })
     ).not.toBeNull();
     const result = replayAccountChanges(live, db, auditMarker);
-    expect(result.reconciled.community_stewards).toEqual({
+    expect(result.reconciled.community_stewards).toMatchObject({
       copied: 0,
       skipped: 0,
     });
@@ -1012,7 +1014,7 @@ describe('SQLite field-kit restore drill (#136)', () => {
     expect(
       db.prepare('SELECT state FROM community_sovereignty_requests').get()
     ).toEqual({ state: 'cancelled' });
-    expect(result.reconciled.community_sovereignty_requests).toEqual({
+    expect(result.reconciled.community_sovereignty_requests).toMatchObject({
       copied: 1,
       skipped: 0,
     });
@@ -1107,15 +1109,15 @@ describe('SQLite field-kit restore drill (#136)', () => {
       .run(lateId, now);
     try {
       const result = replayAccountChanges(live, db, auditMarker);
-      expect(result.reconciled.community_stewards).toEqual({
+      expect(result.reconciled.community_stewards).toMatchObject({
         copied: 0,
         skipped: 1,
       });
-      expect(result.reconciled.community_sovereignty_requests).toEqual({
+      expect(result.reconciled.community_sovereignty_requests).toMatchObject({
         copied: 1,
         skipped: 1,
       });
-      expect(result.reconciled.community_archive_custody).toEqual({
+      expect(result.reconciled.community_archive_custody).toMatchObject({
         copied: 1,
         skipped: 1,
       });
@@ -1142,6 +1144,85 @@ describe('SQLite field-kit restore drill (#136)', () => {
         .prepare('DELETE FROM auth_throttle WHERE community_id = ?')
         .run(lateId);
       live.prepare('DELETE FROM communities WHERE id = ?').run(lateId);
+    }
+  });
+
+  it('keeps a pending request whose initiator was created after the backup, with the actor reference nulled', () => {
+    const { db } = restore('late-actor', true);
+    const now = Date.now();
+    const lateUser = Number(
+      live
+        .prepare(
+          "INSERT INTO users (email, first_name, last_name, role, community_id, is_active, password_hash, created_at, updated_at) VALUES ('late-actor@alpha.drill.test', 'L', 'A', 'admin', ?, 1, 'x', ?, ?)"
+        )
+        .run(ids.alpha, now, now).lastInsertRowid
+    );
+    live
+      .prepare(
+        "INSERT INTO community_sovereignty_requests (id, community_id, kind, state, initiated_by, initiated_by_role, requested_at, updated_at) VALUES ('req-actor', ?, 'erasure', 'requested', ?, 'admin', ?, ?)"
+      )
+      .run(ids.alpha, lateUser, now, now);
+    try {
+      const result = replayAccountChanges(live, db, auditMarker);
+      expect(
+        result.reconciled.community_sovereignty_requests.actorsNulled
+      ).toBe(1);
+      expect(
+        db
+          .prepare(
+            "SELECT community_id, state, initiated_by FROM community_sovereignty_requests WHERE id = 'req-actor'"
+          )
+          .get()
+      ).toEqual({
+        community_id: ids.alpha,
+        state: 'requested',
+        initiated_by: null,
+      });
+    } finally {
+      live
+        .prepare(
+          "DELETE FROM community_sovereignty_requests WHERE id = 'req-actor'"
+        )
+        .run();
+      live.prepare('DELETE FROM users WHERE id = ?').run(lateUser);
+    }
+  });
+
+  it('a community claimed after the backup is not claimable again after the replay', () => {
+    const { db } = restore('claim-history', true);
+    const now = Date.now();
+    // An empty community present in the backup and live (claimable at backup time).
+    for (const target of [live, db])
+      target
+        .prepare(
+          "INSERT INTO communities (id, name, slug, locale, public_stories, is_active, created_at, updated_at) VALUES (777, 'claimme', 'claimme', 'en', 0, 1, ?, ?)"
+        )
+        .run(1, 1);
+    const claimable = (target: Sqlite.Database) =>
+      (
+        drizzle(target).get(
+          sql`select ${communityUnclaimedAndEmptySql(777)} as v`
+        ) as { v: number }
+      ).v;
+    // After the backup the community is claimed live: token consumed + audit.
+    live
+      .prepare(
+        "INSERT INTO claim_tokens (community_id, token_hash, issued_by, created_at, expires_at, consumed_at) VALUES (777, 'claimed-hash', ?, ?, ?, ?)"
+      )
+      .run(ids.adminAlpha, now - 1000, now + 3600_000, now);
+    live
+      .prepare(
+        "INSERT INTO audit_entries (community_id, actor_id, action, resource_type, resource_ids, outcome, created_at) VALUES (777, ?, 'claim_token.consume', 'claim_token', '[]', 'success', ?)"
+      )
+      .run(ids.adminAlpha, now);
+    try {
+      expect(claimable(db)).toBe(1); // hazard: the restored copy looks unclaimed
+      replayAccountChanges(live, db, auditMarker);
+      expect(claimable(db)).toBe(0);
+    } finally {
+      live.prepare('DELETE FROM claim_tokens WHERE community_id = 777').run();
+      live.prepare('DELETE FROM audit_entries WHERE community_id = 777').run();
+      live.prepare('DELETE FROM communities WHERE id = 777').run();
     }
   });
 });

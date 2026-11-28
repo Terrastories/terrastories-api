@@ -22,13 +22,13 @@ function makeDb(file: string, active: number) {
   db.exec(`
     CREATE TABLE sessions (id TEXT);
     CREATE TABLE login_codes (used_at INTEGER, superseded_at INTEGER);
-    CREATE TABLE claim_tokens (consumed_at INTEGER, superseded_at INTEGER);
+    CREATE TABLE claim_tokens (id INTEGER PRIMARY KEY, community_id INTEGER, token_hash TEXT, issued_by INTEGER, created_at INTEGER, expires_at INTEGER, consumed_at INTEGER, consumed_by INTEGER, superseded_at INTEGER);
     CREATE TABLE export_tokens (id INTEGER);
-    CREATE TABLE audit_entries (id INTEGER PRIMARY KEY, action TEXT, actor_id INTEGER, resource_type TEXT, resource_ids TEXT, outcome TEXT);
+    CREATE TABLE audit_entries (id INTEGER PRIMARY KEY, community_id INTEGER, action TEXT, actor_id INTEGER, resource_type TEXT, resource_ids TEXT, outcome TEXT);
     CREATE TABLE users (id INTEGER PRIMARY KEY, reset_password_token TEXT, reset_password_sent_at INTEGER, remember_created_at INTEGER, created_at INTEGER, is_active INTEGER, role TEXT, community_id INTEGER, password_hash TEXT, password_algorithm TEXT, password_salt TEXT, password_params TEXT, password_verifier TEXT, email TEXT, email_normalized TEXT, username TEXT, username_normalized TEXT, display_name TEXT, first_name TEXT, last_name TEXT);
     CREATE TABLE communities (id INTEGER PRIMARY KEY, slug TEXT, created_at INTEGER, is_active INTEGER, deprovisioned_at INTEGER, public_stories INTEGER, beta INTEGER);
     INSERT INTO communities (id, slug, created_at) VALUES (1, 'a', 1);
-    INSERT INTO audit_entries VALUES (1, 'auth.login', NULL, NULL, '[]', 'success');
+    INSERT INTO audit_entries (id, action, resource_ids, outcome) VALUES (1, 'auth.login', '[]', 'success');
     INSERT INTO sessions VALUES ('s');
     INSERT INTO users (id, is_active, role) VALUES (1, ${active}, 'viewer');
   `);
@@ -41,7 +41,7 @@ describe('post-restore CLI', () => {
     const restored = makeDb(path.join(dir, 'restored.db'), 1);
     const frozen = makeDb(path.join(dir, 'frozen.db'), 0);
     frozen.exec(
-      "INSERT INTO audit_entries VALUES (5, 'user.update', 9, 'user', '[1]', 'success')"
+      "INSERT INTO audit_entries (id, action, actor_id, resource_type, resource_ids, outcome) VALUES (5, 'user.update', 9, 'user', '[1]', 'success')"
     );
     frozen.close();
     restored.close();
@@ -70,7 +70,7 @@ describe('post-restore CLI', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'tsapi-drill-pr-'));
     const restored = makeDb(path.join(dir, 'restored.db'), 1);
     restored.exec(
-      'DELETE FROM audit_entries; INSERT INTO login_codes VALUES (NULL, NULL); INSERT INTO claim_tokens VALUES (NULL, NULL);'
+      'DELETE FROM audit_entries; INSERT INTO login_codes VALUES (NULL, NULL); INSERT INTO claim_tokens (id) VALUES (1);'
     );
     restored.close();
     makeDb(path.join(dir, 'frozen.db'), 0).close();
@@ -124,6 +124,16 @@ describe('post-restore CLI', () => {
       expect(r.stderr).toContain('non-negative integer');
     }
   );
+
+  it('postgres: refuses --replay-from instead of doing a partial job', () => {
+    const r = run(
+      ['postgres', '--replay-from', 'frozen.dump', '--after-audit-id', '0'],
+      { DATABASE_URL: 'postgresql://u:secret@localhost/db' }
+    );
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('SQLite-only');
+    expect(r.stderr).not.toContain('secret');
+  });
 
   it('postgres: refuses a URL on the command line and requires DATABASE_URL', () => {
     const viaArgv = run(['postgres', 'postgresql://u:p@localhost/db']);

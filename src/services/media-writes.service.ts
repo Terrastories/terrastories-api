@@ -837,6 +837,13 @@ export class MediaWritesService {
       userPhotoTargetUserId: binding.userPhotoTargetUserId,
     });
 
+    if (dbOutcome.status === 'existing') {
+      if (dbOutcome.record.file.storageKey !== storageKey) {
+        await cleanupPartialStorage(storageKey);
+      }
+      return { status: 409, body: CONFLICT_BODY };
+    }
+
     if (dbOutcome.status === 'forbidden') {
       await cleanupPartialStorage(storageKey);
       await this.auditDecision({

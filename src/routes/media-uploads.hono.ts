@@ -15,9 +15,20 @@ import {
 } from './community-writes.hono.js';
 import type { DirectUploadService } from '../services/direct-upload.service.js';
 
-function respond(c: Context, result: { status: number; body?: unknown }) {
+function respond(
+  c: Context,
+  result: {
+    status: number;
+    body?: unknown;
+    headers?: Record<string, string>;
+  }
+) {
   if (result.status === 204) return c.body(null, 204);
-  return c.json(result.body as never, result.status as 200);
+  return c.json(
+    result.body as never,
+    result.status as 200,
+    result.headers ?? undefined
+  );
 }
 
 export function registerMediaUploadRoutes(

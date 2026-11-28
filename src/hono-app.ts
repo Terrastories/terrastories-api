@@ -339,7 +339,8 @@ export function createHonoApp(options: FoundationOptions) {
         'x-amz-checksum-sha256',
         'x-amz-content-sha256',
       ],
-      exposeHeaders: ['ETag'],
+      // Retry-After: clients read it on 429 and 503 upload_completion_pending.
+      exposeHeaders: ['ETag', 'Retry-After'],
     })
   );
   const cookie = {

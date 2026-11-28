@@ -43,6 +43,7 @@ import {
   isForeignKeyConstraintError,
   isNotNullConstraintError,
 } from './community-writes.repository.js';
+import { isUniqueConstraintError } from './user-management.repository.js';
 
 export interface StoredFileRecord {
   id: string;
@@ -77,8 +78,23 @@ export interface CreatedUploadedFileResult {
 
 export type CreateUploadedMediaDbOutcome =
   | { status: 'created'; record: CreatedUploadedFileResult }
+  | { status: 'existing'; record: CreatedUploadedFileResult }
   | { status: 'forbidden' }
   | { status: 'invalid_target' };
+
+interface CreateUploadedMediaInput {
+  fileId: string;
+  actor: FoundationUser;
+  storageKey: string;
+  originalName: string;
+  mimeType: string;
+  byteSize: number;
+  /** Null when the bytes were not hashed server-side (Workers direct upload). */
+  checksum: string | null;
+  metadata: Record<string, unknown> | null;
+  userPhotoTargetUserId: number | null;
+  now?: Date;
+}
 
 export type DeleteFileDbOutcome =
   | { status: 'deleted'; storageKey: string; communityId: number | null }
@@ -257,19 +273,119 @@ export class MediaWritesRepository {
     });
   }
 
-  async createUploadedMedia(input: {
-    fileId: string;
-    actor: FoundationUser;
-    storageKey: string;
-    originalName: string;
-    mimeType: string;
-    byteSize: number;
-    /** Null when the bytes were not hashed server-side (Workers direct upload). */
-    checksum: string | null;
-    metadata: Record<string, unknown> | null;
-    userPhotoTargetUserId: number | null;
-    now?: Date;
-  }): Promise<CreateUploadedMediaDbOutcome> {
+  async createUploadedMedia(
+    input: CreateUploadedMediaInput
+  ): Promise<CreateUploadedMediaDbOutcome> {
+    try {
+      return await this.createUploadedMediaOnce(input);
+    } catch (error) {
+      // The unique File insert is the concurrency arbiter on every backend.
+      // Drizzle wraps PostgreSQL/D1 failures, so inspect the cause chain before
+      // re-reading the committed winner outside the failed transaction/batch.
+      if (!isUniqueConstraintError(error)) throw error;
+      const record = await this.readUploadedMedia(input);
+      if (!record) throw error;
+      return { status: 'existing', record };
+    }
+  }
+
+  private async readUploadedMedia(
+    input: CreateUploadedMediaInput
+  ): Promise<CreatedUploadedFileResult | null> {
+    const { files, attachments } = this.tables;
+    const [file] = await this.db
+      .select({
+        id: files.id,
+        communityId: files.communityId,
+        storageKey: files.storageKey,
+        path: files.path,
+        originalName: files.originalName,
+        mimeType: files.mimeType,
+        byteSize: files.byteSize,
+        size: files.size,
+        checksum: files.checksum,
+        uploadedBy: files.uploadedBy,
+        metadata: files.metadata,
+        isActive: files.isActive,
+        culturalRestrictions: files.culturalRestrictions,
+        createdAt: files.createdAt,
+      })
+      .from(files)
+      .where(eq(files.id, input.fileId))
+      .limit(1);
+    if (
+      !file ||
+      !file.isActive ||
+      file.culturalRestrictions !== null ||
+      file.communityId !== input.actor.communityId ||
+      file.uploadedBy !== input.actor.id ||
+      (file.storageKey ?? file.path) !== input.storageKey ||
+      file.originalName !== input.originalName ||
+      file.mimeType !== input.mimeType ||
+      Number(file.byteSize ?? file.size) !== input.byteSize ||
+      file.checksum !== input.checksum
+    ) {
+      return null;
+    }
+
+    const storedFile: StoredFileRecord = {
+      id: file.id,
+      communityId: file.communityId,
+      storageKey: file.storageKey ?? file.path,
+      originalName: file.originalName,
+      mimeType: file.mimeType,
+      byteSize: Number(file.byteSize ?? file.size),
+      checksum: file.checksum,
+      uploadedBy: file.uploadedBy,
+      metadata: parseMetadataField(file.metadata),
+      isActive: file.isActive,
+      culturalRestrictions: file.culturalRestrictions,
+      createdAt: toDate(file.createdAt),
+    };
+    if (input.userPhotoTargetUserId === null) {
+      return { file: storedFile, attachment: null };
+    }
+
+    const [attachment] = await this.db
+      .select({
+        id: attachments.id,
+        ordinal: attachments.ordinal,
+        createdAt: attachments.createdAt,
+      })
+      .from(attachments)
+      .where(
+        and(
+          input.actor.communityId === null
+            ? isNull(attachments.communityId)
+            : eq(attachments.communityId, input.actor.communityId),
+          eq(attachments.fileId, input.fileId),
+          eq(attachments.ownerType, 'user'),
+          eq(attachments.ownerId, input.userPhotoTargetUserId),
+          eq(attachments.role, 'user_photo')
+        )
+      )
+      .limit(1);
+    if (!attachment) return null;
+    return {
+      file: storedFile,
+      attachment: {
+        id: attachment.id,
+        fileId: input.fileId,
+        ownerType: 'user',
+        ownerId: input.userPhotoTargetUserId,
+        role: 'user_photo',
+        ordinal: Number(attachment.ordinal ?? 0),
+        mimeType: input.mimeType,
+        byteSize: input.byteSize,
+        originalName: input.originalName,
+        createdAt: toDate(attachment.createdAt),
+      },
+    };
+  }
+
+  private async createUploadedMediaOnce(
+    input: CreateUploadedMediaInput
+  ): Promise<CreateUploadedMediaDbOutcome> {
     const now = input.now ?? new Date();
     const nowMs = now.getTime();
     const isPg = dialectOf(this.connection) === 'postgresql';
@@ -923,6 +1039,31 @@ export class MediaWritesRepository {
         },
       };
     });
+  }
+
+  /**
+   * Replay lookup for a completed direct upload: only the same tenant and the
+   * same uploader may see the winning row as a conflict. A same-community
+   * administrator, or any other actor, gets "not found" instead.
+   */
+  async resolveUploaderMedia(
+    fileId: string,
+    actor: FoundationUser
+  ): Promise<boolean> {
+    const [file] = await this.db
+      .select({
+        communityId: this.tables.files.communityId,
+        uploadedBy: this.tables.files.uploadedBy,
+        isActive: this.tables.files.isActive,
+      })
+      .from(this.tables.files)
+      .where(eq(this.tables.files.id, fileId))
+      .limit(1);
+    return (
+      file?.isActive === true &&
+      file.communityId === actor.communityId &&
+      file.uploadedBy === actor.id
+    );
   }
 
   async resolveAuthorizedMedia(

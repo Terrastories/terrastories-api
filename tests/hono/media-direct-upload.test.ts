@@ -3,7 +3,15 @@
  * in-memory storage (Node profiles) and `presigned` mode over a fake R2 bucket
  * plus a fake S3 endpoint that verifies the SigV4 URL (Workers profile).
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import { createHash, randomBytes } from 'node:crypto';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
@@ -17,6 +25,7 @@ import {
 import { tablesFor } from '../../src/db/dialect.js';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
+import { MediaWritesRepository } from '../../src/repositories/media-writes.repository.js';
 import { MediaCleanupCoordinator } from '../../src/services/media-cleanup.service.js';
 import { createR2Storage } from '../../src/worker.js';
 import {
@@ -262,6 +271,10 @@ describe('direct multipart media upload (#286)', () => {
     sqlite.close();
   });
 
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   describe('api mode (Node profiles)', () => {
     it('uploads a >100 MiB video through parts, verifies every digest, and creates the File row', async () => {
       const bytes = sparseMp4(101 * MIB + 5);
@@ -310,14 +323,64 @@ describe('direct multipart media upload (#286)', () => {
       expect(
         [...apiStore.store.keys()].filter((k) => k.includes('.multipart/'))
       ).toEqual([]);
-      // A finished session cannot be completed again.
+      // A finished session replays as a stable conflict, never a duplicate.
       const again = await post(
         apiApp,
         `/v2/media/uploads/${session.id}/complete`,
         cookies.editor!,
         { parts: etags }
       );
-      expect(again.status).toBe(404);
+      expect(again.status).toBe(409);
+      expect(await again.json()).toEqual({ error: 'Conflict' });
+    });
+
+    it('replays a finished upload as 409 to its uploader and 404 to another actor', async () => {
+      const bytes = sparseMp4(1024);
+      const { res, json } = await createSession(apiApp, cookies.editor!, bytes);
+      expect(res.status).toBe(201);
+      const session = DirectUploadSessionResponseSchema.parse(json).data;
+      const target = session.parts[0]!;
+      const chunk = bytes;
+      const put = await apiApp.request(target.url, {
+        method: 'PUT',
+        headers: {
+          ...target.headers,
+          cookie: cookies.editor!,
+          'content-length': String(chunk.byteLength),
+        },
+        body: chunk,
+      });
+      expect(put.status).toBe(200);
+      const etag = put.headers.get('etag')!.replace(/"/g, '');
+      const done = await post(
+        apiApp,
+        `/v2/media/uploads/${session.id}/complete`,
+        cookies.editor!,
+        { parts: [{ partNumber: 1, etag }] }
+      );
+      expect(done.status).toBe(201);
+      // Completion removed the journal; the derived File id still resolves.
+      expect(
+        [...apiStore.store.keys()].filter((k) => k.includes('.multipart/'))
+      ).toEqual([]);
+
+      const ownerReplay = await post(
+        apiApp,
+        `/v2/media/uploads/${session.id}/complete`,
+        cookies.editor!,
+        { parts: [{ partNumber: 1, etag }] }
+      );
+      expect(ownerReplay.status).toBe(409);
+      expect(await ownerReplay.json()).toEqual({ error: 'Conflict' });
+
+      const adminReplay = await post(
+        apiApp,
+        `/v2/media/uploads/${session.id}/complete`,
+        cookies.admin!,
+        { parts: [{ partNumber: 1, etag }] }
+      );
+      expect(adminReplay.status).toBe(404);
+      expect(await adminReplay.json()).toEqual({ error: 'Not found' });
     });
 
     it('keeps request metadata through completion', async () => {
@@ -727,6 +790,17 @@ describe('direct multipart media upload (#286)', () => {
       expect(
         [...bucket.objects.keys()].filter((k) => k.includes('.multipart/'))
       ).toEqual([]);
+      const replay = await post(
+        r2App,
+        `/v2/media/uploads/${session.id}/complete`,
+        cookies.editor!,
+        { parts: etags }
+      );
+      expect(replay.status).toBe(409);
+      expect(await replay.json()).toEqual({ error: 'Conflict' });
+      expect(
+        (await bucket.head(`communities/${ids.own}/media/${file.id}`))?.size
+      ).toBe(bytes.byteLength);
       // The API part route is api-mode only.
       const apiPart = await r2App.request(
         `${API}/v2/media/uploads/${session.id}/parts/1`,
@@ -737,6 +811,122 @@ describe('direct multipart media upload (#286)', () => {
         }
       );
       expect(apiPart.status).toBe(404);
+    });
+
+    it('resolves a racing R2 completion to the winner row instead of a bad-parts 400', async () => {
+      const bytes = sparseMp4(1024);
+      const { json } = await createSession(r2App, cookies.editor!, bytes);
+      const session = DirectUploadSessionResponseSchema.parse(json).data;
+      const target = session.parts[0]!;
+      const put = await fakeS3.putPart(target, bytes);
+      expect(put.status).toBe(200);
+      const etags = [{ partNumber: 1, etag: put.etag! }];
+
+      // Winner completed in R2 but is held before its File row commits.
+      const originalCreate =
+        MediaWritesRepository.prototype.createUploadedMedia;
+      let winnerAtInsert!: () => void;
+      let releaseWinner!: () => void;
+      const winnerReady = new Promise<void>((resolve) => {
+        winnerAtInsert = resolve;
+      });
+      const winnerGate = new Promise<void>((resolve) => {
+        releaseWinner = resolve;
+      });
+      let inserts = 0;
+      vi.spyOn(
+        MediaWritesRepository.prototype,
+        'createUploadedMedia'
+      ).mockImplementation(async function (
+        this: MediaWritesRepository,
+        ...args: Parameters<MediaWritesRepository['createUploadedMedia']>
+      ) {
+        inserts += 1;
+        if (inserts === 1) {
+          winnerAtInsert();
+          await winnerGate;
+        }
+        return originalCreate.call(this, ...args);
+      });
+
+      // The loser reaches R2 complete (a second resume) while the winner is
+      // still uncommitted; the first lookup after that is the loser's re-read
+      // and must still miss the winner's row. Release the insert only then, so
+      // the test proves the bounded re-read, not a lucky pre-insert lookup.
+      const originalResume = bucket.resumeMultipartUpload.bind(bucket);
+      let resumes = 0;
+      vi.spyOn(bucket, 'resumeMultipartUpload').mockImplementation(
+        (key, uploadId) => {
+          resumes += 1;
+          return originalResume(key, uploadId);
+        }
+      );
+      const originalResolve =
+        MediaWritesRepository.prototype.resolveUploaderMedia;
+      let lookups = 0;
+      let lookupsAfterSecondResume = 0;
+      let lookupsThatSawWinner = 0;
+      vi.spyOn(
+        MediaWritesRepository.prototype,
+        'resolveUploaderMedia'
+      ).mockImplementation(async function (
+        this: MediaWritesRepository,
+        ...args: Parameters<MediaWritesRepository['resolveUploaderMedia']>
+      ) {
+        const found = await originalResolve.call(this, ...args);
+        lookups += 1;
+        if (resumes >= 2) {
+          lookupsAfterSecondResume += 1;
+          if (found) lookupsThatSawWinner += 1;
+          else releaseWinner();
+        }
+        return found;
+      });
+
+      const responses = await Promise.all([
+        post(
+          r2App,
+          `/v2/media/uploads/${session.id}/complete`,
+          cookies.editor!,
+          {
+            parts: etags,
+          }
+        ),
+        post(
+          r2App,
+          `/v2/media/uploads/${session.id}/complete`,
+          cookies.editor!,
+          {
+            parts: etags,
+          }
+        ),
+      ]);
+      await winnerReady;
+
+      expect(responses.map((response) => response.status).sort()).toEqual([
+        201, 409,
+      ]);
+      const winner = responses.find((response) => response.status === 201)!;
+      const loser = responses.find((response) => response.status === 409)!;
+      expect(await loser.json()).toEqual({ error: 'Conflict' });
+      // The loser's 409 is the winner's row: more than one lookup happened,
+      // the first after the R2 race missed the row, and a later one saw the
+      // winner whose id is the single persisted row.
+      expect(lookups).toBeGreaterThanOrEqual(4);
+      expect(lookupsAfterSecondResume).toBeGreaterThanOrEqual(2);
+      expect(lookupsThatSawWinner).toBe(1);
+      const file = MediaUploadResponseSchema.parse(await winner.json()).data;
+      const files = await db
+        .select()
+        .from(tables.files)
+        .where(eq(tables.files.id, file.id));
+      expect(files).toHaveLength(1);
+      expect(files[0]!.id).toBe(file.id);
+      const stored = await bucket.get(files[0]!.storageKey!);
+      expect(new Uint8Array(await stored!.arrayBuffer())).toEqual(bytes);
+      expect(
+        [...bucket.objects.keys()].filter((k) => k.includes('.multipart/'))
+      ).toEqual([]);
     });
 
     it('avoids R2 UploadPart 501 and rejects tampered URLs and wrong bodies', async () => {
@@ -798,6 +988,9 @@ describe('direct multipart media upload (#286)', () => {
     });
 
     it('deletes the object and answers 422 when the assembled size differs from the session', async () => {
+      const mediaObjectsBefore = [...bucket.objects.keys()].filter((k) =>
+        k.includes('/media/')
+      ).length;
       const declared = sparseMp4(17 * MIB);
       const { json } = await createSession(r2App, cookies.editor!, declared);
       const session = DirectUploadSessionResponseSchema.parse(json).data;
@@ -826,7 +1019,7 @@ describe('direct multipart media upload (#286)', () => {
       expect(done.status).toBe(422);
       expect(
         [...bucket.objects.keys()].filter((k) => k.includes('/media/'))
-      ).toHaveLength(1);
+      ).toHaveLength(mediaObjectsBefore);
     });
 
     const uploadAllParts = async (
@@ -898,8 +1091,20 @@ describe('direct multipart media upload (#286)', () => {
         cookies.editor!,
         { parts: etags }
       );
-      expect(retried.status).toBe(400);
+      // Already assembled in R2 with no committed row anywhere: the retry
+      // must not look like a successful replay. It is a distinct retryable
+      // state, never the 409 that means "the winner's row exists".
+      expect(retried.status).toBe(503);
+      expect(await retried.json()).toEqual({
+        error: 'upload_completion_pending',
+      });
+      expect(retried.headers.get('retry-after')).toBe('2');
       expect(bucket.objects.has(key)).toBe(true);
+      const files = await db
+        .select({ id: tables.files.id })
+        .from(tables.files)
+        .where(eq(tables.files.storageKey, key));
+      expect(files).toEqual([]);
       const aborted = await r2App.request(
         `${API}/v2/media/uploads/${session.id}`,
         { method: 'DELETE', headers: { cookie: cookies.editor! } }

@@ -1319,10 +1319,10 @@ describe('media adversarial suite on the Hono V2 app (#140)', () => {
       expect(created.checksum).toBe(sha);
       const read = await get('/v2/media/' + created.id, cookies.editorA);
       expect(new Uint8Array(await read.arrayBuffer())).toEqual(video);
-      // A finished session is gone.
-      expect((await complete(owned.id, etag, cookies.editorA)()).status).toBe(
-        404
-      );
+      // A finished session replays as a conflict and keeps the winning bytes.
+      const replay = await complete(owned.id, etag, cookies.editorA)();
+      expect(replay.status).toBe(409);
+      expect(await replay.json()).toEqual({ error: 'Conflict' });
     });
 
     it('lets an admin of the same community abort a stale session', async () => {

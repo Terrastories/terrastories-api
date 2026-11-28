@@ -287,6 +287,17 @@ describe('V2 security response headers (#138)', () => {
     expectBaseline(res);
   });
 
+  it('exposes ETag and Retry-After to allowed cross-origin clients', async () => {
+    const res = await app.request(`${API_ORIGIN}/health`, {
+      headers: { origin: CLIENT_ORIGIN },
+    });
+    expect(res.headers.get('access-control-allow-origin')).toBe(CLIENT_ORIGIN);
+    const exposed = (res.headers.get('access-control-expose-headers') ?? '')
+      .split(',')
+      .map((h) => h.trim().toLowerCase());
+    expect(exposed).toEqual(expect.arrayContaining(['etag', 'retry-after']));
+  });
+
   it('sends HSTS only over https', async () => {
     const https = await app.request(`${API_ORIGIN}/health`);
     expect(https.headers.get('strict-transport-security')).toBe(HSTS);

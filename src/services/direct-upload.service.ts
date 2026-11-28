@@ -61,7 +61,12 @@ export const DIRECT_UPLOAD_TTL_SECONDS = 2 * 60 * 60;
 
 export type DirectUploadResult<T> =
   | MediaWriteResult<T>
-  | { status: 410 | 501; body: V2ErrorResponse };
+  | { status: 410 | 501; body: V2ErrorResponse }
+  | {
+      status: 503;
+      body: V2ErrorResponse;
+      headers: { 'Retry-After': string };
+    };
 
 const NOT_CONFIGURED_BODY: V2ErrorResponse = Object.freeze({
   error: 'Direct upload is not available on this deployment',
@@ -69,6 +74,47 @@ const NOT_CONFIGURED_BODY: V2ErrorResponse = Object.freeze({
 const EXPIRED_BODY: V2ErrorResponse = Object.freeze({
   error: 'Upload session expired',
 });
+/** R2 assembled the object but the winner's `files` row is not visible yet. */
+const COMPLETION_PENDING_BODY: V2ErrorResponse = Object.freeze({
+  error: 'upload_completion_pending',
+});
+
+/**
+ * A racing R2 completion reports "already completed/not found" before the
+ * winner's `files` row commits. Re-read that row for a short bounded window
+ * instead of turning the loser's race into a bad-parts 400.
+ */
+const COMPLETION_RACE_WAIT_MS = 2_000;
+const COMPLETION_RACE_POLL_MS = 25;
+/**
+ * Cap the re-reads as well as the elapsed time: Workers Free allows 50 D1
+ * queries per invocation, so a fast 2 s loop could exhaust the request budget.
+ */
+const COMPLETION_RACE_MAX_LOOKUPS = 20;
+const COMPLETION_RACE_RETRY_AFTER_SECONDS = 2;
+
+const DIRECT_UPLOAD_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const isDirectUploadId = (value: string): boolean =>
+  DIRECT_UPLOAD_ID_PATTERN.test(value);
+
+/** Stable, distinct File id for replay lookup after the journal is removed. */
+export async function deriveDirectUploadFileId(
+  uploadId: string
+): Promise<string> {
+  const input = new TextEncoder().encode(
+    `terrastories:direct-upload-file:v1:${uploadId}`
+  );
+  const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', input));
+  // Name-derived UUID stamped as version 5 (RFC 9562 variant bits), so every
+  // existing v1-5 UUID check (e.g. CSV import media ids) accepts it.
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) =>
+    byte.toString(16).padStart(2, '0')
+  ).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
 
 const tenantPrefixOf = (actor: FoundationUser): string =>
   actor.communityId !== null
@@ -114,13 +160,7 @@ export class DirectUploadService {
     rawId: string
   ): Promise<DirectUploadSession | null> {
     if (!this.adapter) return null;
-    if (
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
-        rawId
-      )
-    ) {
-      return null;
-    }
+    if (!isDirectUploadId(rawId)) return null;
     const session = await this.adapter.load(tenantPrefixOf(actor), rawId);
     if (!session) return null;
     const ownsIt = session.actorId === actor.id;
@@ -228,7 +268,7 @@ export class DirectUploadService {
     }
 
     const id = crypto.randomUUID();
-    const fileId = crypto.randomUUID();
+    const fileId = await deriveDirectUploadFileId(id);
     const now = this.now();
     const key =
       actor.communityId !== null
@@ -446,6 +486,35 @@ export class DirectUploadService {
     }
   }
 
+  private async completedUploadConflict(
+    actor: FoundationUser,
+    session: DirectUploadSession
+  ): Promise<{ status: 409; body: typeof CONFLICT_BODY } | null> {
+    if (!(await this.repository.resolveUploaderMedia(session.fileId, actor))) {
+      return null;
+    }
+    // The winning row owns the final object. Only staged parts/journal may be
+    // discarded, and cleanup failure must not turn an idempotent replay into 500.
+    await this.adapter!.discard(session).catch(() => {});
+    return { status: 409, body: CONFLICT_BODY };
+  }
+
+  /** Bounded re-read of a winner whose R2 completion landed before its row. */
+  private async waitForCompletedUploadConflict(
+    actor: FoundationUser,
+    session: DirectUploadSession
+  ): Promise<{ status: 409; body: typeof CONFLICT_BODY } | null> {
+    const deadline = Date.now() + COMPLETION_RACE_WAIT_MS;
+    for (let lookups = 0; lookups < COMPLETION_RACE_MAX_LOOKUPS; lookups++) {
+      const conflict = await this.completedUploadConflict(actor, session);
+      if (conflict || Date.now() >= deadline) return conflict;
+      await new Promise((resolve) =>
+        setTimeout(resolve, COMPLETION_RACE_POLL_MS)
+      );
+    }
+    return null;
+  }
+
   async completeUpload(
     actor: FoundationUser,
     rawId: string,
@@ -455,11 +524,22 @@ export class DirectUploadService {
     const adapter = this.adapter;
     if (!adapter) return { status: 501, body: NOT_CONFIGURED_BODY };
     const session = await this.resolveSession(actor, rawId);
-    if (!session || session.actorId !== actor.id) {
+    if (!session) {
+      if (isDirectUploadId(rawId)) {
+        const fileId = await deriveDirectUploadFileId(rawId);
+        if (await this.repository.resolveUploaderMedia(fileId, actor)) {
+          return { status: 409, body: CONFLICT_BODY };
+        }
+      }
+      return { status: 404, body: NOT_FOUND_BODY };
+    }
+    if (session.actorId !== actor.id) {
       return { status: 404, body: NOT_FOUND_BODY };
     }
     const gate = await this.media.uploadGate(actor);
     if (gate) return gate;
+    const conflict = await this.completedUploadConflict(actor, session);
+    if (conflict) return conflict;
     if (
       session.expiresAt + DIRECT_UPLOAD_COMPLETE_GRACE_SECONDS * 1000 <=
       this.now().getTime()
@@ -473,11 +553,6 @@ export class DirectUploadService {
         status: 400,
         body: makeValidationErrorBody(zodErrorToValidationFields(parsed.error)),
       };
-    }
-    // An upload that already produced its row must not be completed twice (and
-    // its bytes must never be treated as rollback garbage).
-    if (await this.repository.resolveAuthorizedMedia(session.fileId, actor)) {
-      return { status: 409, body: CONFLICT_BODY };
     }
     // Authorization is re-decided now: the actor's role may have changed.
     const binding = this.media.parseUploadBindingFields(
@@ -500,7 +575,28 @@ export class DirectUploadService {
         completed = true;
       } catch (error) {
         if (error instanceof DirectUploadError) {
+          if (error.kind === 'already_completed') {
+            // R2 says the object is already assembled: wait for the winner's
+            // row (it may still be committing) and replay the same 409.
+            const existing = await this.waitForCompletedUploadConflict(
+              actor,
+              session
+            );
+            if (existing) return existing;
+            // No row is visible yet (the winner may be slow, or it crashed
+            // after R2 assembled the object). Never answer 409 here: a 409
+            // would read as a successful replay although no File row exists.
+            return {
+              status: 503,
+              body: COMPLETION_PENDING_BODY,
+              headers: {
+                'Retry-After': String(COMPLETION_RACE_RETRY_AFTER_SECONDS),
+              },
+            };
+          }
           if (error.kind === 'invalid_parts') {
+            const existing = await this.completedUploadConflict(actor, session);
+            if (existing) return existing;
             // Parts can be re-sent and completion retried; nothing is lost.
             return {
               status: 400,
@@ -527,6 +623,9 @@ export class DirectUploadService {
         }
         throw error;
       }
+
+      const existing = await this.completedUploadConflict(actor, session);
+      if (existing) return existing;
 
       if (size !== session.byteSize) {
         await this.discardStaged(actor, session, true);
@@ -589,11 +688,15 @@ export class DirectUploadService {
       });
       if (result.status === 201) {
         await adapter.discard(session).catch(() => {});
+      } else if (result.status === 409) {
+        await adapter.discard(session).catch(() => {});
       } else {
         await this.discardStaged(actor, session, true);
       }
       return result;
     } catch (error) {
+      const existing = await this.completedUploadConflict(actor, session);
+      if (existing) return existing;
       await this.discardStaged(actor, session, completed);
       if (error instanceof ReusedMediaRejectionError) {
         await this.audit(actor, 'media.upload', String(actor.id), 'denied');
